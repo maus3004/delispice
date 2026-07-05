@@ -1,0 +1,6 @@
+# Dependencies now live at the repo root for a single source of truth.
+# This file redirects there so existing habits keep working:
+#   Desktop (native window):  pip install -r ../requirements-desktop.txt
+#   Web only:                 pip install -r ../requirements.txt
+#   Server (gunicorn):        pip install -r ../deploy/requirements-server.txt
+-r ../requirements-desktop.txt

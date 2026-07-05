@@ -1,0 +1,378 @@
+acronym,team_name,school_name,confidence,conference
+LSU_TIG,LSU Tigers,Louisiana State University,h,SEC
+LOU_CAR,Louisville Cardinals,University of Louisville,h,ACC
+DUK_BLU,Duke Blue Devils,Duke University,h,ACC
+ARK_RAZ,Arkansas Razorbacks,University of Arkansas,h,SEC
+NOR_TAR,North Carolina Tar Heels,University of North Carolina at Chapel Hill,h,ACC
+GEO_BUL,Georgia Bulldogs,University of Georgia,h,SEC
+TEX_AGG,Texas A&M Aggies,Texas A&M University,h,SEC
+OLE_REB,Ole Miss Rebels,University of Mississippi,h,SEC
+IU,Indiana Hoosiers,Indiana University Bloomington,h,BIG10
+VAN_COM,Vanderbilt Commodores,Vanderbilt University,h,SEC
+COA_CHA,Coastal Carolina Chanticleers,Coastal Carolina University,h,SBELT
+WAK_DEA,Wake Forest Demon Deacons,Wake Forest University,h,ACC
+ALA_CRI,Alabama Crimson Tide,University of Alabama,h,SEC
+CLE_TIG,Clemson Tigers,Clemson University,h,ACC
+KEN_WIL,Kentucky Wildcats,University of Kentucky,h,SEC
+GIT_YEL,Georgia Tech Yellow Jackets,Georgia Institute of Technology,h,ACC
+TCU_HFG,TCU Horned Frogs,Texas Christian University,h,BIG12
+FLO_SEM,Florida State Seminoles,Florida State University,h,ACC
+MSU_BDG,Mississippi State Bulldogs,Mississippi State University,h,SEC
+AUB_TIG,Auburn Tigers,Auburn University,h,SEC
+TRO_TRJ,Troy Trojans,Troy University,h,SBELT
+NOR_WOL,NC State Wolfpack,North Carolina State University,h,ACC
+OKL_SOO,Oklahoma Sooners,University of Oklahoma,h,SEC
+LOU_CAJ,Louisiana Ragin' Cajuns,University of Louisiana at Lafayette,h,SBELT
+OKL_COW,Oklahoma State Cowboys,Oklahoma State University,h,BIG12
+SOU_GAM,South Carolina Gamecocks,University of South Carolina,h,SEC
+UCLA,UCLA Bruins,"University of California, Los Angeles",h,BIG10
+VIR_TEC,Virginia Tech Hokies,Virginia Polytechnic Institute and State University,h,ACC
+DAL_PAT,Dallas Baptist Patriots,Dallas Baptist University,h,CUSA
+BAY_BEA,Baylor Bears,Baylor University,h,BIG12
+TEX_LON,Texas Longhorns,University of Texas at Austin,h,SEC
+GEO_PAN,Georgia State Panthers,Georgia State University,h,SBELT
+GEO_EAG,Georgia Southern Eagles,Georgia Southern University,h,SBELT
+KAN_WIL,Kansas State Wildcats,Kansas State University,h,BIG12
+LIB_FLA,Liberty Flames,Liberty University,h,CUSA
+ORE_DUC,Oregon Ducks,University of Oregon,h,BIG10
+NEB,Nebraska Cornhuskers,University of Nebraska–Lincoln,h,BIG10
+TEN_VOL,Tennessee Volunteers,University of Tennessee,h,SEC
+WES_MOU,West Virginia Mountaineers,West Virginia University,h,BIG12
+SOU_TRO,USC Trojans,University of Southern California,h,BIG10
+SOU_GOL,Southern Miss Golden Eagles,University of Southern Mississippi,h,SBELT
+TUL_GRE,Tulane Green Wave,Tulane University,h,AMER
+CIN_BEA,Cincinnati Bearcats,University of Cincinnati,h,BIG12
+ARI_WIL,Arizona Wildcats,University of Arizona,h,BIG12
+MIZ_TIG,Missouri Tigers,University of Missouri,h,SEC
+ECU_PIR,East Carolina Pirates,East Carolina University,h,AMER
+MIC_WOL,Michigan Wolverines,University of Michigan,h,BIG10
+RIC_OWL,Rice Owls,Rice University,h,AMER
+CHA_FOR,Charlotte 49ers,University of North Carolina at Charlotte,h,AMER
+LOY_LIO,Loyola Marymount Lions,Loyola Marymount University,h,WCC
+TEX_RAI,Texas Tech Red Raiders,Texas Tech University,h,BIG12
+MER_BEA,Mercer Bears,Mercer University,h,SOCON
+CIT_BUL,The Citadel Bulldogs,The Citadel,h,SOCON
+IOW_HAW,Iowa Hawkeyes,University of Iowa,h,BIG10
+CAM_CAM,Campbell Fighting Camels,Campbell University,h,CAA
+EVA_ACE,Evansville Purple Aces,University of Evansville,h,MVC
+HIG_PAN,High Point Panthers,High Point University,h,BSOU
+KAN_JAY,Kansas Jayhawks,University of Kansas,h,BIG12
+SAL_JAG,South Alabama Jaguars,University of South Alabama,h,SBELT
+VIR_CAV,Virginia Cavaliers,University of Virginia,h,ACC
+BEL_BRU,Belmont Bruins,Belmont University,h,MVC
+MIS_BEA,Missouri State Bears,Missouri State University,h,CUSA
+BYU_COU,BYU Cougars,Brigham Young University,h,BIG12
+APP_MOU,Appalachian State Mountaineers,Appalachian State University,h,SBELT
+OSU_BUC,Ohio State Buckeyes,The Ohio State University,h,BIG10
+UNC_SEA,UNC Wilmington Seahawks,University of North Carolina Wilmington,h,CAA
+BOC_EAG,Boston College Eagles,Boston College,h,ACC
+SAC_HOR,Sacramento State Hornets,"California State University, Sacramento",h,WAC
+SAN_GAU,UC Santa Barbara Gauchos,"University of California, Santa Barbara",h,BW
+VCU_RAM,VCU Rams,Virginia Commonwealth University,h,A10
+NOT_IRI,Notre Dame Fighting Irish,University of Notre Dame,h,ACC
+STA_CAR,Stanford Cardinal,Stanford University,h,ACC
+MIC_SPA,Michigan State Spartans,Michigan State University,h,BIG10
+PEN_NIT,Penn State Nittany Lions,Pennsylvania State University,h,BIG10
+CAL_FUL,Cal State Fullerton Titans,"California State University, Fullerton",h,BW
+LIP_BIS,Lipscomb Bisons,Lipscomb University,h,ASUN
+ILL_ILL,Illinois Fighting Illini,University of Illinois Urbana-Champaign,h,BIG10
+MIA_HUR,Miami Hurricanes,University of Miami,h,ACC
+PUR_BOI,Purdue Boilermakers,Purdue University,h,BIG10
+STJ_RED,St. John's Red Storm,St. John's University,h,BEAST
+DIX_STE,Utah Tech Trailblazers (formerly Dixie State),Utah Tech University,h,WAC
+ORE_BEA,Oregon State Beavers,Oregon State University,h,PAC12
+WES_HIL,Western Kentucky Hilltoppers,Western Kentucky University,h,CUSA
+ABI_WIL,Abilene Christian Wildcats,Abilene Christian University,h,WAC
+UNC_SPA,UNC Greensboro Spartans,University of North Carolina at Greensboro,h,SOCON
+CAL_MUS,Cal Poly Mustangs,"California Polytechnic State University, San Luis Obispo",h,BW
+HOU_COU,Houston Cougars,University of Houston,h,BIG12
+NEV_WOL,Nevada Wolf Pack,"University of Nevada, Reno",h,MW
+JMU_DUK,James Madison Dukes,James Madison University,h,SBELT
+ULM_WAR,UL Monroe Warhawks,University of Louisiana at Monroe,h,SBELT
+WIC_SHO,Wichita State Shockers,Wichita State University,h,AMER
+ARL_MAV,UT Arlington Mavericks,University of Texas at Arlington,h,WAC
+PEP_WAV,Pepperdine Waves,Pepperdine University,h,WCC
+LON_LAN,Longwood Lancers,Longwood University,h,BSOU
+WAS_HUS,Washington Huskies,University of Washington,h,BIG10
+FLA_GAT,Florida Gators,University of Florida,h,SEC
+SAM_BUL,Samford Bulldogs,Samford University,h,SOCON
+ASU_RED,Arkansas State Red Wolves,Arkansas State University,h,SBELT
+RAD_HIG,Radford Highlanders,Radford University,h,BSOU
+CRE_BLU,Creighton Bluejays,Creighton University,h,BEAST
+RUT_SCA,Rutgers Scarlet Knights,Rutgers University,h,BIG10
+LOU_BUL,Louisiana Tech Bulldogs,Louisiana Tech University,h,CUSA
+WM_TRI,William & Mary Tribe,College of William & Mary,h,CAA
+SAN_TOR,San Diego Toreros,University of San Diego,h,WCC
+TOW_TIG,Towson Tigers,Towson University,h,CAA
+RIC_SPI,Richmond Spiders,University of Richmond,h,A10
+AUS_GOV,Austin Peay Governors,Austin Peay State University,h,ASUN
+XAV_MUS,Xavier Musketeers,Xavier University,h,BEAST
+STE_HAT,Stetson Hatters,Stetson University,h,ASUN
+FRE_BUL,Fresno State Bulldogs,"California State University, Fresno",h,MW
+MT,Memphis Tigers,University of Memphis,h,AMER
+EKU_COL,Eastern Kentucky Colonels,Eastern Kentucky University,h,ASUN
+MAR_TER,Maryland Terrapins,University of Maryland,h,BIG10
+ILL_RED,Illinois State Redbirds,Illinois State University,h,MVC
+MTSU_BLU,Middle Tennessee Blue Raiders,Middle Tennessee State University,h,CUSA
+COL_LION,Columbia Lions,Columbia University,h,IVY
+DAY_FLY,Dayton Flyers,University of Dayton,h,A10
+NOR_CAT,Northwestern Wildcats,Northwestern University,h,BIG10
+ARM_BLA,Army Black Knights,United States Military Academy,h,PAT
+USC_UPS,USC Upstate Spartans,University of South Carolina Upstate,h,BSOU
+CAL_BEA,California Golden Bears,"University of California, Berkeley",h,ACC
+ORA_GOL,Oral Roberts Golden Eagles,Oral Roberts University,h,SUM
+STM_GAE,Saint Mary's Gaels,Saint Mary's College of California,h,WCC
+FLO_PAN,FIU Panthers,Florida International University,h,CUSA
+FOR_RAM,Fordham Rams,Fordham University,h,A10
+GEO_COL,George Washington Revolutionaries (formerly Colonials),George Washington University,h,A10
+LON_DIR,Long Beach State Dirtbags,"California State University, Long Beach",h,BW
+NMS_AGG,New Mexico State Aggies,New Mexico State University,h,CUSA
+COL_CHA,Charleston Cougars,College of Charleston,h,CAA
+PRE_BLH,Presbyterian Blue Hose,Presbyterian College,h,BSOU
+MCN_COW,McNeese Cowboys,McNeese State University,h,SLAND
+VIL_WIL,Villanova Wildcats,Villanova University,h,BEAST
+CAL_LAN,California Baptist Lancers,California Baptist University,h,WAC
+BRA_BRA,Bradley Braves,Bradley University,h,MVC
+JAC_GAM,Jacksonville State Gamecocks,Jacksonville State University,h,CUSA
+WCC,Western Carolina Catamounts,Western Carolina University,h,SOCON
+CHA_BUC,Charleston Southern Buccaneers,Charleston Southern University,h,BSOU
+UNL_REB,UNLV Rebels,"University of Nevada, Las Vegas",h,MW
+NEW_PRI,New Orleans Privateers,University of New Orleans,h,SLAND
+OLD_MON,Old Dominion Monarchs,Old Dominion University,h,SBELT
+AIR_FOR,Air Force Falcons,United States Air Force Academy,h,MW
+UAB_BLA,UAB Blazers,University of Alabama at Birmingham,h,AMER
+TEX_BOB,Texas State Bobcats,Texas State University,h,SBELT
+BUC_BIS,Bucknell Bison,Bucknell University,h,PAT
+GON_BUL,Gonzaga Bulldogs,Gonzaga University,h,WCC
+UTA_WOL,Utah Valley Wolverines,Utah Valley University,h,WAC
+SAN_BRO,Santa Clara Broncos,Santa Clara University,h,WCC
+UTA_UTE,Utah Utes,University of Utah,h,BIG12
+ELO_PHO,Elon Phoenix,Elon University,h,CAA
+ARI_SUN,Arizona State Sun Devils,Arizona State University,h,BIG12
+SEA_RED,Seattle Redhawks,Seattle University,h,WCC
+SOU_IND16,Southern Indiana Screaming Eagles,University of Southern Indiana,h,OVC
+CAL_MAT,Cal State Northridge Matadors,"California State University, Northridge",h,BW
+DAV_WIL,Davidson Wildcats,Davidson College,h,A10
+PIT_PAN,Pittsburgh Panthers,University of Pittsburgh,h,ACC
+WAS_COU,Washington State Cougars,Washington State University,h,PAC12
+LAF_LEP,Lafayette Leopards,Lafayette College,h,PAT
+RHO_RAM,Rhode Island Rams,University of Rhode Island,h,A10
+UCF_KNI,UCF Knights,University of Central Florida,h,BIG12
+WRI_RAI,Wright State Raiders,Wright State University,h,HORZ
+PRI_TIG,Princeton Tigers,Princeton University,h,IVY
+UIC_FLA,UIC Flames,University of Illinois Chicago,h,MVC
+UNO_MAV,Omaha Mavericks,University of Nebraska Omaha,h,SUM
+GEO_PAT,George Mason Patriots,George Mason University,h,A10
+MAR_THU,Marshall Thundering Herd,Marshall University,h,SBELT
+USF_BUL,South Florida Bulls,University of South Florida,h,AMER
+VAL_CRU,Valparaiso Beacons (formerly Crusaders),Valparaiso University,h,MVC
+KEN_OWL,Kennesaw State Owls,Kennesaw State University,h,CUSA
+SET_PIR,Seton Hall Pirates,Seton Hall University,h,BEAST
+WIN_EAG,Winthrop Eagles,Winthrop University,h,BSOU
+MIN_GOL,Minnesota Golden Gophers,University of Minnesota,h,BIG10
+MOR_EAG,Morehead State Eagles,Morehead State University,h,OVC
+BUT_BUL,Butler Bulldogs,Butler University,h,BEAST
+DEL_BLU,Delaware Blue Hens,University of Delaware,h,CUSA
+CSU_BAK,Cal State Bakersfield Roadrunners,"California State University, Bakersfield",h,BW
+UTS_ROA,UTSA Roadrunners,University of Texas at San Antonio,h,AMER
+WOF_TER,Wofford Terriers,Wofford College,h,SOCON
+VIR_KEY,VMI Keydets,Virginia Military Institute,h,SOCON
+IND_SYC,Indiana State Sycamores,Indiana State University,h,MVC
+SOU_COU,SIU Edwardsville Cougars,Southern Illinois University Edwardsville,h,OVC
+SAN_DON,San Francisco Dons,University of San Francisco,h,WCC
+UCO_HUS,UConn Huskies,University of Connecticut,h,BEAST
+FGCU,FGCU Eagles,Florida Gulf Coast University,h,ASUN
+MIA_RED,Miami (OH) RedHawks,Miami University,h,MAC
+LEH_MOU,Lehigh Mountain Hawks,Lehigh University,h,PAT
+PEN_QUA,Penn Quakers,University of Pennsylvania,h,IVY
+ETS_BUC,East Tennessee State Buccaneers,East Tennessee State University,h,SOCON
+LAM_CAR,Lamar Cardinals,Lamar University,h,SLAND
+HOF_PRI,Hofstra Pride,Hofstra University,h,CAA
+SOU_LIO,Southeastern Louisiana Lions,Southeastern Louisiana University,h,SLAND
+NIU_HUS,Northern Illinois Huskies,Northern Illinois University,h,MAC
+SAN_AZT,San Diego State Aztecs,San Diego State University,h,MW
+OAK_GOL,Oakland Golden Grizzlies,Oakland University,h,HORZ
+SOU_RED,Southeast Missouri State Redhawks,Southeast Missouri State University,h,OVC
+MEX_LOB,New Mexico Lobos,University of New Mexico,h,MW
+MON_HAW,Monmouth Hawks,Monmouth University,h,CAA
+HAR_CRI,Harvard Crimson,Harvard University,h,IVY
+YAL_BUL,Yale Bulldogs,Yale University,h,IVY
+AKR_ZIP,Akron Zips,University of Akron,h,MAC
+NIC_COL,Nicholls Colonels,Nicholls State University,h,SLAND
+CSD_TRI,UC San Diego Tritons,"University of California, San Diego",h,BW
+PAC_TIG,Pacific Tigers,University of the Pacific,h,WCC
+BRO_BEA,Brown Bears,Brown University,h,IVY
+BIN_BEA,Binghamton Bearcats,Binghamton University,h,AMEAST
+CAL_ANT,UC Irvine Anteaters,"University of California, Irvine",h,BW
+STJ_HAW,Saint Joseph's Hawks,Saint Joseph's University,h,A10
+GRA_CAN,Grand Canyon Antelopes,Grand Canyon University,h,MW
+NOR_BIS,North Dakota State Bison,North Dakota State University,h,SUM
+TOL_ROC,Toledo Rockets,University of Toledo,h,MAC
+CAL_AGO,UC Davis Aggies,"University of California, Davis",h,BW
+CEN_MIC,Central Michigan Chippewas,Central Michigan University,h,MAC
+LIT_TRO,Little Rock Trojans,University of Arkansas at Little Rock,h,OVC
+FAU_OWL,Florida Atlantic Owls,Florida Atlantic University,h,AMER
+ALA_LIO,North Alabama Lions,University of North Alabama,h,ASUN
+MUR_RAC,Murray State Racers,Murray State University,h,MVC
+HBU_HUS,Houston Christian Huskies,Houston Christian University,h,SLAND
+BRY_BUL,Bryant Bulldogs,Bryant University,h,AMEAST
+EMU_EAG,Eastern Michigan Eagles,Eastern Michigan University,h,MAC
+SAN_SPA,San Jose State Spartans,San Jose State University,h,MW
+MSM_MTN,Mount St. Mary's Mountaineers,Mount St. Mary's University,h,MAAC
+NAV_MID,Navy Midshipmen,United States Naval Academy,h,PAT
+COR_BRE,Cornell Big Red,Cornell University,h,IVY
+NOR_HUS,Northeastern Huskies,Northeastern University,h,CAA
+TAR_TEX,Tarleton State Texans,Tarleton State University,h,WAC
+SIU_SAL,Southern Illinois Salukis,Southern Illinois University Carbondale,h,MVC
+HOL_CRU,Holy Cross Crusaders,College of the Holy Cross,h,PAT
+QUN_RYL,Queens Royals,Queens University of Charlotte,h,ASUN
+SAM_BEA,Sam Houston Bearkats,Sam Houston State University,h,CUSA
+YSU_PEN,Youngstown State Penguins,Youngstown State University,h,HORZ
+BEL_KNI,Bellarmine Knights,Bellarmine University,h,ASUN
+UWM_PAN,Milwaukee Panthers,University of Wisconsin–Milwaukee,h,HORZ
+UMBC_RET,UMBC Retrievers,"University of Maryland, Baltimore County",h,AMEAST
+SLU_BILL,Saint Louis Billikens,Saint Louis University,h,A10
+UTR_VAQ,UT Rio Grande Valley Vaqueros,University of Texas Rio Grande Valley,h,SLAND
+RID_BRO,Rider Broncs,Rider University,h,MAAC
+NCB,"? (real D1 — code unidentified, review)",? — 79 game-days vs Summit/WAC teams,m,SUM
+TEN_TEC,Tennessee Tech Golden Eagles,Tennessee Technological University,h,OVC
+POR_PIL,Portland Pilots,University of Portland,h,WCC
+NCA_BUL,UNC Asheville Bulldogs,University of North Carolina at Asheville,m,BSOU
+ALA_HOR,Alabama State Hornets,Alabama State University,h,SWAC
+SOU_JAC,South Dakota State Jackrabbits,South Dakota State University,m,SUM
+GAR_RUN,Gardner-Webb Runnin' Bulldogs,Gardner-Webb University,m,BSOU
+STE_LUM,Stephen F. Austin Lumberjacks,Stephen F. Austin State University,h,SLAND
+GEO_HOY,Georgetown Hoyas,Georgetown University,h,BEAST
+IWC,Incarnate Word Cardinals,University of the Incarnate Word,h,SLAND
+SBU_SEA,Stony Brook Seawolves,Stony Brook University,h,CAA
+NOR_DEM,Northwestern State Demons,Northwestern State University,h,SLAND
+WIU_LEA,Western Illinois Leathernecks,Western Illinois University,m,OVC
+QUI_BOB,Quinnipiac Bobcats,Quinnipiac University,h,MAAC
+STB_BON,St. Bonaventure Bonnies,St. Bonaventure University,m,A10
+NOK_NOR,Northern Kentucky Norse,Northern Kentucky University,h,HORZ
+LIN_UNI,Lindenwood Lions,Lindenwood University,h,OVC
+EIU_PAN,Eastern Illinois Panthers,Eastern Illinois University,h,OVC
+KS_GF,Kent State Golden Flashes,Kent State University,m,MAC
+THO_M,St. Thomas Tommies,University of St. Thomas (Minnesota),m,SUM
+MAI_BLA,Maine Black Bears,University of Maine,m,AMEAST
+CAL_HIG,UC Riverside Highlanders,"University of California, Riverside",h,BW
+NOR_AGG,North Carolina A&T Aggies,North Carolina A&T State University,m,CAA
+NOF_OSP,North Florida Ospreys,University of North Florida,h,ASUN
+OHI_BOB,Ohio Bobcats,Ohio University,h,MAC
+MAR_RED,Marist Red Foxes,Marist College,m,MAAC
+UMASS_RIV,UMass Lowell River Hawks,University of Massachusetts Lowell,h,AMEAST
+CEN_BEA,Central Arkansas Bears,University of Central Arkansas,h,A10
+WMI_BRO,Western Michigan Broncos,Western Michigan University,m,MAC
+BGS_FAL,Bowling Green Falcons,Bowling Green State University,m,MAC
+BAL_CAR,Ball State Cardinals,Ball State University,m,MAC
+NJI_HIG,NJIT Highlanders,New Jersey Institute of Technology,m,AMEAST
+LON_ISL22,LIU Sharks,Long Island University,m,NEC
+JUD,Jacksonville Dolphins,Jacksonville University,m,ASUN
+UMA_AMH,UMass Minutemen,University of Massachusetts Amherst,h,A10
+DAR_GRE,Dartmouth Big Green,Dartmouth College,h,IVY
+ALB_GRE,UAlbany Great Danes,"University at Albany, SUNY",m,AMEAST
+UTM_SKY,UT Martin Skyhawks,University of Tennessee at Martin,m,OVC
+FAI_STA,Fairfield Stags,Fairfield University,m,MAAC
+TEX_ISL,Texas A&M-Corpus Christi Islanders,Texas A&M University–Corpus Christi,h,SLAND
+NIA_EAG,Niagara Purple Eagles,Niagara University,h,MAAC
+HAW_WAR,Hawai'i Rainbow Warriors,University of Hawai'i at Mānoa,m,BW
+CAN_GRI,Canisius Golden Griffins,Canisius University,m,MAAC
+WAG_SEA,Wagner Seahawks,Wagner College,m,NEC
+MAN_JAS,Manhattan Jaspers,Manhattan University,m,MAAC
+SIE_SAI,Siena Saints,Siena College,m,MAAC
+ION_GAE,Iona Gaels,Iona University,m,MAAC
+UNI_WES,West Georgia Wolves,University of West Georgia,m,ASUN
+GRA_TIG,Grambling State Tigers,Grambling State University,m,SWAC
+SAC_PIO,Sacred Heart Pioneers,Sacred Heart University,m,MAAC
+FOR_MAS,Purdue Fort Wayne Mastodons,Purdue University Fort Wayne,m,HORZ
+STO_COL,Stonehill Skyhawks,Stonehill College,m,NEC
+ARK_LIO,Arkansas-Pine Bluff Golden Lions,University of Arkansas at Pine Bluff,m,SWAC
+COP_STA,Coppin State Eagles,Coppin State University,m,MEAC
+SOU_JAG,Southern Jaguars,Southern University and A&M College,m,SWAC
+SPU_PEA,Saint Peter's Peacocks,Saint Peter's University,m,MAAC
+PRA_PAN,Prairie View A&M Panthers,Prairie View A&M University,m,SWAC
+MER_COL1,Merrimack Warriors,Merrimack College,m,NEC
+BET_WIL,Bethune-Cookman Wildcats,Bethune-Cookman University,m,SWAC
+TEX_TIG,Texas Southern Tigers,Texas Southern University,m,SWAC
+ALA_ANM,Alabama A&M Bulldogs,Alabama A&M University,m,SWAC
+FDU_KNI,Fairleigh Dickinson Knights,Fairleigh Dickinson University,m,NEC
+DEL_HOR,Delaware State Hornets,Delaware State University,m,MEAC
+ALC_BRA,Alcorn State Braves,Alcorn State University,m,SWAC
+LAS_EXS,La Salle Explorers,La Salle University,m,A10
+MAR_HAW,Maryland Eastern Shore Hawks,University of Maryland Eastern Shore,m,MEAC
+MOY_MOY,"? (real D1 — code unidentified, review)",? — 21 game-days in the Big South,m,BSOU
+FLO_RAT,Florida A&M Rattlers,Florida A&M University,m,SWAC
+MIS_DEL,Mississippi Valley State Delta Devils,Mississippi Valley State University,m,SWAC
+JAC_TIG,Jackson State Tigers,Jackson State University,m,SWAC
+SEA_UNI,Seattle Redhawks (duplicate tag of SEA_RED),Seattle University,m,WAC
+MER_UNI,"? (real D1 — code unidentified, review)",? — 16 game-days in MVC games,m,MVC
+NOR_SPA,Norfolk State Spartans,Norfolk State University,m,MEAC
+PUR_FOR,Purdue Fort Wayne Mastodons,Purdue University Fort Wayne,m,HORZ
+CCU_BLD,Central Connecticut Blue Devils,Central Connecticut State University,m,NEC
+NEW_HAV,New Haven Chargers (Div. II),University of New Haven,l,""
+VIR_MIL,?,? (ACC-game neutral — unidentified; possibly VMI duplicate),l,""
+HAR_HAW,Hartford Hawks,University of Hartford,l,""
+BET_COO,Bethune-Cookman Wildcats (duplicate tag),Bethune-Cookman University,l,""
+UNI_BRI,?,? (WAC-game neutral — unidentified),l,""
+LOR_DUH,?,? (data artifact — unidentified),l,""
+EMB_(AZ,Embry-Riddle (Prescott) (NAIA),"Embry-Riddle Aeronautical University, Prescott",l,""
+LOU_CHR,Louisiana Christian (NAIA),Louisiana Christian University,l,""
+AZU_PAC,Azusa Pacific (Div. II),Azusa Pacific University,l,""
+BUS_BEA,?,? (data artifact — unidentified),l,""
+SMU_SAI,?,? (WAC-game neutral — unidentified),l,""
+CLE_UNI,Cleveland State Vikings,Cleveland State University,l,""
+WES_UNI,?,? (Big West-game neutral — unidentified),l,""
+LSU_ALE,LSU-Alexandria Generals (NAIA),Louisiana State University at Alexandria,l,""
+UNI_THE2,?,? (data artifact — unidentified),l,""
+COC_COU,?,? (C-USA-game neutral — unidentified),l,""
+CAL_STA,?,? (Cal State — ambiguous/artifact),l,""
+GVU_VIK,?,? (data artifact — unidentified),l,""
+CAI_UNI,?,? (data artifact — unidentified),l,""
+ROC_CHR,?,? (data artifact — unidentified),l,""
+GRA_CHR,?,? (data artifact — unidentified),l,""
+NOR_PAR,North Park (Div. III),North Park University,l,""
+DIL_UNI,Dillard (NAIA),Dillard University,l,""
+SOU_BAP1,?,"? (likely Southwest Baptist, Div. II)",l,""
+SIM_UNI,?,? (data artifact — unidentified),l,""
+XAV_LOU,Xavier (Louisiana) (NAIA),Xavier University of Louisiana,l,""
+UNI_WIS,?,? (Big Ten-game neutral — unidentified),l,""
+WOU_WOL,Western Oregon Wolves (Div. II),Western Oregon University,l,""
+ALB_LIO,?,? (Patriot-game neutral — unidentified),l,""
+ROC_UNI,?,? (data artifact — unidentified),l,""
+WES_CHE14,West Chester (Div. II),West Chester University of Pennsylvania,l,""
+NNU_CRU,Northwest Nazarene (Div. II),Northwest Nazarene University,l,""
+BAL_UNI,?,? (MAC-game neutral — unidentified),l,""
+WES_GEO4,West Georgia (duplicate tag),University of West Georgia,l,""
+WAS_UNI,?,? (AAC-game neutral — unidentified),l,""
+MIS_ST.,?,? (malformed tag — unidentified),l,""
+ROO_UNI,?,? (data artifact — unidentified),l,""
+AUG_COL,Augustana (Div. II/III),Augustana University/College,l,""
+UPP_IOW,Upper Iowa (Div. II),Upper Iowa University,l,""
+JOH_MEL,?,? (data artifact — unidentified),l,""
+CED_UNI,Cedarville (Div. II),Cedarville University,l,""
+DIL_UNI1,"Dillard (NAIA, duplicate tag)",Dillard University,l,""
+LOU_STA1,?,? (Southland-game neutral — unidentified),l,""
+FRE_PAC,Fresno Pacific (Div. II),Fresno Pacific University,l,""
+ST._OLA,St. Olaf (Div. III),St. Olaf College,l,""
+COE_COL,Coe College (Div. III),Coe College,l,""
+DRA_WOR,?,? (Big Ten-game neutral — unidentified),l,""
+COL_STA2,?,? (Mountain West-game artifact — unidentified),l,""
+COR_COL,Cornell College (Div. III),Cornell College (Iowa),l,""
+WAR_COL,Wartburg (Div. III),Wartburg College,l,""
+CAL_STA7,?,? (Cal State — ambiguous/artifact),l,""
+DEP_UNI,?,? (Big Ten-game neutral — unidentified),l,""
+MEM_TIG13,Memphis Tigers (duplicate tag),University of Memphis,l,""
+OAK_CIT,Oakland City (NAIA),Oakland City University,l,""
+NEW_UNI,?,"? (ACC-game neutral — unidentified; possibly Newberry, Div. II)",l,""
+CMU_MAV,Colorado Mesa Mavericks (Div. II),Colorado Mesa University,l,""
+HOU,Houston Cougars (duplicate tag),University of Houston,l,""
+MUH_COL,Muhlenberg (Div. III),Muhlenberg College,l,""
+WES_VIR4,West Virginia (duplicate tag),West Virginia University,l,""
+BLA_BEA,?,? (OVC-game neutral — unidentified),l,""
+LIN_CCW,?,? (data artifact — unidentified),l,""
+KEN_STA1,?,? (Kennesaw/Kent State duplicate tag — unidentified),l,""
+HEN_RED,Henderson State Reddies (Div. II),Henderson State University,l,""
+LIU_BLA,"LIU Sharks (formerly Blackbirds, duplicate tag)",Long Island University,l,""
+DAV_UNI,?,? (data artifact — unidentified),l,""
+TNU,?,"? (likely Trevecca Nazarene, Div. II)",l,""
+REI_UNI,?,"? (likely Reinhardt, NAIA)",l,""

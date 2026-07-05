@@ -1,2 +1,25 @@
-/.DS_Store
+# ── OS / editor cruft ────────────────────────────────────────────────
+**/.DS_Store
+/.vscode/
+*.Rhistory
+
+# ── Python ───────────────────────────────────────────────────────────
 /.venv
+**/__pycache__/
+**/*.pyc
+
+# ── Data (NEVER commit — 5.9 GB / 60k parquet files; lives on each box) ─
+/data_pipeline/
+
+# ── App: cached picker index + user retags/clusters (rebuildable/local) ─
+# .cache holds the derived parquet indexes (rebuilt on first run) plus
+# autocluster.json / retags.json (your edits). To carry the edits to a new
+# box, copy the .json files by hand — see deploy/DEPLOY.md.
+/delispice_app/.cache/
+
+# ── App: generated double-click launcher bundle (Mac desktop only) ──────
+/delispice_app.app/
+
+# ── Superseded / local-only material (kept on disk, out of git) ─────────
+/backend/research/
+/written scouting reports (practice)/

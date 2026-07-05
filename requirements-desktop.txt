@@ -1,0 +1,5 @@
+# delispice_app — desktop (Mac) extras.
+# Adds the native pop-up window launcher (launch.py) on top of the app runtime.
+#   pip install -r requirements-desktop.txt
+-r requirements.txt
+pywebview==6.2.1

@@ -1,0 +1,53 @@
+# delispice_app — systemd service (gunicorn, sits behind Caddy).
+#
+# Install:
+#   1. Replace every <LINUX_USER> below with your login name (e.g. matt).
+#   2. sudo cp deploy/delispice.service /etc/systemd/system/delispice.service
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now delispice
+#
+# Watch it:   journalctl -u delispice -f
+# Restart:    sudo systemctl restart delispice
+# Status:     systemctl status delispice
+
+[Unit]
+Description=delispice_app (Dash TrackMan scouting reports)
+After=network.target
+
+[Service]
+Type=simple
+
+# Run as your own login user (simplest) or a dedicated service account.
+User=<LINUX_USER>
+Group=<LINUX_USER>
+
+# Repo root — MUST be the folder that contains BOTH delispice_app/ and data_pipeline/.
+WorkingDirectory=/home/<LINUX_USER>/delispice
+
+# Cap DuckDB's memory so a heavy query spills to disk instead of OOM-killing the
+# box. ~60% of 16 GB. Lower this if you raise --threads and see the worker killed.
+Environment=DUCKDB_MEMORY_LIMIT=10GB
+
+# The dataset is ~60k parquet files; DuckDB opens many at once. The default soft
+# limit (1024) is not enough — this is the single most common first-deploy failure.
+LimitNOFILE=65536
+
+# --workers 1 : one process. DuckDB already uses all cores per query, so extra
+#               workers just oversubscribe CPU and multiply memory.
+# --threads 4 : lets the single worker handle several requests at once (Dash loads
+#               assets + multiple callbacks per page) without multiplying memory.
+# --timeout 600 : the FIRST request after a cold cache builds the index over every
+#               parquet file — that can take minutes. Don't let gunicorn kill it.
+ExecStart=/home/<LINUX_USER>/delispice/.venv/bin/gunicorn \
+    --chdir /home/<LINUX_USER>/delispice \
+    --workers 1 --threads 4 \
+    --timeout 600 --graceful-timeout 30 \
+    --bind 127.0.0.1:8765 \
+    --access-logfile - --error-logfile - \
+    delispice_app.app:server
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+# delispice_app — server (Linux) extras.
+# Adds the production WSGI server on top of the app runtime. No pywebview.
+# Install from the repo root:
+#   pip install -r deploy/requirements-server.txt
+-r ../requirements.txt
+gunicorn==23.0.0

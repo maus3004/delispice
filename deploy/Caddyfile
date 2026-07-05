@@ -1,0 +1,24 @@
+# delispice_app — Caddy reverse proxy in front of gunicorn (127.0.0.1:8765).
+#
+# Install:
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy       # or: sudo caddy reload --config /etc/caddy/Caddyfile
+#
+# ── HTTP now (no domain yet) ─────────────────────────────────────────
+# Serves on port 80 over plain HTTP. Reach it at http://<server-ip>/ .
+:80 {
+	reverse_proxy 127.0.0.1:8765
+	encode gzip
+}
+
+# ── Enable HTTPS later (one edit, when you have a domain) ─────────────
+# 1. Point a DNS A record at this box (e.g. reports.example.com -> <server-ip>).
+# 2. DELETE the ":80 { ... }" block above.
+# 3. UNCOMMENT the block below and replace reports.example.com with your domain.
+# 4. sudo systemctl reload caddy
+# Caddy then obtains and auto-renews a Let's Encrypt certificate for you.
+#
+# reports.example.com {
+# 	reverse_proxy 127.0.0.1:8765
+# 	encode gzip
+# }

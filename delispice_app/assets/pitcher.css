@@ -1,0 +1,53 @@
+/* Dropdown search-header fix.
+   The Level/Conference/Team dropdowns can open scrolled (Level/Conference have a pre-selected
+   value; the Team list is long). Their search box is a `position: sticky` header inside the
+   scrolling menu — but Dash pins it at `top: 8px`, leaving an 8px strip ABOVE the header where a
+   scrolled option bleeds through. Pin it flush (`top: 0`) and keep it opaque + layered so nothing
+   shows through, matching the clean Pitcher search box. */
+.dash-dropdown-search-container {
+    top: -2px !important;   /* over-pin past the menu's 1px top border so no scrolled option peeks above the header */
+    /* no side margins -> the search box spans the full menu width (touches both edges); keep a small gap above the options */
+    margin: 0 0 8px 0 !important;
+    z-index: 5;
+    background: #fff;
+}
+
+.dash-dropdown-search {
+    background: #fff;
+}
+
+/* Open each dropdown as a SINGLE search box in place of the trigger — not a second "Search" box
+   dropping down below it. The opaque menu (search field on top, options below) is pulled up ~40px
+   so it covers the trigger; clicking the field turns it into the search input. */
+.dash-dropdown-content {
+    background: #fff;
+    margin-top: -40px !important;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.15);
+}
+
+/* Compact Pitchers/Batters role tabs: keep them side-by-side (dcc stacks them when narrow) and small. */
+#role-tabs {
+    flex-direction: row !important;
+}
+#role-tabs .tab {
+    padding: 4px 10px !important;
+    font-size: 12px !important;
+}
+
+/* Collapsible batter pitch-type table: family rows (native <details>) with a rotating arrow. */
+details.fam > summary {
+    list-style: none;
+    cursor: pointer;
+}
+details.fam > summary::-webkit-details-marker {
+    display: none;
+}
+details.fam > summary:hover .fam-arrow {
+    opacity: 0.6;
+}
+.fam-arrow {
+    transition: transform 0.15s ease;
+}
+details.fam[open] > summary .fam-arrow {
+    transform: rotate(90deg);
+}

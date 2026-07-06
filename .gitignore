@@ -8,8 +8,14 @@
 **/__pycache__/
 **/*.pyc
 
-# ── Data (NEVER commit — 5.9 GB / 60k parquet files; lives on each box) ─
-/data_pipeline/
+# ── data_pipeline: keep the pipeline SCRIPTS, ignore all the DATA ──────
+# The data dirs (data/ 9 GB, clean/ 6 GB, wbaserunners/ 6 GB) + logs move
+# box-to-box out of band (rsync), NEVER via git. So ignore everything under
+# data_pipeline/ by default, then re-include only the scripts + small refs.
+/data_pipeline/*
+!/data_pipeline/*.py
+!/data_pipeline/heights.csv
+!/data_pipeline/re_matrices/
 
 # ── App: cached picker index + user retags/clusters (rebuildable/local) ─
 # .cache holds the derived parquet indexes (rebuilt on first run) plus

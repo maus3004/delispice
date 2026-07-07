@@ -11,6 +11,7 @@ which mirrors the notebook's ``FigureWidget.batch_update``.
 from __future__ import annotations
 
 import math
+from datetime import date, timedelta
 
 import numpy as np
 import polars as pl
@@ -30,6 +31,44 @@ PITCH_COLORS = {"Four-Seam": "#d62728", "Fastball": "#d62728", "Two-Seam": "#ff7
                 "Changeup": "#2ca02c", "Splitter": "#9467bd", "Knuckleball": "#7f7f7f"}
 # Distinct colours for AutoCluster labels (Cluster 0, Cluster 1, …) on the movement/velocity charts.
 CLUSTER_COLORS = ["#d62728", "#1f77b4", "#2ca02c", "#e6b800", "#9467bd", "#ff7f0e", "#17becf"]
+
+
+# ── Player age + MLB draft eligibility (shown under the player name) ───────────────────────────────
+# Hardcoded draft days — edit each year. Any missing year falls back to the 2nd Sunday of July,
+# where the draft has landed in recent seasons.
+DRAFT_DATES = {
+    2022: date(2022, 7, 17),
+    2023: date(2023, 7, 9),
+    2024: date(2024, 7, 14),
+    2025: date(2025, 7, 13),
+    2026: date(2026, 7, 12),
+}
+DRAFT_AGE_WINDOW = 45          # a player must turn 21 within 45 days of the draft to be eligible
+
+
+def draft_day(year: int) -> date:
+    if year in DRAFT_DATES:
+        return DRAFT_DATES[year]
+    d = date(year, 7, 1)
+    d += timedelta((6 - d.weekday()) % 7)      # first Sunday (Mon=0 … Sun=6)
+    return d + timedelta(7)                     # second Sunday
+
+
+def _add_years(d: date, n: int) -> date:
+    try:
+        return d.replace(year=d.year + n)
+    except ValueError:                          # Feb 29 -> Mar 1 in a non-leap year
+        return date(d.year + n, 3, 1)
+
+
+def age_on(birthdate: date, ref: date) -> float:
+    """Decimal age in years on ``ref``."""
+    return (ref - birthdate).days / 365.25
+
+
+def draft_eligible(birthdate: date, draft: date) -> bool:
+    """True if the player turns 21 on or before 45 days after the draft (the college-age rule)."""
+    return _add_years(birthdate, 21) <= draft + timedelta(days=DRAFT_AGE_WINDOW)
 
 
 def num(x, d=2):

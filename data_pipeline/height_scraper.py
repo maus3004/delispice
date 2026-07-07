@@ -19,9 +19,12 @@ page is filtered to exact name matches whose BR active years overlap the seasons
 player (+/- 1 yr); if several survive, up to 3 candidate pages are fetched and their School line is
 checked against the player's school (TrackMan team acronym -> school via team_acronyms.csv).
 
-Statuses (all terminal -- never re-scraped without --retry-misses):
+Every matched player page also yields the birthday (BirthDate, ISO YYYY-MM-DD) in the same fetch --
+the app turns it into age + draft eligibility. Statuses (all terminal -- never re-scraped without
+--retry-misses):
   found      height parsed              no_height   player page found, no height listed
   not_found  no BR entry matched        ambiguous   several BR entries matched, couldn't disambiguate
+  manual     typed into the app by hand (delispice_app writes these; they win over any scraped row)
 Network errors are NOT written to the table, so they retry automatically on the next run.
 
 Sports Reference bans IPs that exceed ~20 requests/min (for a day or more). We throttle to
@@ -55,7 +58,11 @@ BR_ROOT = "https://www.baseball-reference.com"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
-FIELDS = ["Name", "TrackManId", "HeightIn", "Height", "WeightLb", "Status", "BRUrl", "ScrapedAt"]
+# heights.csv columns. NOTE: delispice_app/data.py hardcodes this same order for its manual-bio
+# writes -- keep the two in sync (the app appends aligned to the file's own header, so reads/writes
+# stay correct even across a schema bump, but new files use this order).
+FIELDS = ["Name", "TrackManId", "HeightIn", "Height", "WeightLb", "BirthDate",
+          "Status", "BRUrl", "ScrapedAt"]
 RETRY_STATUSES = {"not_found", "ambiguous", "no_height"}
 YEAR_TOLERANCE = 1          # BR active years may lag/lead our sightings by a season
 MAX_CANDIDATE_FETCHES = 3   # page fetches spent disambiguating one shared name
@@ -66,6 +73,9 @@ _NAME_OK = re.compile(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' .\-]*,\s*[A-Za-zÀ-ÿ][A-Za-z
 # "<span>6-2</span>,&nbsp;<span>202lb</span>" -- identical on /players/ and /register/ pages
 _HT_WT = re.compile(r"<span>(\d)-(\d{1,2})</span>,&nbsp;<span>(\d+)lb</span>")
 _HT_CM = re.compile(r"\((\d{2,3})cm")
+# "Born: April 7, 2005" -- matched against the tag-stripped meta block (register pages render it
+# plain; MLB pages split it across <a> tags, hence the flexible whitespace around the comma).
+_BORN = re.compile(r"Born:\s*([A-Z][a-z]+\.?\s+\d{1,2}\s*,\s*\d{4})")
 _SEARCH_ITEM = re.compile(r'<div class="search-item-name">\s*<a href="([^"]+)">([^<]+)', re.S)
 _YEARS = re.compile(r"\((\d{4})(?:-(\d{4}))?\)")
 _SCHOOL = re.compile(r"<strong>School:</strong>\s*<a[^>]*>([^<(]+)")
@@ -139,6 +149,23 @@ def parse_height(html: str) -> tuple[str, int, int | None] | None:
     return None
 
 
+def parse_birthdate(html: str) -> str:
+    """'Born: April 7, 2005' -> '2005-04-07' (ISO), or '' if not present. Reads the meta block only
+    (the 'Born:' label there; other pages mention birthdays in box scores)."""
+    i = html.find("<h1>")
+    seg = re.sub(r"<[^>]+>", " ", html[i:i + 3000] if i >= 0 else html[:3000])
+    m = _BORN.search(seg)
+    if not m:
+        return ""
+    txt = re.sub(r"\s+", " ", m[1]).replace(" ,", ",")
+    for fmt in ("%B %d, %Y", "%b %d, %Y"):
+        try:
+            return datetime.strptime(txt, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return ""
+
+
 def parse_candidates(html: str) -> list[dict]:
     """Search-results page -> [{url, name, y0, y1}] for player links only."""
     out = []
@@ -175,17 +202,19 @@ def load_school_map() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Resolution: one player -> one row
 # ---------------------------------------------------------------------------
-def _row(p: dict, status: str, url: str = "", ht: tuple[str, int, int | None] | None = None) -> dict:
+def _row(p: dict, status: str, url: str = "", ht: tuple[str, int, int | None] | None = None,
+         bday: str = "") -> dict:
     return {"Name": p["Name"], "TrackManId": p["TrackManId"],
             "HeightIn": ht[1] if ht else "", "Height": ht[0] if ht else "",
             "WeightLb": (ht[2] if ht and ht[2] is not None else ""),
-            "Status": status, "BRUrl": url,
+            "BirthDate": bday, "Status": status, "BRUrl": url,
             "ScrapedAt": datetime.now(timezone.utc).strftime("%Y-%m-%d")}
 
 
 def _page_row(client: BRClient, p: dict, url: str, html: str | None = None) -> dict:
-    ht = parse_height(html if html is not None else client.page(url))
-    return _row(p, "found" if ht else "no_height", url, ht)
+    html = html if html is not None else client.page(url)
+    ht = parse_height(html)                            # height drives Status; birthday is stored either way
+    return _row(p, "found" if ht else "no_height", url, ht, parse_birthdate(html))
 
 
 def resolve(client: BRClient, p: dict, schools: dict[str, str]) -> dict:

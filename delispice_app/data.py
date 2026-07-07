@@ -16,9 +16,11 @@ Design (per the notebook's "never load the 7M-row frame whole" principle):
 """
 from __future__ import annotations
 
+import csv
 import functools
 import json
 import os
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -37,14 +39,14 @@ GLOB_ALL = str(WBASE / "**" / "*.parquet")
 
 # Columns each role's report needs; everything else in the 206-column schema is dropped at read time.
 PITCHER_COLS = [
-    "Date", "Pitcher", "PitcherThrows", "PitcherTeam", "Level", "PitchUID",
+    "Date", "Pitcher", "PitcherId", "PitcherThrows", "PitcherTeam", "Level", "PitchUID",
     "BatterSide", "Balls", "Strikes", "PitchofPA",
     "TaggedPitchType", "PitchCall", "KorBB", "PlayResult", "OutsOnPlay",
     "RelSpeed", "SpinRate", "SpinAxis", "RelHeight", "RelSide", "Extension",
     "InducedVertBreak", "HorzBreak", "PlateLocHeight", "PlateLocSide", "ExitSpeed",
 ]
 BATTER_COLS = [
-    "Date", "Batter", "BatterSide", "BatterTeam", "Level", "Pitcher", "PitcherThrows", "PitchUID",
+    "Date", "Batter", "BatterId", "BatterSide", "BatterTeam", "Level", "Pitcher", "PitcherThrows", "PitchUID",
     "PitchofPA", "PitchCall", "KorBB", "PlayResult", "TaggedPitchType", "TaggedHitType",
     "PlateLocHeight", "PlateLocSide", "ExitSpeed", "Angle", "Direction", "Bearing", "Distance",
 ]
@@ -56,8 +58,9 @@ ROLES = {
 
 # Proper dtypes for an EMPTY result, so report builders (which do numeric ops) never crash on the
 # all-string schema an untyped empty frame would have.
-_STR_COLS = {"Date", "Pitcher", "PitcherThrows", "PitcherTeam", "Batter", "BatterSide", "BatterTeam",
-             "Level", "PitchUID", "TaggedPitchType", "PitchCall", "KorBB", "PlayResult", "TaggedHitType"}
+_STR_COLS = {"Date", "Pitcher", "PitcherId", "PitcherThrows", "PitcherTeam", "Batter", "BatterId",
+             "BatterSide", "BatterTeam", "Level", "PitchUID", "TaggedPitchType", "PitchCall",
+             "KorBB", "PlayResult", "TaggedHitType"}
 _INT_COLS = {"Balls", "Strikes", "PitchofPA", "OutsOnPlay"}
 
 
@@ -108,6 +111,82 @@ def team_maps() -> tuple[dict, dict]:
 
 def team_label(acr: str) -> str:
     return team_maps()[0].get(acr, acr)
+
+
+# ── Player bio: height + birthday from data_pipeline/heights.csv (scraped by height_scraper.py) ────
+# The table is keyed (Name, TrackManId). The app's manual edits are appended as Status='manual' rows
+# that win on read (last row for a key wins); height_scraper skips them (status isn't a retry status).
+HEIGHTS_CSV = REPO / "data_pipeline" / "heights.csv"
+# Column order for a NEW file only — must match height_scraper.FIELDS. An existing file is appended
+# using its own header (read below), so reads/writes stay aligned even if the schema drifts.
+_HEIGHTS_FIELDS = ["Name", "TrackManId", "HeightIn", "Height", "WeightLb", "BirthDate",
+                   "Status", "BRUrl", "ScrapedAt"]
+_HEIGHTS_CACHE: dict = {"mtime": None, "map": {}}
+
+
+def _heights_map() -> dict:
+    """(Name, TrackManId) -> latest row dict, re-read whenever heights.csv changes on disk."""
+    try:
+        mtime = HEIGHTS_CSV.stat().st_mtime
+    except FileNotFoundError:
+        _HEIGHTS_CACHE.update(mtime=None, map={})
+        return {}
+    if _HEIGHTS_CACHE["mtime"] != mtime:
+        m = {}
+        with open(HEIGHTS_CSV, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):        # append-only file: a later row (manual/rescrape) wins
+                m[(r["Name"], r.get("TrackManId", ""))] = r
+        _HEIGHTS_CACHE.update(mtime=mtime, map=m)
+    return _HEIGHTS_CACHE["map"]
+
+
+def _bday(s: str | None) -> date | None:
+    try:
+        return datetime.strptime(s.strip(), "%Y-%m-%d").date() if s and s.strip() else None
+    except ValueError:
+        return None
+
+
+def bio_lookup(name: str, trackman_id: str | None) -> dict | None:
+    """Bio for one player: {height_in, height, weight, birthdate(date|None), status}. Prefers an
+    exact (name, id) match, then falls back to any row with the same name (so a row scraped under a
+    blank/mismatched id still shows). None if the player isn't in the table at all."""
+    m = _heights_map()
+    row = m.get((name, str(trackman_id or ""))) or next((v for (n, _), v in m.items() if n == name), None)
+    if row is None:
+        return None
+    hi, wt = str(row.get("HeightIn") or "").strip(), str(row.get("WeightLb") or "").strip()
+    return {"height_in": int(hi) if hi.isdigit() else None,
+            "height": row.get("Height") or "",
+            "weight": int(wt) if wt.isdigit() else None,
+            "birthdate": _bday(row.get("BirthDate")),
+            "status": row.get("Status") or ""}
+
+
+def save_manual_bio(name: str, trackman_id: str | None, height_in: int | None,
+                    birthdate: date | None) -> None:
+    """Append a Status='manual' bio row from the app's edit form, then bust the read cache. Aligns
+    columns to the file's existing header if present, else bootstraps with _HEIGHTS_FIELDS."""
+    row = {"Name": name, "TrackManId": str(trackman_id or ""),
+           "HeightIn": height_in if height_in else "",
+           "Height": f"{height_in // 12}-{height_in % 12}" if height_in else "", "WeightLb": "",
+           "BirthDate": birthdate.strftime("%Y-%m-%d") if birthdate else "",
+           "Status": "manual", "BRUrl": "",
+           "ScrapedAt": datetime.now(timezone.utc).strftime("%Y-%m-%d")}
+    exists = HEIGHTS_CSV.exists()
+    fields = _HEIGHTS_FIELDS
+    if exists:
+        with open(HEIGHTS_CSV, newline="", encoding="utf-8") as f:
+            hdr = f.readline().strip()
+        if hdr:
+            fields = hdr.split(",")
+    HEIGHTS_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with open(HEIGHTS_CSV, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        if not exists:
+            w.writeheader()
+        w.writerow(row)
+    _HEIGHTS_CACHE["mtime"] = None      # force a re-read on the next lookup
 
 
 # ── Picker index (cached, per role) ───────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import os
 import re
+from datetime import date, datetime
 
 import numpy as np
 import plotly.graph_objects as go
@@ -63,11 +64,84 @@ def _uniq(col):
     return sorted(v for v in col.unique().to_list() if v is not None)
 
 
-def _player_header(name, sub_bits):
-    return html.Div([
+def _player_header(name, sub_bits, bio=None):
+    children = [
         html.Div(name, style={"fontSize": "23px", "fontWeight": 700, "margin": "4px 0"}),
         html.Div(" · ".join(sub_bits), style={"color": "#555", "fontSize": "13px"}),
+    ]
+    if bio is not None:
+        children.append(bio)
+    return html.Div(children)
+
+
+def _bio_line(bio, report_years):
+    """The height / age / birthday / draft-eligibility line under a pitcher's name. Age + eligibility
+    use the report's season (single year -> that year's draft day) or today (multiple years)."""
+    if not bio or (bio["height_in"] is None and bio["birthdate"] is None):
+        return html.Div("Height / age unknown — add it with ✎ Edit height / birthday below.",
+                        style={"color": "#999", "fontSize": "12px", "fontStyle": "italic", "marginTop": "2px"})
+    parts = []
+    if bio["height"]:
+        parts.append(bio["height"])
+    bd = bio["birthdate"]
+    if bd:
+        if len(report_years) == 1:
+            draft_yr, age_ref = report_years[0], report.draft_day(report_years[0])
+        else:
+            draft_yr, age_ref = date.today().year, date.today()
+        parts += [f"Age {report.age_on(bd, age_ref):.1f}", f"Born {bd.strftime('%m/%d/%Y')}",
+                  f"Draft eligible: {report.draft_eligible(bd, report.draft_day(draft_yr))}"]
+    return html.Div(" · ".join(parts),
+                    style={"color": "#333", "fontSize": "13px", "fontWeight": 600, "marginTop": "2px"})
+
+
+def _bio_edit_form(prefix):
+    """Manual bio override — for players Baseball Reference couldn't match. Saving appends a
+    Status='manual' row to heights.csv (wins on read; the scraper won't re-touch it). ``prefix``
+    ('bio' / 'bbio') namespaces the ids so the pitcher and batter forms don't collide."""
+    return html.Details(open=False, style={"margin": "4px 0 2px", "fontFamily": FONT}, children=[
+        html.Summary("✎ Edit height / birthday",
+                     style={"cursor": "pointer", "fontSize": "12px", "color": "#8a1520"}),
+        html.Div([
+            html.Span("Height", style=LABEL),
+            dcc.Input(id=f"{prefix}-height-input", type="text", placeholder="6-2 or 74",
+                      style={"width": "90px", "fontSize": "12px"}),
+            html.Span("Birthday", style=LABEL),
+            dcc.Input(id=f"{prefix}-bday-input", type="text", placeholder="MM/DD/YYYY",
+                      style={"width": "110px", "fontSize": "12px"}),
+            html.Button("Save", id=f"{prefix}-save-btn", n_clicks=0, style=_BTN),
+            html.Span(id=f"{prefix}-save-status",
+                      style={"marginLeft": "8px", "color": "#666", "fontSize": "12px"}),
+        ], style={"display": "flex", "alignItems": "center", "gap": "6px", "flexWrap": "wrap",
+                  "marginTop": "4px"}),
     ])
+
+
+def _parse_height_input(s):
+    """'6-2' / \"6'2\" / inches '74' -> (inches:int|None, error:str|None). Blank -> (None, None)."""
+    if not s or not str(s).strip():
+        return None, None
+    t = str(s).strip().replace("'", "-").replace("’", "-").replace('"', "")
+    m = re.fullmatch(r"(\d)\s*-\s*(\d{1,2})", t)
+    if m:
+        ft, inch = int(m[1]), int(m[2])
+        return (None, "Inches must be 0–11 (e.g. 6-2).") if inch > 11 else (ft * 12 + inch, None)
+    if t.isdigit():
+        n = int(t)
+        return (n, None) if 40 <= n <= 90 else (None, "Height in inches should be ~40–90, or use 6-2.")
+    return None, "Height format: 6-2 or inches like 74."
+
+
+def _parse_bday_input(s):
+    """'MM/DD/YYYY' (also ISO / MM-DD-YYYY) -> (date|None, error:str|None). Blank -> (None, None)."""
+    if not s or not str(s).strip():
+        return None, None
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+        try:
+            return datetime.strptime(str(s).strip(), fmt).date(), None
+        except ValueError:
+            pass
+    return None, "Birthday format: MM/DD/YYYY."
 
 
 def _arsenal_block(dff, batter, count):
@@ -294,13 +368,15 @@ def _dropdown(did, options, value, width=None):
     return dcc.Dropdown(id=did, options=options, value=value, clearable=False, style=style)
 
 
-role_tabs = dcc.Tabs(id="role-tabs", value="pitcher", style={"width": "190px", "marginBottom": "10px"},
+role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": "285px", "marginBottom": "10px"},
                      colors={"primary": MAROON, "background": "#faf7f7", "border": "#e2c9cc"},
-                     children=[dcc.Tab(label="Pitchers", value="pitcher"),
+                     children=[dcc.Tab(label="About", value="about"),
+                               dcc.Tab(label="Pitchers", value="pitcher"),
                                dcc.Tab(label="Batters", value="batter")])
 
 selection = html.Div([
     role_tabs,
+    html.Div(id="picker-controls", style={"display": "none"}, children=[
     html.Div([html.Span("Year(s):", style=LABEL), _checklist("year-check", data.years()),
               html.Span("  (none = All years)", style={"color": "#888", "fontSize": "12px"})],
              style={"marginBottom": "8px"}),
@@ -318,6 +394,7 @@ selection = html.Div([
                           style={"fontSize": "12px", "cursor": "pointer"}),
               html.Span(id="pick-status", style={"marginLeft": "12px", "color": "#666", "fontSize": "12px"})],
              style={"marginTop": "10px"}),
+    ]),
 ], style={"padding": "14px 16px", "background": "#faf7f7", "borderBottom": f"2px solid {MAROON}"})
 
 splits = html.Div([
@@ -373,6 +450,7 @@ retag_panel = html.Details(open=False, style={"margin": "6px 0", "background": "
 # Pitcher report
 pitcher_report = html.Div(id="report", style={"display": "none"}, children=[
     html.Div(id="report-header"),
+    _bio_edit_form("bio"),
     html.Div(id="summary"),
     html.Hr(style={"margin": "10px 0"}),
     html.Div("Splits — Batter AND Count drive the arsenal table AND the heatmap (heatmap stat: "
@@ -392,6 +470,7 @@ pitcher_report = html.Div(id="report", style={"display": "none"}, children=[
 # Batter report
 batter_report = html.Div(id="batter-report", style={"display": "none"}, children=[
     html.Div(id="batter-header"),
+    _bio_edit_form("bbio"),
     html.Div(id="batter-summary"),
     html.Hr(style={"margin": "10px 0"}),
     html.Div([html.Span("Pitch type", style=LABEL),
@@ -415,8 +494,27 @@ batter_report = html.Div(id="batter-report", style={"display": "none"}, children
     ]),
 ])
 
-app.layout = html.Div([dcc.Store(id="retag-version", data=0), selection,
-                       html.Div([pitcher_report, batter_report], style={"padding": "12px 16px"})],
+# About tab landing panel (default view; the tab hides the picker + reports)
+about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=[
+    html.H2("delispice", style={"fontFamily": FONT, "color": MAROON, "margin": "0 0 4px"}),
+    html.Div("TrackMan pitcher & batter scouting reports.",
+             style={"fontFamily": FONT, "fontSize": "15px", "color": "#444", "marginBottom": "14px"}),
+    html.P(["Pick the ", html.B("Pitchers"), " or ", html.B("Batters"),
+            " tab above to begin. Filter by year, level, conference, and team, then choose a "
+            "player to build their report."],
+           style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.5"}),
+    html.Ul([
+        html.Li([html.B("Pitchers"), " — arsenal table, movement & velocity charts, location "
+                 "heatmaps, percentile sliders, plus pitch retagging and AutoCluster tools."]),
+        html.Li([html.B("Batters"), " — pitch-type breakdown, spray chart, and location heatmaps "
+                 "(exit velo / whiff% / chase%) by pitch family and pitcher hand."]),
+    ], style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.6"}),
+])
+
+app.layout = html.Div([dcc.Store(id="retag-version", data=0),
+                       dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
+                       dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"), selection,
+                       html.Div([about_panel, pitcher_report, batter_report], style={"padding": "12px 16px"})],
                       style={"fontFamily": FONT})
 
 
@@ -426,10 +524,21 @@ def cb_label(role):
     return "Batter" if role == "batter" else "Pitcher"
 
 
+# ── About tab: show the About panel, hide the picker controls (reports hide via the player reset) ──
+@app.callback(Output("about-panel", "style"), Output("picker-controls", "style"),
+              Input("role-tabs", "value"))
+def cb_about_toggle(role):
+    if role == "about":
+        return {"padding": "8px 4px"}, {"display": "none"}
+    return {"display": "none"}, {"display": "block"}
+
+
 # ── Cascading pickers (role-aware; all off the small in-memory index) ─────────────────────────────
 @app.callback(Output("conf-dd", "options"), Output("conf-dd", "value"),
               Input("role-tabs", "value"), Input("year-check", "value"), Input("level-dd", "value"))
 def cb_conf(role, years_sel, level):
+    if role not in ("pitcher", "batter"):
+        return [], ALL
     return [{"label": c, "value": c} for c in data.conference_options(role, years_sel, level)], ALL
 
 
@@ -437,6 +546,8 @@ def cb_conf(role, years_sel, level):
               Input("role-tabs", "value"), Input("year-check", "value"),
               Input("level-dd", "value"), Input("conf-dd", "value"))
 def cb_team(role, years_sel, level, conf):
+    if role not in ("pitcher", "batter"):
+        return [], ALL
     return data.team_options(role, years_sel, level, conf), ALL
 
 
@@ -444,6 +555,8 @@ def cb_team(role, years_sel, level, conf):
               Input("role-tabs", "value"), Input("year-check", "value"), Input("level-dd", "value"),
               Input("conf-dd", "value"), Input("team-dd", "value"))
 def cb_player(role, years_sel, level, conf, team):
+    if role not in ("pitcher", "batter"):
+        return [], None
     return data.player_options(role, years_sel, level, conf, team), None
 
 
@@ -453,22 +566,23 @@ def cb_player(role, years_sel, level, conf, team):
     Output("move-graph", "figure"), Output("velo-graph", "figure"),
     Output("arsenal", "children"), Output("heat-graph", "figure"), Output("pick-status", "children"),
     Output("batter-check", "value"), Output("count-check", "value"), Output("pct-panel", "children"),
-    Input("player-dd", "value"), Input("retag-version", "data"),
+    Output("bio-target", "data"),
+    Input("player-dd", "value"), Input("retag-version", "data"), Input("bio-version", "data"),
     State("role-tabs", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
 )
-def cb_build(pitcher, _rv, role, years_sel, level, team):
+def cb_build(pitcher, _rv, _bv, role, years_sel, level, team):
     hidden = {"display": "none"}
     if role != "pitcher":
-        return (hidden, *([no_update] * 10))
+        return (hidden, *([no_update] * 11))
     if not pitcher:
         return (hidden, "", "", go.Figure(), go.Figure(), "", go.Figure(),
-                "Pick filters, then choose a pitcher.", [], [], "")
+                "Pick filters, then choose a pitcher.", [], [], "", None)
 
     pitches = data.get_rows("pitcher", pitcher, level, team, years_sel)
     if pitches.height == 0:
         msg = html.Div(html.I(f"No rows for '{pitcher}' under the current filters."))
-        return {"display": "block"}, msg, "", go.Figure(), go.Figure(), "", go.Figure(), "", [], [], ""
+        return {"display": "block"}, msg, "", go.Figure(), go.Figure(), "", go.Figure(), "", [], [], "", None
 
     hand = report.hand_of(pitches)
     teams = ", ".join(data.team_label(t) for t in _uniq(pitches["PitcherTeam"]))
@@ -481,12 +595,62 @@ def cb_build(pitcher, _rv, role, years_sel, level, team):
         pitches = data.cluster_view(pitches, pitcher)
         colors = _cluster_palette(ent)
         sub.append(f"AutoCluster view · k={ent['k']}")
-    header = _player_header(f"{pitcher} ({hand})", sub)
+    pid = _modal_id(pitches, "PitcherId")
+    bio = data.bio_lookup(pitcher, pid)
+    header = _player_header(f"{pitcher} ({hand})", sub,
+                            _bio_line(bio, sorted(int(y) for y in _uniq(pitches["Year"]))))
     # A new pitcher starts fresh at All batters / all counts (like the notebook's per-run splits).
     return ({"display": "block"}, header, html_table(report.build_summary(pitches)),
             report.movement_fig(pitches, colors), report.velocity_fig(pitches, pitcher, hand, colors),
             _arsenal_block(pitches, [], []), report.heatmap_fig(pitches), "", [], [],
-            _pct_panel(pitcher, level, years_sel))
+            _pct_panel(pitcher, level, years_sel), {"name": pitcher, "id": pid})
+
+
+def _modal_id(df, col):
+    """The most common non-null id in ``col`` (a name filter usually maps to one TrackMan id)."""
+    if col not in df.columns:
+        return None
+    s = df[col].drop_nulls()
+    return s.mode()[0] if s.len() else None
+
+
+def _save_bio(n, height_raw, bday_raw, target, ver):
+    """Shared by the pitcher + batter edit forms. Returns (status message, new version | no_update);
+    bumping the version reruns that report's build callback so the header re-renders with the edit."""
+    if not n or not target or not target.get("name"):
+        raise PreventUpdate
+    height_in, err = _parse_height_input(height_raw)
+    if err:
+        return err, no_update
+    bday, err = _parse_bday_input(bday_raw)
+    if err:
+        return err, no_update
+    if height_in is None and bday is None:
+        return "Enter a height and/or birthday.", no_update
+    data.save_manual_bio(target["name"], target.get("id"), height_in, bday)
+    return "Saved.", (ver or 0) + 1
+
+
+@app.callback(
+    Output("bio-save-status", "children"), Output("bio-version", "data"),
+    Input("bio-save-btn", "n_clicks"),
+    State("bio-height-input", "value"), State("bio-bday-input", "value"),
+    State("bio-target", "data"), State("bio-version", "data"),
+    prevent_initial_call=True,
+)
+def cb_save_bio(n, height_raw, bday_raw, target, ver):
+    return _save_bio(n, height_raw, bday_raw, target, ver)
+
+
+@app.callback(
+    Output("bbio-save-status", "children"), Output("bbio-version", "data"),
+    Input("bbio-save-btn", "n_clicks"),
+    State("bbio-height-input", "value"), State("bbio-bday-input", "value"),
+    State("bbio-target", "data"), State("bbio-version", "data"),
+    prevent_initial_call=True,
+)
+def cb_save_batter_bio(n, height_raw, bday_raw, target, ver):
+    return _save_bio(n, height_raw, bday_raw, target, ver)
 
 
 # ── Build the BATTER report ──────────────────────────────────────────────────────────────────────
@@ -495,31 +659,34 @@ def cb_build(pitcher, _rv, role, years_sel, level, team):
     Output("batter-summary", "children"), Output("batter-pitchtable", "children"),
     Output("spray-graph", "figure"), Output("bheat-graph", "figure"),
     Output("batter-vs", "value"), Output("batter-family", "value"),
-    Output("pick-status", "children", allow_duplicate=True),
-    Input("player-dd", "value"), Input("retag-version", "data"),
+    Output("pick-status", "children", allow_duplicate=True), Output("bbio-target", "data"),
+    Input("player-dd", "value"), Input("retag-version", "data"), Input("bbio-version", "data"),
     State("role-tabs", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
     prevent_initial_call=True,
 )
-def cb_build_batter(batter, _rv, role, years_sel, level, team):
+def cb_build_batter(batter, _rv, _bv, role, years_sel, level, team):
     hidden = {"display": "none"}
     if role != "batter" or not batter:
-        return hidden, *([no_update] * 8)
+        return hidden, *([no_update] * 9)
 
     rows = data.get_rows("batter", batter, level, team, years_sel)
     if rows.height == 0:
         return ({"display": "block"}, html.Div(html.I(f"No rows for '{batter}'.")),
-                "", "", go.Figure(), go.Figure(), "All", "All", "")
+                "", "", go.Figure(), go.Figure(), "All", "All", "", None)
 
     bats = report.bats_of(rows)
     teams = ", ".join(data.team_label(t) for t in _uniq(rows["BatterTeam"]))
     yrs = ", ".join(_uniq(rows["Year"]))
     summ = report.build_batter_summary(rows)
     pa = summ["PA"][0]
-    header = _player_header(f"{batter} ({bats})", [teams, yrs, f"{pa} PA", f"{rows.height:,} pitches seen"])
+    bid = _modal_id(rows, "BatterId")
+    bio = data.bio_lookup(batter, bid)
+    header = _player_header(f"{batter} ({bats})", [teams, yrs, f"{pa} PA", f"{rows.height:,} pitches seen"],
+                            _bio_line(bio, sorted(int(y) for y in _uniq(rows["Year"]))))
     return ({"display": "block"}, header, _scroll(html_table(summ)),
             _batter_pitchtable_block(rows, "All"), report.spray_fig(rows, batter, bats),
-            report.batter_heatmap_fig(rows, "All"), "All", "All", "")
+            report.batter_heatmap_fig(rows, "All"), "All", "All", "", {"name": batter, "id": bid})
 
 
 # ── Batter pitch-type table: vs All / RHP / LHP ──────────────────────────────────────────────────

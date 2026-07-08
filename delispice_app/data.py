@@ -319,15 +319,12 @@ def get_rows(role: str, player: str, level=ALL, team=ALL, years_sel=None) -> pl.
 
 
 # ── Pitch retagging: a non-destructive override layer applied at read time ────────────────────────
-#   * global[old] = new                          -> remap a tag for every pitcher
-#   * pitcher_tag[pitcher][old] = new            -> remap a tag for one pitcher
 #   * pitch[PitchUID] = {"t": new, "p": pitcher} -> retag individual pitches (from the movement lasso)
-# Precedence: global, then per-pitcher tag, then per-pitch (most specific wins). Both reports read
-# through this, so an edit shows up everywhere and is fully reversible.
+# Both reports read through this, so an edit shows up everywhere and is fully reversible. (Tag→tag
+# "remap" rules — global and per-pitcher — were removed; per-pitch retag + AutoCluster replace them.)
 RETAG_PATH = CACHE_DIR / "retags.json"
 _RETAGS: dict = {}
 _RETAGS_LOADED = [False]
-_SEP = "\x01"
 
 
 def load_retags() -> dict:
@@ -337,8 +334,7 @@ def load_retags() -> dict:
         except Exception:
             pass
         _RETAGS_LOADED[0] = True
-    for k in ("global", "pitcher_tag", "pitch"):
-        _RETAGS.setdefault(k, {})
+    _RETAGS.setdefault("pitch", {})
     return _RETAGS
 
 
@@ -346,25 +342,6 @@ def _save_retags() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     RETAG_PATH.write_text(json.dumps(_RETAGS))
     _rows_cached.cache_clear()          # bust per-player cache so reports re-read with the new tags
-
-
-def set_global_rule(old: str, new: str | None) -> None:
-    d = load_retags()
-    if new:
-        d["global"][old] = new
-    else:
-        d["global"].pop(old, None)
-    _save_retags()
-
-
-def set_pitcher_tag(pitcher: str, old: str, new: str | None) -> None:
-    d = load_retags()
-    m = d["pitcher_tag"].setdefault(pitcher, {})
-    if new:
-        m[old] = new
-    else:
-        m.pop(old, None)
-    _save_retags()
 
 
 def set_pitch_overrides(uids, new: str | None, pitcher: str) -> None:
@@ -380,36 +357,26 @@ def set_pitch_overrides(uids, new: str | None, pitcher: str) -> None:
 def clear_retags(pitcher: str | None = None) -> None:
     d = load_retags()
     if pitcher is None:
-        d["global"].clear(); d["pitcher_tag"].clear(); d["pitch"].clear()
+        d["pitch"].clear()
+        d.pop("global", None); d.pop("pitcher_tag", None)     # drop any legacy tag→tag rules on disk
     else:
-        d["pitcher_tag"].pop(pitcher, None)
         d["pitch"] = {u: v for u, v in d["pitch"].items() if v.get("p") != pitcher}
     _save_retags()
 
 
 def retag_summary(pitcher: str | None = None) -> dict:
     d = load_retags()
-    pt = d["pitcher_tag"].get(pitcher, {}) if pitcher else {}
     pitches = sum(1 for v in d["pitch"].values() if not pitcher or v.get("p") == pitcher)
-    return {"global": dict(d["global"]), "pitcher_tag": dict(pt), "pitches": pitches}
+    return {"pitches": pitches}
 
 
 def apply_retags(df: pl.DataFrame) -> pl.DataFrame:
     d = load_retags()
-    if df.height == 0 or not (d["global"] or d["pitcher_tag"] or d["pitch"]):
+    if df.height == 0 or not d["pitch"] or "PitchUID" not in df.columns:
         return df
-    new = pl.col("TaggedPitchType")
-    if d["global"]:
-        new = new.replace(d["global"])
-    if d["pitcher_tag"] and "Pitcher" in df.columns:
-        pt_map = {f"{p}{_SEP}{o}": v for p, tags in d["pitcher_tag"].items() for o, v in tags.items()}
-        if pt_map:
-            key = pl.col("Pitcher") + pl.lit(_SEP) + new
-            new = pl.when(key.is_in(list(pt_map))).then(key.replace(pt_map)).otherwise(new)
-    if d["pitch"] and "PitchUID" in df.columns:
-        uid_map = {u: v["t"] for u, v in d["pitch"].items()}
-        new = pl.when(pl.col("PitchUID").is_in(list(uid_map))) \
-                .then(pl.col("PitchUID").replace(uid_map)).otherwise(new)
+    uid_map = {u: v["t"] for u, v in d["pitch"].items()}
+    new = pl.when(pl.col("PitchUID").is_in(list(uid_map))) \
+            .then(pl.col("PitchUID").replace(uid_map)).otherwise(pl.col("TaggedPitchType"))
     return df.with_columns(new.alias("TaggedPitchType"))
 
 
@@ -425,6 +392,7 @@ def get_pitches(pitcher: str, level=ALL, team=ALL, years_sel=None) -> pl.DataFra
 # labels ("Cluster 0", … or their renames) instead of TaggedPitchType; revert deletes the entry.
 AUTOCLUSTER_PATH = CACHE_DIR / "autocluster.json"
 UNCLUSTERED = "Unclustered"
+UNSURE_THRESHOLD = 0.70          # GMM max-posterior below this = flag the pitch for hand review
 _ACLUSTER: dict = {}
 _ACLUSTER_LOADED = [False]
 
@@ -494,15 +462,56 @@ def cluster_label(ent: dict, idx: int) -> str:
 
 def cluster_view(df: pl.DataFrame, pitcher: str) -> pl.DataFrame:
     """Replace TaggedPitchType with this pitcher's cluster labels (renames win); rows the model
-    couldn't cluster (missing features / not in the clustered selection) become "Unclustered"."""
+    couldn't cluster (missing features / not in the clustered selection) become "Unclustered".
+    When the run stored per-pitch confidence, also append a ``ClusterConf`` column (0–1, the GMM's
+    max posterior; 1.0 for hand-confirmed pitches) — the movement chart shows it on hover."""
     ent = cluster_state(pitcher)
     if not ent or df.height == 0 or "PitchUID" not in df.columns:
         return df
     m = {u: cluster_label(ent, c) for u, c in ent["assign"].items()}
-    new = (pl.when(pl.col("PitchUID").is_in(list(m)))
-             .then(pl.col("PitchUID").replace(m))
-             .otherwise(pl.lit(UNCLUSTERED)))
-    return df.with_columns(new.alias("TaggedPitchType"))
+    cols = [(pl.when(pl.col("PitchUID").is_in(list(m)))
+               .then(pl.col("PitchUID").replace(m))
+               .otherwise(pl.lit(UNCLUSTERED))).alias("TaggedPitchType")]
+    if ent.get("conf"):
+        cols.append(pl.col("PitchUID").replace_strict(ent["conf"], default=None,
+                                                      return_dtype=pl.Float64).alias("ClusterConf"))
+    return df.with_columns(cols)
+
+
+def unsure_pitches(pitcher: str, df: pl.DataFrame, threshold: float = UNSURE_THRESHOLD) -> list[dict]:
+    """Clustered pitches the GMM was unsure about (max posterior < ``threshold``) that haven't been
+    hand-reviewed yet — lowest confidence first, each with the metrics needed to place it by eye.
+    Empty when the run predates confidence storage (re-run AutoCluster to populate it)."""
+    ent = cluster_state(pitcher)
+    if not ent or not ent.get("conf") or df.height == 0 or "PitchUID" not in df.columns:
+        return []
+    reviewed = set(ent.get("reviewed", []))
+    low = {u: c for u, c in ent["conf"].items() if c < threshold and u not in reviewed}
+    if not low:
+        return []
+    sub = (df.filter(pl.col("PitchUID").is_in(list(low)))
+             .select(["PitchUID", "RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak"]))
+    assign = ent["assign"]
+    out = [{"uid": r["PitchUID"], "conf": low[r["PitchUID"]], "cluster": assign.get(r["PitchUID"]),
+            "RelSpeed": r["RelSpeed"], "SpinRate": r["SpinRate"],
+            "InducedVertBreak": r["InducedVertBreak"], "HorzBreak": r["HorzBreak"]}
+           for r in sub.iter_rows(named=True)]
+    out.sort(key=lambda p: p["conf"])
+    return out
+
+
+def set_cluster_assignment(pitcher: str, uid: str, cluster_idx: int) -> None:
+    """Hand-place one pitch into ``cluster_idx``: update its assignment, mark it confirmed
+    (confidence 1.0) and reviewed so it drops out of the unsure queue."""
+    ent = cluster_state(pitcher)
+    if ent is None:
+        return
+    ent["assign"][uid] = int(cluster_idx)
+    ent.setdefault("conf", {})[uid] = 1.0
+    reviewed = ent.setdefault("reviewed", [])
+    if uid not in reviewed:
+        reviewed.append(uid)
+    _save_autocluster()
 
 
 def download_frame(pitcher: str, level=ALL, team=ALL, years_sel=None) -> pl.DataFrame:

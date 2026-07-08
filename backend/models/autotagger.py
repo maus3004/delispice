@@ -118,11 +118,14 @@ def autotag_pitcher(df: pl.DataFrame, use_release: bool = False, features: list[
 
     res = fit_gmm(d.select(feats).to_numpy(), K_RANGE)
     labels, k = res["labels"], res["k"]
+    # Per-pitch confidence = the model's max posterior (responsibility). It's a max over components,
+    # so the size-relabel below (which only renumbers ids) leaves it unchanged — no reordering needed.
+    conf = res["model"].predict_proba(res["scaler"].transform(d.select(feats).to_numpy())).max(axis=1)
     means = res["scaler"].inverse_transform(res["model"].means_)
     if relabel:
         labels, order = relabel_by_size(labels, k)
         means = means[order]
-    return {"labels": labels, "index": d["_row"].to_numpy(), "k": k, "n": n,
+    return {"labels": labels, "index": d["_row"].to_numpy(), "k": k, "n": n, "conf": conf,
             "bic_table": res["bic_table"], "features": feats,
             "model": res["model"], "scaler": res["scaler"],
             "means": means, "counts": np.bincount(labels, minlength=k)}

@@ -330,6 +330,42 @@ def _cluster_rename_area(ent):
     return html.Div(rows, style={"margin": "2px 0 6px 14px"})
 
 
+def _cluster_options(ent):
+    """Assignment-dropdown options: each cluster id with its (renamed) label."""
+    return [{"label": data.cluster_label(ent, i), "value": i} for i in range(ent["k"])]
+
+
+def _review_area(ent, cur, remaining):
+    """One low-confidence pitch at a time: its metrics + assign/skip controls (avoids a wall of rows)."""
+    def metric(lbl, val, unit=""):
+        return html.Div([html.Div(lbl, style={"fontSize": "10px", "color": "#888", "fontWeight": 600}),
+                         html.Div(f"{val:.1f}{unit}" if val is not None else "—",
+                                  style={"fontSize": "15px", "fontWeight": 700})],
+                        style={"textAlign": "center", "minWidth": "70px"})
+    guess = data.cluster_label(ent, cur["cluster"]) if cur["cluster"] is not None else data.UNCLUSTERED
+    return html.Div([
+        html.Div([html.Span("Unsure pitches", style={"fontWeight": 700, "fontSize": "12px"}),
+                  html.Span(f"  {remaining} below {int(data.UNSURE_THRESHOLD * 100)}% confidence — "
+                            "place them one at a time.",
+                            style={"fontSize": "11px", "color": "#777"})]),
+        html.Div([metric("Velo", cur["RelSpeed"], " mph"), metric("Spin", cur["SpinRate"]),
+                  metric("Vert Break", cur["InducedVertBreak"], " in"),
+                  metric("Horz Break", cur["HorzBreak"], " in"),
+                  html.Div([html.Div("Model's guess", style={"fontSize": "10px", "color": "#888", "fontWeight": 600}),
+                            html.Div(f"{guess} · {cur['conf'] * 100:.0f}%",
+                                     style={"fontSize": "13px", "fontWeight": 700})],
+                           style={"textAlign": "center", "minWidth": "130px"})],
+                 style={"display": "flex", "gap": "12px", "alignItems": "center", "margin": "6px 0",
+                        "padding": "6px 10px", "background": "#fff", "border": "1px solid #e2c9cc"}),
+        html.Div([html.Span("Assign to", style={"fontSize": "12px"}),
+                  dcc.Dropdown(id="clu-assign-to", options=_cluster_options(ent), value=cur["cluster"],
+                               clearable=False, style=_RDD),
+                  html.Button("Assign", id="clu-assign-apply", n_clicks=0, style=_BTN),
+                  html.Button("Skip", id="clu-assign-skip", n_clicks=0, style=_BTN)],
+                 style=_ROW),
+    ], style={"margin": "2px 0 6px 14px"})
+
+
 def _safe_name(pitcher):
     return re.sub(r"[^A-Za-z0-9_-]+", "_", pitcher).strip("_")
 
@@ -351,7 +387,7 @@ def _graph(gid, **kw):
 
 
 # ── App + layout ─────────────────────────────────────────────────────────────────────────────────
-app = Dash(__name__, title="delispice_app")
+app = Dash(__name__, title="delispice_app", suppress_callback_exceptions=True)  # review card is built on demand
 server = app.server
 
 _default_level = "D1" if "D1" in data.levels() else ALL
@@ -417,20 +453,12 @@ retag_panel = html.Details(open=False, style={"margin": "6px 0", "background": "
                   html.Button("Assign selected", id="retag-lasso-apply", n_clicks=0, style=_BTN),
                   html.Span(id="retag-lasso-status", style={"marginLeft": "6px", "color": "#666", "fontSize": "12px"})],
                  style=_ROW),
-        html.Div([html.Span("② Remap", style={"fontSize": "12px"}),
-                  dcc.Dropdown(id="retag-from", options=RETAG_TYPE_OPTS, placeholder="from…", style=_RDD),
-                  html.Span("→", style={"fontSize": "13px"}),
-                  dcc.Dropdown(id="retag-to", options=RETAG_TYPE_OPTS, placeholder="to…", style=_RDD),
-                  dcc.Checklist(id="retag-global", options=[{"label": " all pitchers (global)", "value": "g"}],
-                                value=[], style={"display": "inline-block", "fontSize": "12px", "fontFamily": FONT}),
-                  html.Button("Apply remap", id="retag-remap-apply", n_clicks=0, style=_BTN)],
-                 style=_ROW),
         html.Div([html.Span(id="retag-info", style={"color": "#666", "fontSize": "12px", "marginRight": "10px"}),
                   html.Button("Reset this pitcher", id="retag-reset-pitcher", n_clicks=0, style=_BTN),
                   html.Button("Reset all", id="retag-reset-all", n_clicks=0, style=_BTN)],
                  style={"display": "flex", "alignItems": "center", "flexWrap": "wrap"}),
         html.Hr(style={"margin": "8px 0"}),
-        html.Div([html.Span("③ AutoCluster (GMM)", style={"fontSize": "12px", "fontWeight": 700}),
+        html.Div([html.Span("② AutoCluster (GMM)", style={"fontSize": "12px", "fontWeight": 700}),
                   dcc.Checklist(id="cluster-release",
                                 options=[{"label": " + RelHeight & Extension", "value": "r"}], value=[],
                                 style={"display": "inline-block", "fontSize": "12px", "fontFamily": FONT}),
@@ -439,6 +467,7 @@ retag_panel = html.Details(open=False, style={"margin": "6px 0", "background": "
                   html.Span(id="cluster-status", style={"marginLeft": "6px", "color": "#666", "fontSize": "12px"})],
                  style=_ROW),
         html.Div(id="cluster-rename-area"),
+        html.Div(id="cluster-review-area"),
         html.Div([html.Button("⬇ CSV with clusters", id="cluster-dl-csv", n_clicks=0, style=_BTN),
                   html.Button("⬇ Parquet with clusters", id="cluster-dl-parquet", n_clicks=0, style=_BTN),
                   html.Span(id="cluster-dl-status", style={"marginLeft": "6px", "color": "#666", "fontSize": "12px"}),
@@ -496,9 +525,42 @@ batter_report = html.Div(id="batter-report", style={"display": "none"}, children
 
 # About tab landing panel (default view; the tab hides the picker + reports)
 about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=[
-    html.H2("delispice", style={"fontFamily": FONT, "color": MAROON, "margin": "0 0 4px"}),
-    html.Div("TrackMan pitcher & batter scouting reports.",
-             style={"fontFamily": FONT, "fontSize": "15px", "color": "#444", "marginBottom": "14px"}),
+    html.Div(
+        [
+            html.H2(
+                "delispice",
+                style={
+                "fontFamily": FONT, 
+                "color": MAROON, 
+                "margin": 0,
+                }
+            ),
+            # yea i honestly don't know it still doesn't look right but whatever
+            html.Span(
+                "—",
+                style={
+                    "fontFamily":FONT,
+                    "fontSize":"18px",
+                    "color":"#444",
+                    "marginLeft":0,
+                },
+            ),
+            html.Span(
+                "College Baseball on Trackman",
+                style={
+                    "fontFamily":FONT,
+                    "fontSize":"18px",
+                    "color":"#444",
+                    "marginLeft":0,
+                },
+            ),
+        ],
+        style={
+            "display":"flex",
+            "alignItems":"center",
+            "gap":"12px",
+        },
+    ),
     html.P(["Pick the ", html.B("Pitchers"), " or ", html.B("Batters"),
             " tab above to begin. Filter by year, level, conference, and team, then choose a "
             "player to build their report."],
@@ -509,9 +571,23 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
         html.Li([html.B("Batters"), " — pitch-type breakdown, spray chart, and location heatmaps "
                  "(exit velo / whiff% / chase%) by pitch family and pitcher hand."]),
     ], style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.6"}),
+
+    # Moving Components
+    html.H3(
+        "Components",
+        style={
+            "fontFamily": FONT,
+            "display":"inline-block",
+            "borderBottom":f"2px solid {MAROON}",
+            "paddingBottom":"2px",
+            "color": MAROON,
+            "marginTop": "24px",
+        },
+    ),
 ])
 
 app.layout = html.Div([dcc.Store(id="retag-version", data=0),
+                       dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
                        dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
                        dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"), selection,
                        html.Div([about_panel, pitcher_report, batter_report], style={"padding": "12px 16px"})],
@@ -774,14 +850,7 @@ def cb_lasso_status(sel):
               Input("retag-version", "data"), Input("player-dd", "value"), State("role-tabs", "value"))
 def cb_retag_info(_rv, pitcher, role):
     s = data.retag_summary(pitcher if role == "pitcher" else None)
-    parts = []
-    if s["global"]:
-        parts.append("global " + ", ".join(f"{k}→{v}" for k, v in s["global"].items()))
-    if s["pitcher_tag"]:
-        parts.append("this pitcher " + ", ".join(f"{k}→{v}" for k, v in s["pitcher_tag"].items()))
-    if s["pitches"]:
-        parts.append(f"{s['pitches']:,} individual pitch(es)")
-    return "Active: " + " · ".join(parts) if parts else "No retags yet."
+    return f"Active: {s['pitches']:,} individual pitch(es) retagged." if s["pitches"] else "No retags yet."
 
 
 @app.callback(Output("retag-version", "data"),
@@ -794,23 +863,6 @@ def cb_retag_lasso(_n, sel, to_type, pitcher, role, ver):
         raise PreventUpdate
     uids = [p["customdata"][6] for p in sel["points"] if p.get("customdata")]
     data.set_pitch_overrides(uids, to_type, pitcher)
-    return (ver or 0) + 1
-
-
-@app.callback(Output("retag-version", "data", allow_duplicate=True),
-              Input("retag-remap-apply", "n_clicks"),
-              State("retag-from", "value"), State("retag-to", "value"), State("retag-global", "value"),
-              State("player-dd", "value"), State("role-tabs", "value"), State("retag-version", "data"),
-              prevent_initial_call=True)
-def cb_retag_remap(_n, frm, to, glob, pitcher, role, ver):
-    if not frm or not to:
-        raise PreventUpdate
-    if glob:
-        data.set_global_rule(frm, to)
-    elif role == "pitcher" and pitcher:
-        data.set_pitcher_tag(pitcher, frm, to)
-    else:
-        raise PreventUpdate
     return (ver or 0) + 1
 
 
@@ -830,6 +882,7 @@ def cb_retag_reset(_np, _na, pitcher, ver):
 # ── AutoCluster (GMM) ────────────────────────────────────────────────────────────────────────────
 @app.callback(Output("retag-version", "data", allow_duplicate=True),
               Output("cluster-status", "children", allow_duplicate=True),
+              Output("cluster-skip", "data", allow_duplicate=True),
               Input("cluster-run", "n_clicks"), Input("cluster-revert", "n_clicks"),
               State("cluster-release", "value"), State("player-dd", "value"), State("role-tabs", "value"),
               State("year-check", "value"), State("level-dd", "value"), State("team-dd", "value"),
@@ -841,13 +894,13 @@ def cb_cluster_run(_nr, _nv, release, pitcher, role, years_sel, level, team, ver
         if not data.cluster_state(pitcher):
             raise PreventUpdate
         data.clear_autocluster(pitcher)
-        return (ver or 0) + 1, no_update
+        return (ver or 0) + 1, no_update, []          # fresh run -> clear any skipped-pitch memory
     rows = data.get_rows("pitcher", pitcher, level, team, years_sel)
     try:
         data.run_autocluster(pitcher, rows, use_release=bool(release))
     except ValueError as e:
-        return no_update, str(e)
-    return (ver or 0) + 1, no_update
+        return no_update, str(e), no_update
+    return (ver or 0) + 1, no_update, []
 
 
 @app.callback(Output("cluster-status", "children"), Output("cluster-rename-area", "children"),
@@ -863,6 +916,49 @@ def cb_cluster_ui(_rv, pitcher, role):
               + (f" · {ent['n_unclustered']:,} unclustered" if ent["n_unclustered"] else "")
               + f" · {feats}. Name the clusters below — the report updates live.")
     return status, _cluster_rename_area(ent)
+
+
+# ── AutoCluster: one-at-a-time review of low-confidence pitches ───────────────────────────────────
+@app.callback(Output("cluster-review-area", "children"), Output("cluster-current-uid", "data"),
+              Input("retag-version", "data"), Input("player-dd", "value"), Input("cluster-skip", "data"),
+              State("role-tabs", "value"), State("year-check", "value"),
+              State("level-dd", "value"), State("team-dd", "value"))
+def cb_cluster_review(_rv, pitcher, skipped, role, years_sel, level, team):
+    if role != "pitcher" or not pitcher:
+        return "", None
+    ent = data.cluster_state(pitcher)
+    if not ent or not ent.get("conf"):          # nothing to review (or a pre-confidence run)
+        return "", None
+    rows = data.get_rows("pitcher", pitcher, level, team, years_sel)
+    queue = [p for p in data.unsure_pitches(pitcher, rows) if p["uid"] not in (skipped or [])]
+    if not queue:
+        return html.Div("✓ No unsure pitches to review.",
+                        style={"fontSize": "12px", "color": "#2a7a3a", "margin": "2px 0 6px 14px"}), None
+    return _review_area(ent, queue[0], len(queue)), queue[0]["uid"]
+
+
+@app.callback(Output("retag-version", "data", allow_duplicate=True),
+              Input("clu-assign-apply", "n_clicks"),
+              State("clu-assign-to", "value"), State("cluster-current-uid", "data"),
+              State("player-dd", "value"), State("retag-version", "data"), prevent_initial_call=True)
+def cb_cluster_assign(_n, cluster_idx, uid, pitcher, ver):
+    if not pitcher or uid is None or cluster_idx is None:
+        raise PreventUpdate
+    data.set_cluster_assignment(pitcher, uid, cluster_idx)     # bumping the version re-renders the report + card
+    return (ver or 0) + 1
+
+
+@app.callback(Output("cluster-skip", "data", allow_duplicate=True),
+              Input("clu-assign-skip", "n_clicks"),
+              State("cluster-current-uid", "data"), State("cluster-skip", "data"),
+              prevent_initial_call=True)
+def cb_cluster_skip(_n, uid, skipped):
+    if uid is None:
+        raise PreventUpdate
+    skipped = list(skipped or [])
+    if uid not in skipped:
+        skipped.append(uid)                                    # session-only: advances past this pitch
+    return skipped
 
 
 @app.callback(Output("retag-version", "data", allow_duplicate=True),

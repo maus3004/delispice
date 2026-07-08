@@ -548,16 +548,24 @@ def movement_fig(pitches: pl.DataFrame, colors: dict | None = None) -> go.Figure
     f1 = lambda v: f"{v:.1f}" if v is not None else "—"
     f0 = lambda v: f"{v:.0f}" if v is not None else "—"
     fig = go.Figure()
+    has_conf = "ClusterConf" in dm.columns          # AutoCluster view -> show per-pitch confidence
     for pt in dm.group_by("PT").len().sort("len", descending=True)["PT"].to_list():
         s = dm.filter(pl.col("PT") == pt)
-        cd = [[pt, f1(a), f0(b), f1(c), f1(e), (r or "—"), u] for a, b, c, e, r, u in zip(
-              s["RelSpeed"].to_list(), s["SpinRate"].to_list(), s["InducedVertBreak"].to_list(),
-              s["HorzBreak"].to_list(), s["PitchCall"].to_list(), s["PitchUID"].to_list())]
+        base = list(zip(s["RelSpeed"].to_list(), s["SpinRate"].to_list(), s["InducedVertBreak"].to_list(),
+                        s["HorzBreak"].to_list(), s["PitchCall"].to_list(), s["PitchUID"].to_list()))
+        if has_conf:
+            cd = [[pt, f1(a), f0(b), f1(c), f1(e), (r or "—"), u,
+                   (f"{cf * 100:.0f}%" if cf is not None else "—")]
+                  for (a, b, c, e, r, u), cf in zip(base, s["ClusterConf"].to_list())]
+        else:
+            cd = [[pt, f1(a), f0(b), f1(c), f1(e), (r or "—"), u] for a, b, c, e, r, u in base]
+        ht = ("<b>%{customdata[0]}</b><br>Velo %{customdata[1]} mph · Spin %{customdata[2]} rpm<br>"
+              "IVB %{customdata[3]} · HB %{customdata[4]} in<br>%{customdata[5]}"
+              + ("<br>Cluster confidence %{customdata[7]}" if has_conf else "") + "<extra></extra>")
         fig.add_trace(go.Scattergl(x=s["HorzBreak"].to_list(), y=s["InducedVertBreak"].to_list(),
             mode="markers", name=f"{pt} ({s.height})",
             marker=dict(color=palette.get(pt, "#8c8c8c"), size=6, opacity=0.6), customdata=cd,
-            hovertemplate="<b>%{customdata[0]}</b><br>Velo %{customdata[1]} mph · Spin %{customdata[2]} rpm<br>"
-                          "IVB %{customdata[3]} · HB %{customdata[4]} in<br>%{customdata[5]}<extra></extra>"))
+            hovertemplate=ht))
     fig.update_layout(width=520, height=470, template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, font=dict(size=9)),
         margin=dict(l=10, r=10, t=30, b=10),

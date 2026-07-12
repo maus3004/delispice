@@ -14,8 +14,9 @@
 # data_pipeline/ by default, then re-include only the scripts + small refs.
 /data_pipeline/*
 !/data_pipeline/*.py
-!/data_pipeline/heights.csv
 !/data_pipeline/re_matrices/
+# heights.csv is intentionally NOT tracked — it's mutable scraped data each machine
+# appends to (the box runs its own scraper). Sync by rsync if ever needed, like the parquet.
 
 # ── Model artifacts (~10 MB per level-year; rebuild anywhere with
 #    `python -m backend.models.cq_store` — the data is already on each box) ─

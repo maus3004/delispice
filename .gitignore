@@ -17,6 +17,10 @@
 !/data_pipeline/heights.csv
 !/data_pipeline/re_matrices/
 
+# ── Model artifacts (~10 MB per level-year; rebuild anywhere with
+#    `python -m backend.models.cq_store` — the data is already on each box) ─
+/backend/models/artifacts/
+
 # ── App: cached picker index + user retags/clusters (rebuildable/local) ─
 # .cache holds the derived parquet indexes (rebuilt on first run) plus
 # autocluster.json / retags.json (your edits). To carry the edits to a new
@@ -29,3 +33,4 @@
 # ── Superseded / local-only material (kept on disk, out of git) ─────────
 /backend/research/
 /written scouting reports (practice)/
+/.claude/

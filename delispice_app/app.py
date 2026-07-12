@@ -157,8 +157,7 @@ _VS_LABEL = {"All": "All pitchers", "Right": "vs RHP", "Left": "vs LHP"}
 # Per-column widths sized so every header fits on one line.
 _BT_W = {"Pitch": 160, "Pitches Seen": 92, "Pitch Seen %": 92, "Swing %": 68, "Contact %": 80,
          "Good Decision %": 112, "Whiff %": 64, "I-Zone Swing %": 112, "I-Zone Whiff %": 112,
-         "Chase %": 66, "Ground Ball %": 98, "Fly Ball %": 76, "Line Drive %": 90, "Pop Up %": 74,
-         "Hard Hit %": 84, "Avg EV": 68}
+         "Chase %": 66, "Hard Hit %": 84, "Avg EV": 68, "xRV/BBE": 76}
 
 
 def _bt_grid(cols):
@@ -448,7 +447,8 @@ retag_panel = html.Details(open=False, style={"margin": "6px 0", "background": "
     html.Summary("🏷  Retag pitches", style={"cursor": "pointer", "fontWeight": 600, "fontSize": "13px",
                                              "fontFamily": FONT, "padding": "4px 0"}),
     html.Div([
-        html.Div([html.Span("① Box/lasso-select pitches on the movement chart, then assign to", style={"fontSize": "12px"}),
+        html.Div([html.Span("① Box/lasso-select pitches on the movement chart, then assign to",
+                            id="retag-lasso-label", style={"fontSize": "12px"}),
                   dcc.Dropdown(id="retag-lasso-to", options=RETAG_TYPE_OPTS, placeholder="pitch type…", style=_RDD),
                   html.Button("Assign selected", id="retag-lasso-apply", n_clicks=0, style=_BTN),
                   html.Span(id="retag-lasso-status", style={"marginLeft": "6px", "color": "#666", "fontSize": "12px"})],
@@ -518,10 +518,22 @@ batter_report = html.Div(id="batter-report", style={"display": "none"}, children
     dcc.Loading(type="default", children=[
         html.Div(id="batter-pitchtable"),
         html.Hr(style={"margin": "10px 0"}),
-        html.Div([_graph("spray-graph"), _graph("bheat-graph")],
+        html.Div([_graph("bheat-graph"), _graph("launch-graph"), _graph("spray-graph")],
                  style={"display": "flex", "gap": "10px", "flexWrap": "wrap"}),
     ]),
 ])
+
+# One collapsible "Components" topic (flat accordion; body accepts any Dash content, incl. images)
+def _topic(title, *body):
+    return html.Details(open=False, style={"margin": "6px 0", "background": "#faf7f7",
+                                           "border": "1px solid #e2c9cc", "padding": "2px 12px",
+                                           "maxWidth": "720px"}, children=[
+        html.Summary(title, style={"cursor": "pointer", "fontWeight": 600, "fontSize": "14px",
+                                   "fontFamily": FONT, "padding": "6px 0"}),
+        html.Div(list(body), style={"fontFamily": FONT, "fontSize": "14px", "lineHeight": "1.6",
+                                    "padding": "2px 0 10px"}),
+    ])
+
 
 # About tab landing panel (default view; the tab hides the picker + reports)
 about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=[
@@ -574,7 +586,7 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
 
     # Moving Components
     html.H3(
-        "Components",
+        "Models and Machinery",
         style={
             "fontFamily": FONT,
             "display":"inline-block",
@@ -584,6 +596,98 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
             "marginTop": "24px",
         },
     ),
+    _topic("Autocluster and Pitch Retagging",
+           # How to use
+           html.H4("How to use AutoCluster", style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+           html.P(
+               "Hunter Dietz (Arkansas) Pre-AutoCluster Trackman tags:"
+           ),
+           html.Img(src=app.get_asset_url("PreCluster.png"),
+           style={"maxWidth": "50%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+
+           html.P(
+               "To use the autocluster feature on a pitcher, click \"AutoCluster\" There is an option to use RelHeight and Extension " \
+               "if the pitcher varies in those features, but otherwise would be noise so the default excludes them"
+           ),
+           html.Img(src=app.get_asset_url("Cluster_howitworks.png"),
+           style={"maxWidth": "100%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+           html.P(
+               "Each cluster will be numbered and as you look at the movement data, you can group the clusters however you please" \
+               " and according to your own definition of the pitch type. Statistics and charts will be auto updated. The clusters are " \
+               "not perfect, as you see with Dietz's cutters misclustered as ChangeUps, but use the lasso tool to fix those small mistakes."
+           ),
+           html.Img(src=app.get_asset_url("PostCluster.png"),
+           style={"maxWidth": "50%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+           html.P("Below is a deeper dive into the model and the methodology."),
+
+           # Exact Methodology, Limitations, and Future Developments
+           html.H4("Introduction", 
+                   style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+           html.P(
+               "Pitch labels are the thorn of many analysts attempting to create models with college Trackman " \
+               "data. While many D1 Trackman taggers do an excellent job of identifying and labeling pitches, " \
+               "the practice itself is not standardized and there is no such “ground truth” for what should be " \
+               "labeled, say a Slider vs. Sweeper or a Sinker vs. Two-Seam. Another limitation of identifying " \
+               "pitches comes from the fact that we cannot know the pitcher’s intent for every pitch thrown nor " \
+               "the exact name of the pitches that a pitcher throws."
+            ),
+            html.P(
+                "The focus of this model was to ignore the technicalities of naming pitches and simply group " \
+                "them together first. Simplifying the features by only taking velocity, spinrate, and movement " \
+                "proved to be most effective, but some pitchers did vary in their release characteristics so an " \
+                "option to include RelHeight and Extension was added which does improve the model for some pitchers. "
+            ),
+
+            html.H4("Previous Iterations and the Lessons Learned",
+                    style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+            html.P(
+                "The first iterations of a autotagging model used supervised learning by presenting the model with a \"golden set\" " \
+                "of MLB statcast data, but as I quickly learned the model kept failing in differentiating between close pitches like " \
+                "sliders and sweepers or changeups and splitters because there is no \"exact\" definition of what a slider is. I tuned the " \
+                "model to a point where it got 85% accuracy, but that didn't seem anywhere good enough for a dataset that might contain one million rows."
+            ),
+            html.Img(src=app.get_asset_url("Supervised_Iteration.png"),
+                style={"maxWidth": "50%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+            html.P(
+                "But upon closer inspection, there were areas where the pitcher threw a slider but the model labeled the sliders " \
+                "as both slider and cutters. So the new focus was to simply arrive at a coherent, singular cluster of a pitch rather than " \
+                "trying to get the exact name of the pitch down, which is where we are today with the GMM clustering algorithm."
+            ),
+
+            html.H4("The Current Model",
+                    style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+            html.P(
+                "Selecting features"
+            ),
+
+            html.H4("Limitations and Future Developments",
+                    style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+            html.P(
+                "The biggest limitation of this model is sample size. Even with Hunter Dietz's example run, because he threw so few " \
+                "ChangeUps, the model mistakenly clustered many of his cutters into ChangeUps. This sample limitation is the reason why I have" \
+                " not rolled out the autocluster for all pitchers because many of these Trackman tagged pitchers do not throw enough pitches " \
+                "for the clustering model to be confident."
+            ),
+            html.P(
+                "The second limitation is differentiating between pitch subgroups. The model does well differentaiting sliders and cutters " \
+                "(for the most part), but the biggest one is differentiating FourSeam and Sinkers. Now most NCAA D1 pitchers only have one of the two " \
+                "and often a pitch that looks like a sinker will just be a butchered FourSeam and vice versa. But for the true FourSeam, Sinker " \
+                "pitchers, the model will clump all of those pitches as one cluster. The solution to this limitation would be to add in a sub-clustering " \
+                "model, using the same idea as the RelHeight and Extension function. If the data looks like a pitcher truly has a FourSeam, Sinker mix, there will be a " \
+                "button that runs a clustering model within the Fastball cluster using k=2 to split apart the two pitches. Who knows how it'll work, but that's something " \
+                "that will be on the way for this model."
+            ),
+            html.P(
+                "In terms of future developments, the goal is always to create a true autotagger," \
+                " one without humans having to manually label the clusters. To do so, we will use the autocluster feature " \
+                "to create a \"golden set\" of data with pitch types according to my definition of different pitch types and run a " \
+                "supervised classifier that will hopefully be better than the one that I tried to use with MLB Statcast data."
+            ),
+        ),
+    _topic("Contact Quality - Expected Runs on Contact",
+           html.P("Placeholder — TrackMan ingestion, cleaning, and the parquet layout. Write here.")),
+    _topic("Hosting & infrastructure",
+    html.P("Placeholder — VPS, Tailscale tunnel, Caddy, and the home box. Write here.")),
 ])
 
 app.layout = html.Div([dcc.Store(id="retag-version", data=0),
@@ -733,7 +837,7 @@ def cb_save_batter_bio(n, height_raw, bday_raw, target, ver):
 @app.callback(
     Output("batter-report", "style"), Output("batter-header", "children"),
     Output("batter-summary", "children"), Output("batter-pitchtable", "children"),
-    Output("spray-graph", "figure"), Output("bheat-graph", "figure"),
+    Output("spray-graph", "figure"), Output("launch-graph", "figure"), Output("bheat-graph", "figure"),
     Output("batter-vs", "value"), Output("batter-family", "value"),
     Output("pick-status", "children", allow_duplicate=True), Output("bbio-target", "data"),
     Input("player-dd", "value"), Input("retag-version", "data"), Input("bbio-version", "data"),
@@ -744,12 +848,12 @@ def cb_save_batter_bio(n, height_raw, bday_raw, target, ver):
 def cb_build_batter(batter, _rv, _bv, role, years_sel, level, team):
     hidden = {"display": "none"}
     if role != "batter" or not batter:
-        return hidden, *([no_update] * 9)
+        return hidden, *([no_update] * 10)
 
     rows = data.get_rows("batter", batter, level, team, years_sel)
     if rows.height == 0:
         return ({"display": "block"}, html.Div(html.I(f"No rows for '{batter}'.")),
-                "", "", go.Figure(), go.Figure(), "All", "All", "", None)
+                "", "", go.Figure(), go.Figure(), go.Figure(), "All", "All", "", None)
 
     bats = report.bats_of(rows)
     teams = ", ".join(data.team_label(t) for t in _uniq(rows["BatterTeam"]))
@@ -762,6 +866,7 @@ def cb_build_batter(batter, _rv, _bv, role, years_sel, level, team):
                             _bio_line(bio, sorted(int(y) for y in _uniq(rows["Year"]))))
     return ({"display": "block"}, header, _scroll(html_table(summ)),
             _batter_pitchtable_block(rows, "All"), report.spray_fig(rows, batter, bats),
+            report.batter_launch_fig(rows),
             report.batter_heatmap_fig(rows, "All"), "All", "All", "", {"name": batter, "id": bid})
 
 
@@ -769,6 +874,7 @@ def cb_build_batter(batter, _rv, _bv, role, years_sel, level, team):
 @app.callback(
     Output("batter-pitchtable", "children", allow_duplicate=True),
     Output("spray-graph", "figure", allow_duplicate=True),
+    Output("launch-graph", "figure", allow_duplicate=True),
     Input("batter-vs", "value"),
     State("role-tabs", "value"), State("player-dd", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
@@ -780,7 +886,8 @@ def cb_batter_vs(vs, role, batter, years_sel, level, team):
     rows = data.get_rows("batter", batter, level, team, years_sel)
     dff = rows.filter(rows["PitcherThrows"] == vs) if vs in ("Right", "Left") else rows
     return (_batter_pitchtable_block(rows, vs),
-            report.spray_fig(dff, batter, report.bats_of(rows)))
+            report.spray_fig(dff, batter, report.bats_of(rows)),
+            report.batter_launch_fig(dff))
 
 
 # ── Batter location chart: Family × vs-hand -> EV/Whiff surfaces (in place, keeps stat toggle) ────
@@ -846,6 +953,20 @@ def cb_lasso_status(sel):
     return f"{n:,} selected" if n else "(none selected)"
 
 
+# The lasso retargets clusters while AutoCluster is active (cluster labels replace tags on the chart),
+# and pitch types otherwise — so its dropdown options + label follow the current view.
+@app.callback(Output("retag-lasso-to", "options"), Output("retag-lasso-to", "placeholder"),
+              Output("retag-lasso-label", "children"),
+              Input("retag-version", "data"), Input("player-dd", "value"), State("role-tabs", "value"))
+def cb_lasso_options(_rv, pitcher, role):
+    ent = data.cluster_state(pitcher) if (role == "pitcher" and pitcher) else None
+    if ent:
+        return (_cluster_options(ent), "cluster…",
+                "① Lasso-select pitches on the movement chart, then move them to")
+    return (RETAG_TYPE_OPTS, "pitch type…",
+            "① Box/lasso-select pitches on the movement chart, then assign to")
+
+
 @app.callback(Output("retag-info", "children"),
               Input("retag-version", "data"), Input("player-dd", "value"), State("role-tabs", "value"))
 def cb_retag_info(_rv, pitcher, role):
@@ -858,11 +979,25 @@ def cb_retag_info(_rv, pitcher, role):
               State("move-graph", "selectedData"), State("retag-lasso-to", "value"),
               State("player-dd", "value"), State("role-tabs", "value"), State("retag-version", "data"),
               prevent_initial_call=True)
-def cb_retag_lasso(_n, sel, to_type, pitcher, role, ver):
-    if role != "pitcher" or not pitcher or not to_type or not (sel and sel.get("points")):
+def cb_retag_lasso(_n, sel, to, pitcher, role, ver):
+    if role != "pitcher" or not pitcher or to is None or not (sel and sel.get("points")):
         raise PreventUpdate
     uids = [p["customdata"][6] for p in sel["points"] if p.get("customdata")]
-    data.set_pitch_overrides(uids, to_type, pitcher)
+    if not uids:
+        raise PreventUpdate
+    ent = data.cluster_state(pitcher)
+    if ent:                                    # AutoCluster active: lasso bulk-reassigns to a cluster
+        try:                                   # (guards against a stale tag value left in the dropdown)
+            ci = int(to)
+        except (TypeError, ValueError):
+            raise PreventUpdate
+        if not (0 <= ci < ent["k"]):
+            raise PreventUpdate
+        data.set_cluster_assignments(pitcher, uids, ci)
+    else:                                       # normal view: pitch-type retag override
+        if not isinstance(to, str):
+            raise PreventUpdate
+        data.set_pitch_overrides(uids, to, pitcher)
     return (ver or 0) + 1
 
 

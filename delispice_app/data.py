@@ -44,10 +44,11 @@ PITCHER_COLS = [
     "TaggedPitchType", "PitchCall", "KorBB", "PlayResult", "OutsOnPlay",
     "RelSpeed", "SpinRate", "SpinAxis", "RelHeight", "RelSide", "Extension",
     "InducedVertBreak", "HorzBreak", "PlateLocHeight", "PlateLocSide", "ExitSpeed",
+    "Angle", "Direction",            # launch conditions for the contact-quality (xRV) model
 ]
 BATTER_COLS = [
     "Date", "Batter", "BatterId", "BatterSide", "BatterTeam", "Level", "Pitcher", "PitcherThrows", "PitchUID",
-    "PitchofPA", "PitchCall", "KorBB", "PlayResult", "TaggedPitchType", "TaggedHitType",
+    "PitchofPA", "PitchCall", "KorBB", "PlayResult", "TaggedPitchType", "AutoPitchType", "TaggedHitType",
     "PlateLocHeight", "PlateLocSide", "ExitSpeed", "Angle", "Direction", "Bearing", "Distance",
 ]
 
@@ -309,7 +310,39 @@ def _rows_cached(role: str, player: str, level: str, team: str, years_key: tuple
     df = con.execute(f"SELECT {', '.join(r['cols'])} FROM read_parquet({glob_list}) "
                      f"WHERE {' AND '.join(where)}", params).pl()
     con.close()
-    return apply_retags(df.with_columns(pl.col("Date").str.slice(0, 4).alias("Year")))
+    return apply_retags(_with_xrv(df.with_columns(pl.col("Date").str.slice(0, 4).alias("Year"))))
+
+
+# ── Contact quality (xRV) — expected runs on contact, per batted ball ─────────────────────────────
+# Models are trained OFFLINE per (Level, Year) — `python -m backend.models.cq_store` — and served
+# from ~10 MB artifacts. Never trained at request time; rows score null until an artifact exists.
+@functools.lru_cache(maxsize=16)
+def _cq_model(level: str, year: str):
+    from backend.models import cq_store
+    return cq_store.load(level, year)
+
+
+def _with_xrv(df: pl.DataFrame) -> pl.DataFrame:
+    """Append an ``xRV`` column: the k-NN model's expected run value for each ball in play
+    (ExitSpeed/Angle/Direction), scored with that row's own (Level, Year) artifact. Null when the
+    ball wasn't in play, launch data is missing, or the (Level, Year) model isn't trained."""
+    out = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("xRV"))
+    scorable = df.filter((pl.col("PitchCall") == "InPlay") & pl.col("PitchUID").is_not_null()
+                         & pl.col("ExitSpeed").is_not_null() & pl.col("Angle").is_not_null()
+                         & pl.col("Direction").is_not_null())
+    if scorable.height == 0:
+        return out
+    scored = []
+    for (lvl, yr), grp in scorable.partition_by(["Level", "Year"], as_dict=True).items():
+        model = _cq_model(lvl, yr) if lvl and yr else None
+        if model is None:
+            continue
+        X = grp.select(["ExitSpeed", "Angle", "Direction"]).to_numpy().astype(float)
+        scored.append(grp.select("PitchUID").with_columns(pl.Series("xRV_new", model.predict_xrv(X))))
+    if not scored:
+        return out
+    return (out.join(pl.concat(scored), on="PitchUID", how="left")
+               .with_columns(pl.col("xRV_new").alias("xRV")).drop("xRV_new"))
 
 
 def get_rows(role: str, player: str, level=ALL, team=ALL, years_sel=None) -> pl.DataFrame:
@@ -396,19 +429,11 @@ UNSURE_THRESHOLD = 0.70          # GMM max-posterior below this = flag the pitch
 _ACLUSTER: dict = {}
 _ACLUSTER_LOADED = [False]
 
-# The GMM adapter lives with the models (backend/ is not a package -> load it by file path).
-CLUSTER_PY = REPO / "backend" / "models" / "cluster.py"
-_CLUSTER_MOD = [None]
-
-
 def _cluster_mod():
-    if _CLUSTER_MOD[0] is None:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("delispice_cluster", CLUSTER_PY)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _CLUSTER_MOD[0] = mod
-    return _CLUSTER_MOD[0]
+    """The GMM adapter from the ``backend.models`` package (repo root is on sys.path in every
+    launch mode). Imported lazily so sklearn only loads when clustering actually runs."""
+    from backend.models import cluster
+    return cluster
 
 
 def _load_autocluster() -> dict:
@@ -500,18 +525,26 @@ def unsure_pitches(pitcher: str, df: pl.DataFrame, threshold: float = UNSURE_THR
     return out
 
 
-def set_cluster_assignment(pitcher: str, uid: str, cluster_idx: int) -> None:
-    """Hand-place one pitch into ``cluster_idx``: update its assignment, mark it confirmed
-    (confidence 1.0) and reviewed so it drops out of the unsure queue."""
+def set_cluster_assignments(pitcher: str, uids, cluster_idx: int) -> None:
+    """Hand-place one or more pitches into ``cluster_idx``: update their assignments, mark them
+    confirmed (confidence 1.0) and reviewed so they drop out of the unsure queue. Used by both the
+    one-at-a-time review card and the movement-chart lasso (bulk)."""
     ent = cluster_state(pitcher)
     if ent is None:
         return
-    ent["assign"][uid] = int(cluster_idx)
-    ent.setdefault("conf", {})[uid] = 1.0
+    conf = ent.setdefault("conf", {})
     reviewed = ent.setdefault("reviewed", [])
-    if uid not in reviewed:
-        reviewed.append(uid)
+    for uid in uids:
+        ent["assign"][uid] = int(cluster_idx)
+        conf[uid] = 1.0
+        if uid not in reviewed:
+            reviewed.append(uid)
     _save_autocluster()
+
+
+def set_cluster_assignment(pitcher: str, uid: str, cluster_idx: int) -> None:
+    """Single-pitch convenience wrapper around :func:`set_cluster_assignments`."""
+    set_cluster_assignments(pitcher, [uid], cluster_idx)
 
 
 def download_frame(pitcher: str, level=ALL, team=ALL, years_sel=None) -> pl.DataFrame:

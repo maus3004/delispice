@@ -1,31 +1,20 @@
 """AutoCluster adapter — bridges ``autotagger.py`` (sibling module, the reusable GMM extracted from
-``autotagger.ipynb``) to what delispice_app needs: PitchUID-keyed assignments, a JSON-safe result,
-and the app's smaller per-pitcher floor.
+``notebooks/autotagger.ipynb``) to what delispice_app needs: PitchUID-keyed assignments, a JSON-safe
+result, and the app's smaller per-pitcher floor.
 
-Lives in backend/models next to the model it adapts; the app loads it by file path (backend/ is not
-a package), and this file loads ``autotagger.py`` the same way, so both work no matter how they are
-imported. sklearn is only imported when clustering actually runs.
+Part of the ``backend.models`` package. The autotagger import stays inside a function so sklearn is
+only imported when clustering actually runs.
 """
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 import polars as pl
 
-AUTOTAGGER_PATH = Path(__file__).resolve().parent / "autotagger.py"
 MIN_PITCHES = 30
-
-_MOD = [None]
 
 
 def _autotagger():
-    if _MOD[0] is None:
-        spec = importlib.util.spec_from_file_location("autotagger", AUTOTAGGER_PATH)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)                     # imports sklearn lazily, on first use
-        _MOD[0] = mod
-    return _MOD[0]
+    from backend.models import autotagger          # deferred: pulls in sklearn on first cluster run
+    return autotagger
 
 
 def run_gmm(df: pl.DataFrame, use_release: bool = False) -> dict:

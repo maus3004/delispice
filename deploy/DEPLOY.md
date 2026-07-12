@@ -152,6 +152,22 @@ scp delispice_app/.cache/*.json <user>@<server>:~/delispice/delispice_app/.cache
 sudo systemctl restart delispice
 ```
 
+## Model artifacts (contact quality / xRV)
+
+The xRV column in the reports is served from pre-trained model artifacts
+(`backend/models/artifacts/cq_{level}_{year}.npz/.json`, ~4–10 MB each). They are
+**git-ignored** — each machine builds its own from the data it already has:
+
+```bash
+cd ~/delispice
+.venv/bin/python -m backend.models.cq_store          # trains every D1 year (~4 s each)
+sudo systemctl restart delispice                     # reload so the app picks them up
+```
+
+Run that once at deploy, and again whenever a season's data grows (new games) —
+retraining refreshes the model's reference set. Reports render fine without
+artifacts; the xRV cells are just blank until the level+year is trained.
+
 ## Updating after you push new code
 
 ```bash

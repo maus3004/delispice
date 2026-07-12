@@ -9,7 +9,8 @@ web app on a server.
 ```
 delispice_app/        the app — Dash UI/callbacks (app.py), DuckDB serving (data.py),
                       report builders + Plotly figures (report.py), desktop launcher (launch.py)
-backend/models/       reusable model toolkit (autotagger.py) + PitchUID cluster adapter (cluster.py)
+backend/models/       the models package the app imports (autotagger, cluster, contact_quality)
+backend/notebooks/    model-dev workspace — prototype in .ipynb, graduate to backend/models/*.py
 deploy/               server deployment kit — see deploy/DEPLOY.md
 data_pipeline/        TrackMan parquet data — NOT in git; must be present on each machine
 ```

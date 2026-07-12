@@ -107,6 +107,7 @@ def build_summary(df: pl.DataFrame) -> pl.DataFrame:
         "Rel Height": num(df["RelHeight"].mean()), "Rel Side": num(df["RelSide"].mean()),
         "Extension": num(df["Extension"].mean()),
         "K%": pct(so / bf) if bf else "", "BB%": pct(bb / bf) if bf else "",
+        "xRV/BBE": num(df["xRV"].mean() if "xRV" in df.columns else None, 3),
     }])
 
 
@@ -128,6 +129,7 @@ def build_arsenal(df: pl.DataFrame) -> pl.DataFrame:
                  pl.col("RelSide").mean().alias("rs"), pl.col("Extension").mean().alias("ext"),
                  pl.col("ExitSpeed").mean().alias("ev"),
                  (pl.col("ExitSpeed") >= HARD_HIT_MPH).filter(pl.col("ExitSpeed").is_not_null()).mean().alias("hh"),
+                 pl.col("xRV").mean().alias("xrv"),      # expected runs allowed per ball in play
              ).sort("count", descending=True))
     rows = []
     for r in agg.iter_rows(named=True):
@@ -140,7 +142,7 @@ def build_arsenal(df: pl.DataFrame) -> pl.DataFrame:
                      "Strike %": pct(r["strike"]), "WHIFF %": pct(whiff), "Vert Break": num(r["vb"]),
                      "Horz Break": num(r["hb"]), "Tilt": spin_clock(axis), "Rel Height": num(r["rh"]),
                      "Rel Side": num(r["rs"]), "Extension": num(r["ext"]), "Hard Hit %": pct(r["hh"]),
-                     "Avg EV": num(r["ev"])})
+                     "Avg EV": num(r["ev"]), "xRV/BBE": num(r["xrv"], 3)})
     return pl.DataFrame(rows)
 
 
@@ -195,6 +197,7 @@ def build_batter_summary(df: pl.DataFrame) -> pl.DataFrame:
         "AVG": _avg3(avg), "OBP": _avg3(obp), "SLG": _avg3(slg), "OPS": _avg3(ops),
         "K%": pct(so / pa) if pa else "", "BB%": pct(bb / pa) if pa else "",
         "Avg EV": num(ev, 1), "Hard Hit %": pct(hh), "Avg LA": num(la, 1),
+        "xRV/BBE": num(df["xRV"].mean() if "xRV" in df.columns else None, 3),
     }])
 
 
@@ -207,14 +210,30 @@ PITCH_FAMILY = {
     "ChangeUp": "Offspeed", "Splitter": "Offspeed",
 }
 FAMILY_ORDER = ["Fastballs", "Breaking", "Offspeed", "Others"]
+# AutoPitchType uses display-style names; normalize the two that differ from the raw tag vocabulary.
+AUTO_TO_RAW = {"Four-Seam": "FourSeamFastBall", "Changeup": "ChangeUp"}
+
+
+def _eff_type_expr(df: pl.DataFrame):
+    """Effective pitch type for the batter tables/charts: TaggedPitchType, falling back to
+    AutoPitchType (normalized to the raw vocabulary) whenever the tag would land in 'Others'."""
+    tagged = pl.col("TaggedPitchType")
+    tagged_fam = tagged.fill_null("Undefined").replace_strict(PITCH_FAMILY, default="Others")
+    auto = (pl.col("AutoPitchType").replace(AUTO_TO_RAW) if "AutoPitchType" in df.columns
+            else pl.lit(None, dtype=pl.Utf8))
+    return pl.when(tagged_fam != "Others").then(tagged).otherwise(auto)
+
+
+def _family_expr(eff):
+    return eff.fill_null("Undefined").replace_strict(PITCH_FAMILY, default="Others")
 # Raw tag -> display sub-type (OneSeamFastBall folds into "Fastball", per request).
 SUB_DISPLAY = {"FourSeamFastBall": "Four-Seam", "TwoSeamFastBall": "Two-Seam",
                "OneSeamFastBall": "Fastball", "ChangeUp": "Changeup"}
 BATTER_TABLE_COLS = ["Pitch", "Pitches Seen", "Pitch Seen %", "Swing %", "Contact %",
                      "Good Decision %", "Whiff %", "I-Zone Swing %", "I-Zone Whiff %", "Chase %",
-                     "Ground Ball %", "Fly Ball %", "Line Drive %", "Pop Up %", "Hard Hit %", "Avg EV"]
+                     "Hard Hit %", "Avg EV", "xRV/BBE"]
 _COMPONENT_KEYS = ("count", "swings", "whiffs", "loc_n", "good", "iz_n", "iz_sw", "iz_whiff",
-                   "oz_n", "oz_sw", "gb", "fb", "ld", "pu", "ev_n", "hh", "ev_sum")
+                   "oz_n", "oz_sw", "ev_n", "hh", "ev_sum", "xrv_n", "xrv_sum")
 
 
 def _pitch_components(df: pl.DataFrame) -> list[dict]:
@@ -229,10 +248,8 @@ def _pitch_components(df: pl.DataFrame) -> list[dict]:
     in_zone = loc & (pl.col("PlateLocSide").abs() <= ZONE["h"]) & pl.col("PlateLocHeight").is_between(ZONE["b"], ZONE["t"])
     out_zone = loc & ~in_zone
     inplay = pl.col("PitchCall") == "InPlay"
-    ht = pl.col("TaggedHitType")
-    tp = pl.col("TaggedPitchType").fill_null("Undefined")
-    d = df.with_columns(tp.replace_strict(PITCH_FAMILY, default="Others").alias("fam"),
-                        tp.replace(SUB_DISPLAY).alias("sub"))
+    eff = _eff_type_expr(df)
+    d = df.with_columns(_family_expr(eff).alias("fam"), eff.replace(SUB_DISPLAY).alias("sub"))
     return d.group_by(["fam", "sub"]).agg(
         pl.len().alias("count"), swing.sum().alias("swings"),
         whiff.sum().alias("whiffs"), loc.sum().alias("loc_n"),
@@ -240,16 +257,15 @@ def _pitch_components(df: pl.DataFrame) -> list[dict]:
         in_zone.sum().alias("iz_n"), (in_zone & swing).sum().alias("iz_sw"),
         (in_zone & whiff).sum().alias("iz_whiff"),
         out_zone.sum().alias("oz_n"), (out_zone & swing).sum().alias("oz_sw"),
-        (inplay & (ht == "GroundBall")).sum().alias("gb"), (inplay & (ht == "FlyBall")).sum().alias("fb"),
-        (inplay & (ht == "LineDrive")).sum().alias("ld"), (inplay & (ht == "Popup")).sum().alias("pu"),
         (inplay & pl.col("ExitSpeed").is_not_null()).sum().alias("ev_n"),
         (inplay & (pl.col("ExitSpeed") >= HARD_HIT_MPH)).sum().alias("hh"),
         pl.col("ExitSpeed").filter(inplay).sum().alias("ev_sum"),
+        pl.col("xRV").is_not_null().sum().alias("xrv_n"),   # xRV is only scored on balls in play
+        pl.col("xRV").sum().alias("xrv_sum"),
     ).to_dicts()
 
 
 def _pitch_row(name, c, total) -> dict:
-    bb = c["gb"] + c["fb"] + c["ld"] + c["pu"]
     return {
         "Pitch": name, "Pitches Seen": c["count"], "Pitch Seen %": pct(c["count"] / total) if total else "",
         "Swing %": pct(c["swings"] / c["count"]) if c["count"] else "",
@@ -259,10 +275,9 @@ def _pitch_row(name, c, total) -> dict:
         "I-Zone Swing %": pct(c["iz_sw"] / c["iz_n"]) if c["iz_n"] else "",
         "I-Zone Whiff %": pct(c["iz_whiff"] / c["iz_sw"]) if c["iz_sw"] else "",
         "Chase %": pct(c["oz_sw"] / c["oz_n"]) if c["oz_n"] else "",
-        "Ground Ball %": pct(c["gb"] / bb) if bb else "", "Fly Ball %": pct(c["fb"] / bb) if bb else "",
-        "Line Drive %": pct(c["ld"] / bb) if bb else "", "Pop Up %": pct(c["pu"] / bb) if bb else "",
         "Hard Hit %": pct(c["hh"] / c["ev_n"]) if c["ev_n"] else "",
         "Avg EV": num(c["ev_sum"] / c["ev_n"], 1) if c["ev_n"] else "",
+        "xRV/BBE": num(c["xrv_sum"] / c["xrv_n"], 3) if c["xrv_n"] else "",
     }
 
 
@@ -440,8 +455,7 @@ BATTER_FAMILIES = ["All", "Fastballs", "Breaking", "Offspeed"]
 def _family_filter(df: pl.DataFrame, family: str) -> pl.DataFrame:
     if not family or family == "All":
         return df
-    fam = pl.col("TaggedPitchType").fill_null("Undefined").replace_strict(PITCH_FAMILY, default="Others")
-    return df.filter(fam == family)
+    return df.filter(_family_expr(_eff_type_expr(df)) == family)
 
 
 def _ev_surface(df):
@@ -529,6 +543,62 @@ def batter_heatmap_fig(df: pl.DataFrame, family: str = "All") -> go.Figure:
         xaxis=dict(range=list(XR), title="", showticklabels=False, fixedrange=True),
         yaxis=dict(range=list(YR), title="", showticklabels=False, fixedrange=True,
                    scaleanchor="x", scaleratio=1))
+    fig.add_annotation(text="Pitcher's view", x=1.0, y=1.12, xref="paper", yref="paper",
+                       xanchor="right", yanchor="top", showarrow=False, font=dict(size=11, color="#888"))
+    return fig
+
+
+# ── Batter launch-angle histogram (replaces the table's GB/LD/FB/PU columns) ─────────────────────
+# Bands are defined by launch angle, not TaggedHitType: GB <10°, LD 10–25°, FB 25–50°, PU >50°.
+LAUNCH_BANDS = [("GB", "Ground Ball", -90, 10, "#a1743b"),
+                ("LD", "Line Drive",  10,  25, "#2e7d32"),
+                ("FB", "Fly Ball",    25,  50, "#1f77b4"),
+                ("PU", "Pop Up",      50,  90, "#e07b28")]
+_LAUNCH_ANN_X = {"GB": -32, "LD": 17.5, "FB": 37.5, "PU": 62}    # label anchor per band
+
+
+def batter_launch_fig(df: pl.DataFrame) -> go.Figure:
+    """Launch-angle histogram of balls in play (5° bins), bars colored by angle band, with an
+    on-chart pitch-family dropdown. Each family swaps in its own bars, band %s, and title, so the
+    annotated percentages always describe what's on screen."""
+    bbe = df.filter((pl.col("PitchCall") == "InPlay") & pl.col("Angle").is_not_null())
+    edges = np.arange(-90, 91, 5)                       # 5° bins align with the 10/25/50 cuts
+    centers = (edges[:-1] + edges[1:]) / 2
+    fig = go.Figure()
+    buttons = []
+    for fi, fam in enumerate(BATTER_FAMILIES):
+        d = _family_filter(bbe, fam)
+        counts, _ = np.histogram(d["Angle"].to_numpy(), bins=edges)
+        n = int(counts.sum())
+        # ~30% headroom above the tallest bar keeps the top strip empty for the band labels.
+        yrange = [0, max(int(counts.max()), 1) * 1.3]
+        anns = []
+        for short, name, lo, hi, color in LAUNCH_BANDS:
+            in_band = (centers >= lo) & (centers < hi)
+            y = np.where(in_band, counts, 0)
+            fig.add_trace(go.Bar(x=centers, y=y, width=5, marker_color=color, visible=(fi == 0),
+                                 showlegend=False,
+                                 hovertemplate=name + "<br>%{x}° · %{y} BBE<extra></extra>"))
+            anns.append(dict(x=_LAUNCH_ANN_X[short], y=0.98, xref="x", yref="paper", yanchor="top",
+                             showarrow=False, font=dict(size=12, color=color),
+                             text=f"<b>{short} {y.sum() / n:.0%}</b>" if n else ""))
+        title = f"Launch Angle · {fam} · {n:,} BBE"
+        buttons.append(dict(label=fam, method="update",
+                            args=[{"visible": [j // 4 == fi for j in range(4 * len(BATTER_FAMILIES))]},
+                                  {"annotations": anns, "title.text": title, "yaxis.range": yrange}]))
+        if fi == 0:
+            first_anns, first_title, first_yrange = anns, title, yrange
+    for _x in (10, 25, 50):                             # band separators
+        fig.add_shape(type="line", x0=_x, x1=_x, y0=0, y1=1, yref="paper",
+                      line=dict(color="#cccccc", width=1, dash="dot"))
+    fig.update_layout(width=520, height=470, template="plotly_white", barmode="overlay",
+        bargap=0.05, annotations=first_anns,
+        title=dict(text=first_title, x=0.62, y=0.97, font=dict(size=13)),
+        updatemenus=[dict(buttons=buttons, direction="down", showactive=True,
+                          x=0.0, xanchor="left", y=1.14, yanchor="top", pad=dict(l=2, t=2))],
+        margin=dict(l=10, r=10, t=74, b=40),
+        xaxis=dict(range=[-75, 85], title="Launch angle (°)", dtick=25, fixedrange=True),
+        yaxis=dict(title="Balls in play", range=first_yrange, fixedrange=True))
     return fig
 
 
@@ -599,6 +669,8 @@ def heatmap_fig(pitches: pl.DataFrame) -> go.Figure:
         xaxis=dict(range=list(XR), title="", showticklabels=False, fixedrange=True),
         yaxis=dict(range=list(YR), title="", showticklabels=False, fixedrange=True,
                    scaleanchor="x", scaleratio=1))
+    fig.add_annotation(text="Pitcher's view", x=1.0, y=1.14, xref="paper", yref="paper",
+                       xanchor="right", yanchor="top", showarrow=False, font=dict(size=11, color="#888"))
     return fig
 
 

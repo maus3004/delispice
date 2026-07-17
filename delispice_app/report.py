@@ -282,14 +282,17 @@ def _pitch_row(name, c, total) -> dict:
 
 
 def batter_pitch_families(df: pl.DataFrame, vs=None) -> list[dict]:
-    """Batter pitch table grouped into families. Returns, in family order, dicts of
-    ``{family, agg (row for the whole family), subs (per-pitch-type rows)}`` — for a collapsible table.
+    """Batter pitch table: a leading combined ``All`` row (``subs=[]``) followed by one dict per
+    family — ``{family, agg (row for the whole group), subs (per-pitch-type rows)}``.
     ``vs`` in {None, 'Right', 'Left'} filters by pitcher hand."""
     if vs in ("Right", "Left"):
         df = df.filter(pl.col("PitcherThrows") == vs)
     comps = _pitch_components(df)
     total = sum(c["count"] for c in comps)
     out = []
+    if comps:                                   # combined row across every family (all pitches)
+        allc = {k: sum((c[k] or 0) for c in comps) for k in _COMPONENT_KEYS}
+        out.append({"family": "All", "agg": _pitch_row("All", allc, total), "subs": []})
     for fam in FAMILY_ORDER:
         members = [c for c in comps if c["fam"] == fam]
         if not members:

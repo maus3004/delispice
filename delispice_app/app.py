@@ -175,8 +175,10 @@ def _bt_cell(val, i, kind):
                "justifyContent": "flex-start" if left else "center"}
     else:
         st |= {"borderBottom": "1px solid #eee"}
-        if kind == "family":
+        if kind in ("family", "all"):
             st |= {"fontWeight": 700, "background": "#faf3f4"}
+            if kind == "all":                       # combined total row — stand out a touch
+                st |= {"background": "#efdde0", "borderBottom": "2px solid #d9b3b8"}
         elif left:
             st |= {"paddingLeft": "30px", "color": "#333"}
     return html.Div("" if val is None else val, style=st)
@@ -193,15 +195,23 @@ def _batter_pitchtable_block(rows, vs):
     total_w = sum(_BT_W.get(c, 90) for c in cols)
     blocks = [html.Div([_bt_cell(c, i, "header") for i, c in enumerate(cols)], style=grid)]
     for fam in families:
-        first = html.Div([html.Span("▶", className="fam-arrow",
-                                    style={"display": "inline-block", "marginRight": "7px", "fontSize": "10px", "color": MAROON}),
-                          html.Span(fam["agg"]["Pitch"])],
+        is_all = fam["family"] == "All"             # leading combined row: not collapsible, no arrow
+        kind = "all" if is_all else "family"
+        name_bits = ([] if is_all else
+                     [html.Span("▶", className="fam-arrow",
+                                style={"display": "inline-block", "marginRight": "7px", "fontSize": "10px", "color": MAROON})])
+        name_bits.append(html.Span(fam["agg"]["Pitch"]))
+        first = html.Div(name_bits,
                          style={"padding": "4px 8px", "fontSize": "12px", "fontFamily": FONT, "fontWeight": 700,
-                                "background": "#faf3f4", "borderBottom": "1px solid #eee", "whiteSpace": "nowrap"})
-        fam_cells = [first] + [_bt_cell(fam["agg"][c], i, "family") for i, c in enumerate(cols) if i > 0]
-        summary = html.Summary(html.Div(fam_cells, style=grid))
-        subs = [html.Div([_bt_cell(sub[c], i, "sub") for i, c in enumerate(cols)], style=grid) for sub in fam["subs"]]
-        blocks.append(html.Details([summary, *subs], className="fam"))
+                                "background": "#efdde0" if is_all else "#faf3f4", "whiteSpace": "nowrap",
+                                "borderBottom": "2px solid #d9b3b8" if is_all else "1px solid #eee"})
+        row_cells = [first] + [_bt_cell(fam["agg"][c], i, kind) for i, c in enumerate(cols) if i > 0]
+        row = html.Div(row_cells, style=grid)
+        if is_all:
+            blocks.append(row)                      # plain total row, not a <details>
+        else:
+            subs = [html.Div([_bt_cell(sub[c], i, "sub") for i, c in enumerate(cols)], style=grid) for sub in fam["subs"]]
+            blocks.append(html.Details([html.Summary(row), *subs], className="fam"))
     return html.Div([_title(f"By pitch type · {label}  (click a family to expand)"),
                      _scroll(html.Div(blocks, style={"minWidth": f"{total_w}px", "border": "1px solid #e2e2e2"}))])
 
@@ -594,8 +604,13 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
             "paddingBottom":"2px",
             "color": MAROON,
             "marginTop": "24px",
+            "marginBottom": "6px",
         },
     ),
+    html.P(["Below are articles that I wrote about the learning process and thoughts that I have had while designing the models" \
+            " and the inner workings of this app"],
+           style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.5",
+                  "marginTop": "0"}),
     _topic("Autocluster and Pitch Retagging",
            # How to use
            html.H4("How to use AutoCluster", style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
@@ -637,11 +652,25 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
                 "proved to be most effective, but some pitchers did vary in their release characteristics so an " \
                 "option to include RelHeight and Extension was added which does improve the model for some pitchers. "
             ),
+            html.H4("The Current Model - Gaussian Mixture Model",
+                    style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+            html.P(
+                "The model currently takes four features: Velocity, SpinRate, Vertical Movement, and Horizontal Movement. There are some " \
+                "pitchers where release characteristics truly differ for each pitch, but generally those four features work perfectly fine. " \
+                "All left-handed pitcher's horizontal movement was multiplied by -1 to make the model pitcher hand agnostic."
+            ),
+
+            html.P(
+                "The model iterates through 1–6 pitch clusters using both the BIC and ICL to determine the optimal number of clusters, " \
+                "with a lower ICL taking precedence when the criteria differ. A full covariance matrix was used for each Gaussian component, " \
+                "allowing each pitch cluster to have its own size, elliptical shape, and orientation, as well as capturing correlations between" \
+                " features, rather than constraining clusters to spherical or axis-aligned (diagonal) forms"
+            ),
 
             html.H4("Previous Iterations and the Lessons Learned",
                     style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
             html.P(
-                "The first iterations of a autotagging model used supervised learning by presenting the model with a \"golden set\" " \
+                "Before I even decided on using GMM to cluster pitches, the first iterations of an autotagging model used supervised learning by presenting the model with a \"golden set\" " \
                 "of MLB statcast data, but as I quickly learned the model kept failing in differentiating between close pitches like " \
                 "sliders and sweepers or changeups and splitters because there is no \"exact\" definition of what a slider is. I tuned the " \
                 "model to a point where it got 85% accuracy, but that didn't seem anywhere good enough for a dataset that might contain one million rows."
@@ -653,11 +682,53 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
                 "as both slider and cutters. So the new focus was to simply arrive at a coherent, singular cluster of a pitch rather than " \
                 "trying to get the exact name of the pitch down, which is where we are today with the GMM clustering algorithm."
             ),
-
-            html.H4("The Current Model",
-                    style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
             html.P(
-                "Selecting features"
+                "But, even developing the current clustering model wasn't without its own learning experiences. " \
+                "Initially I selected features that I, myself, would look for when I tagged games on Trackman. These features included " \
+                "Velocity, SpinRate, Movement, and Tilt (SpinAxis). Every feature normalized easily except for SpinAxis where 10 degrees " \
+                "and 350 degrees are both curveballs. Even normalized, the model would have a tough time seeing that these two pitches are " \
+                "the same. So, to get around this problem, I decided to take the sin and cosine of the spin axis to convert the degrees into " \
+                "two numbers from 0-1, spin_x and spin_y. This was clearly a mistake. "
+            ),
+            html.Img(src=app.get_asset_url("diving_BIC.png"),
+                style={"maxWidth": "15%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+            html.P(
+                "We select the optimal number of clusters, or pitches, by looking for k with the lowest BIC. " \
+                "But BIC dives with each k and these college pitchers certainly don't have six pitch mixes. " \
+            ),
+            dcc.Markdown(r"""
+                $BIC = -2 \ln(\hat{L}) + k \ln(n)$, where $-2 \ln(\hat{L})$ is the reward function and $k \ln(n)$ is the penalty function.
+                """, mathjax=True
+            ),
+            dcc.Markdown(r"""
+                The relationship of the SpinAxis features: $spin\_x^2 + spin\_y^2 = 1$ flattened the data into a perfect, 
+                         infinitely thin ring. So while the BIC formula is normally a balance act with the reward and penalty function, in this 
+                         case, the model was realizing that if it adds more components, k, it can cover more tiny, straight-line arcs along 
+                         the ring that the SpinAxis features created. The penalty of overfitting, or adding more k components, was essentially
+                         dwarfed by the Gaussian squishing itself into that ring with zero variance which shot the log-likelihood to infinity.
+                         So even if we extend the loop to find k to k=10 or k=100, it would select 10 or 100 because BIC keeps diving with each increase in k.
+                         Also, Trackman's SpinAxis is derived from movement so adding SpinAxis was a redundant feature anyways.
+                         """, mathjax=True),
+            html.P(
+                "In addition, by this point, I had been only using BIC as a scoring metric. " \
+                "However, with inconsistent pitchers, BIC began to overestimate an inconsistent pitcher's pitch mix thinking that the " \
+                "variations represented different pitch types rather than inconsistent deliveries. "
+            ),
+            html.Img(src=app.get_asset_url("Gaeckle_BIC_example.png"),
+                style={"maxWidth": "50%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+            html.P(
+                "Now Gabe Gaeckle is not an inconsisent pitcher by any means but even with a consistent pitcher, " \
+                "Gaeckle's cluster 1 and cluster 3 are essentially the same pitches but clustered separately. "
+            ),
+            html.P(
+                "To solve this quirk, I implemented ICL as another scoring metric that serves as a double check for BIC and take precedence over BIC. " \
+                "ICL penalizes uncertainty and favors distinct, well-separated clusters"
+            ),
+            html.Img(src=app.get_asset_url("BIC_and_ICL.png"),
+                style={"maxWidth": "50%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+            html.P(
+                "BIC and ICL will normally be very close together as seen with the Mason Edwards example. " \
+                "But in our new Gabe Gaeckles example, even as the BIC for k=5 is the lowest in BIC, because the ICL for k=4 is lower than the ICL for k=5, we go with k=4."
             ),
 
             html.H4("Limitations and Future Developments",
@@ -686,6 +757,16 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
         ),
     _topic("Contact Quality - Expected Runs on Contact",
            html.P("Placeholder — TrackMan ingestion, cleaning, and the parquet layout. Write here.")),
+    _topic("Eye Metric - Expected Runs on Swing/Take Decisions",
+           html.P("The model begins with a simple premise like all swing decision models do, "),
+           html.H4("Limitations and Future Developments", style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+           html.P(
+               "Heights are not taken into consideration and with the upcoming NCAA rule change to introduce ABS to D1 games, " \
+               "adding heights would be the obvious next step. " \
+               "So, rather than training the model on the raw pitch locations, we would normalize the strike-zone according to each batter's height."
+           ),
+    ),
+           
     _topic("Hosting & infrastructure",
     html.P("Placeholder — VPS, Tailscale tunnel, Caddy, and the home box. Write here.")),
 ])

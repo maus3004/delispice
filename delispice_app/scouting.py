@@ -63,10 +63,12 @@ CREATE TABLE IF NOT EXISTS report_versions (
   grades      TEXT,
   deleted     INTEGER NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL,
-  report_date TEXT
+  report_date TEXT,
+  bats_throws TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_rv_thread ON report_versions(player_key, author_id, created_at DESC, id DESC);
 """
+# Created AFTER column migrations run, so an older DB that predates author_id still upgrades cleanly.
+_INDEX = "CREATE INDEX IF NOT EXISTS ix_rv_thread ON report_versions(player_key, author_id, created_at DESC, id DESC)"
 
 
 def _conn() -> sqlite3.Connection:
@@ -84,9 +86,11 @@ def init_db() -> None:
         con.executescript(_SCHEMA)
         cols = {r[1] for r in con.execute("PRAGMA table_info(report_versions)")}
         for col, ddl in (("report_date", "ALTER TABLE report_versions ADD COLUMN report_date TEXT"),
-                         ("author_id", "ALTER TABLE report_versions ADD COLUMN author_id INTEGER")):
+                         ("author_id", "ALTER TABLE report_versions ADD COLUMN author_id INTEGER"),
+                         ("bats_throws", "ALTER TABLE report_versions ADD COLUMN bats_throws TEXT")):
             if col not in cols:                 # migrate DBs created before these columns existed
                 con.execute(ddl)
+        con.execute(_INDEX)                     # after migrations, so author_id is guaranteed to exist
 
 
 def player_key(player_id: str | None, player_name: str | None) -> str:
@@ -159,7 +163,8 @@ def _now() -> str:
 
 
 def save_version(*, player_name, player_id=None, role, school=None, position=None, ovr=None,
-                 author=None, author_id=None, body=None, grades=None, report_date=None) -> str:
+                 bats_throws=None, author=None, author_id=None, body=None, grades=None,
+                 report_date=None) -> str:
     """Append a new version in the (player, author) thread. ``author`` is the initials snapshot
     for display; ``author_id`` is the verified identity that defines the thread. ``report_date``
     is the user-entered date; ``created_at`` stays the server insert time and orders versions."""
@@ -167,10 +172,10 @@ def save_version(*, player_name, player_id=None, role, school=None, position=Non
     with _conn() as con:
         con.execute(
             "INSERT INTO report_versions (player_key, player_name, player_id, role, school, "
-            "position, ovr, author, author_id, body, grades, report_date, deleted, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
+            "position, ovr, author, author_id, body, grades, report_date, bats_throws, deleted, "
+            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
             (key, player_name, player_id, role, school, position, ovr, author, author_id, body,
-             json.dumps(grades or {}), report_date, _now()))
+             json.dumps(grades or {}), report_date, bats_throws, _now()))
     return key
 
 

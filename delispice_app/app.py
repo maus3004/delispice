@@ -863,6 +863,7 @@ shortlist_form = html.Div(id="sl-form", style=_SL_FORM_STYLE, children=[
     _sl_field("Name", _sl_in("sl-form-name", "player name", "260px")),
     _sl_field("School", _sl_in("sl-form-school", "school", "220px")),
     _sl_field("Position", _sl_in("sl-form-pos", "e.g. RHP or 1B/DH", "160px")),
+    _sl_field("Bats / Throws", _sl_in("sl-form-bt", "R/R", "90px")),
     _sl_field("OVR", _sl_grade("sl-form-ovr")),
     _sl_field("Date", dcc.Input(id="sl-form-date", type="date", value=date.today().isoformat(),
                                 style={**_SL_INPUT, "width": "150px"})),
@@ -964,9 +965,11 @@ def _sl_report_section(entry, rep, auth):
     created = scouting.fmt_date(first.get("report_date")) or scouting.stamp(first["created_at"])
     edited = scouting.fmt_date(latest.get("report_date")) or scouting.stamp(latest["created_at"])
     meta = f"Created {created}" + (f" · Edited {edited}" if len(versions) > 1 else "")
+    bt = latest.get("bats_throws")
     head = [html.Span(who, style={"fontWeight": 700, "color": MAROON, "fontSize": "13px"}),
             html.Span(f"OVR {latest['ovr']}" if latest["ovr"] is not None else "",
                       style={"fontWeight": 600, "fontSize": "12px", "marginLeft": "10px"}),
+            html.Span(f"B/T {bt}" if bt else "", style={"fontSize": "12px", "marginLeft": "10px"}),
             html.Span(meta, style={"fontSize": "11px", "color": "#888", "marginLeft": "10px"})]
     if own:
         head.append(html.Button("✎ Edit", n_clicks=0, style=_BTN,
@@ -1107,14 +1110,15 @@ def cb_sl_toggle_form(_n, st):
               Output("sl-form", "style", allow_duplicate=True),
               Input("sl-save-btn", "n_clicks"),
               State("sl-auth", "data"), State("sl-form-role", "value"), State("sl-form-name", "value"),
-              State("sl-form-school", "value"), State("sl-form-pos", "value"), State("sl-form-ovr", "value"),
+              State("sl-form-school", "value"), State("sl-form-pos", "value"),
+              State("sl-form-bt", "value"), State("sl-form-ovr", "value"),
               State("sl-form-body", "value"), State("sl-form-date", "value"),
               *[State(f"sl-g-{g}", "value") for g in scouting.HITTER_GRADES],
               State("sl-g-Control", "value"),
               *[State(f"sl-p{i}-name", "value") for i in range(1, 7)],
               *[State(f"sl-p{i}-grade", "value") for i in range(1, 7)],
               State("sl-version", "data"), prevent_initial_call=True)
-def cb_sl_save(_n, auth, role, name, school, pos, ovr, body, report_date, *rest):
+def cb_sl_save(_n, auth, role, name, school, pos, bt, ovr, body, report_date, *rest):
     a = scouting.verify_author((auth or {}).get("initials"), (auth or {}).get("pw"))
     if a is None:                                 # the REAL gate — auth store alone is forgeable
         return "✗ Not signed in (or session expired) — not saved.", no_update, no_update
@@ -1130,7 +1134,7 @@ def cb_sl_save(_n, auth, role, name, school, pos, ovr, body, report_date, *rest)
         if control is not None:
             grades["Control"] = control
     scouting.save_version(player_name=name.strip(), role=role, school=school, position=pos,
-                          ovr=ovr, author=a["initials"], author_id=a["id"],
+                          bats_throws=bt, ovr=ovr, author=a["initials"], author_id=a["id"],
                           body=body, grades=grades, report_date=report_date)
     return f"✓ Saved {name.strip()} · {a['display_name']}.", (version or 0) + 1, {**_SL_FORM_STYLE, "display": "none"}
 
@@ -1142,6 +1146,7 @@ def cb_sl_save(_n, auth, role, name, school, pos, ovr, body, report_date, *rest)
     Output("sl-form-name", "value", allow_duplicate=True),
     Output("sl-form-school", "value", allow_duplicate=True),
     Output("sl-form-pos", "value", allow_duplicate=True),
+    Output("sl-form-bt", "value", allow_duplicate=True),
     Output("sl-form-ovr", "value", allow_duplicate=True),
     Output("sl-form-date", "value", allow_duplicate=True),
     Output("sl-form-body", "value", allow_duplicate=True),
@@ -1151,7 +1156,7 @@ def cb_sl_save(_n, auth, role, name, school, pos, ovr, body, report_date, *rest)
     *[Output(f"sl-p{i}-grade", "value", allow_duplicate=True) for i in range(1, 7)],
     Input("sl-version", "data"), prevent_initial_call=True)
 def cb_sl_clear_form(_v):
-    return ("pitcher", "", "", "", None, date.today().isoformat(), "",
+    return ("pitcher", "", "", "", "", None, date.today().isoformat(), "",
             *[None] * len(scouting.HITTER_GRADES), None,
             *[""] * 6, *[None] * 6)
 
@@ -1159,7 +1164,7 @@ def cb_sl_clear_form(_v):
 @app.callback(Output("sl-form-role", "value", allow_duplicate=True),
               Output("sl-form-name", "value", allow_duplicate=True),
               Output("sl-form-school", "value", allow_duplicate=True),
-              Output("sl-form-pos", "value"), Output("sl-form-ovr", "value"),
+              Output("sl-form-pos", "value"), Output("sl-form-bt", "value"), Output("sl-form-ovr", "value"),
               Output("sl-form-date", "value"), Output("sl-form-body", "value"),
               *[Output(f"sl-g-{g}", "value") for g in scouting.HITTER_GRADES],
               Output("sl-g-Control", "value"),
@@ -1180,7 +1185,7 @@ def cb_sl_edit(_clicks):
     pitches = (g.get("pitches") or [])[:6]
     pnames = [p.get("name") for p in pitches] + [None] * (6 - len(pitches))
     pgrades = [p.get("grade") for p in pitches] + [None] * (6 - len(pitches))
-    return (v["role"], v["player_name"], v["school"], v["position"], v["ovr"],
+    return (v["role"], v["player_name"], v["school"], v["position"], v.get("bats_throws"), v["ovr"],
             v.get("report_date") or date.today().isoformat(), v["body"],
             *[g.get(x) for x in scouting.HITTER_GRADES], g.get("Control"),
             *pnames, *pgrades, {**_SL_FORM_STYLE, "display": "block"})

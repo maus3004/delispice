@@ -22,6 +22,10 @@
 #    `python -m backend.models.cq_store` — the data is already on each box) ─
 /backend/models/artifacts/
 
+# ── Scouting DB — user-written notes; the one store here that CANNOT be
+#    regenerated. Machine-local (lives on the box), git-ignored. BACK IT UP. ─
+/delispice_app/.data/
+
 # ── App: cached picker index + user retags/clusters (rebuildable/local) ─
 # .cache holds the derived parquet indexes (rebuilt on first run) plus
 # autocluster.json / retags.json (your edits). To carry the edits to a new

@@ -12,6 +12,7 @@ server in a native pop-up window via pywebview.
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 from datetime import date, datetime
@@ -21,7 +22,7 @@ import plotly.graph_objects as go
 from dash import ALL as ALLPM, Dash, Input, Output, Patch, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
-from . import data, report
+from . import data, report, scouting
 
 ALL = data.ALL
 RETAG_TYPES = ["Fastball", "Sinker", "FourSeamFastBall", "TwoSeamFastBall", "Cutter", "Slider",
@@ -398,6 +399,7 @@ def _graph(gid, **kw):
 # ── App + layout ─────────────────────────────────────────────────────────────────────────────────
 app = Dash(__name__, title="delispice_app", suppress_callback_exceptions=True)  # review card is built on demand
 server = app.server
+scouting.init_db()          # create the scouting SQLite store on first import (idempotent)
 
 _default_level = "D1" if "D1" in data.levels() else ALL
 
@@ -413,11 +415,12 @@ def _dropdown(did, options, value, width=None):
     return dcc.Dropdown(id=did, options=options, value=value, clearable=False, style=style)
 
 
-role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": "285px", "marginBottom": "10px"},
+role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": "380px", "marginBottom": "10px"},
                      colors={"primary": MAROON, "background": "#faf7f7", "border": "#e2c9cc"},
                      children=[dcc.Tab(label="About", value="about"),
                                dcc.Tab(label="Pitchers", value="pitcher"),
-                               dcc.Tab(label="Batters", value="batter")])
+                               dcc.Tab(label="Batters", value="batter"),
+                               dcc.Tab(label="Shortlist", value="shortlist")])
 
 selection = html.Div([
     role_tabs,
@@ -587,13 +590,55 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
             " tab above to begin. Filter by year, level, conference, and team, then choose a "
             "player to build their report."],
            style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.5"}),
-    html.Ul([
-        html.Li([html.B("Pitchers"), " — arsenal table, movement & velocity charts, location "
-                 "heatmaps, percentile sliders, plus pitch retagging and AutoCluster tools."]),
-        html.Li([html.B("Batters"), " — pitch-type breakdown, spray chart, and location heatmaps "
-                 "(exit velo / whiff% / chase%) by pitch family and pitcher hand."]),
-    ], style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.6"}),
 
+    html.P(
+        ["Go to the ", html.B("Shortlist"), " tab to read scouting reports on various amateur players by our contributors!"],
+        style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.5"}
+    ),
+
+    html.H3(
+        "Contributors",
+        style={
+            "fontFamily": FONT,
+            "display":"inline-block",
+            "borderBottom":f"2px solid {MAROON}",
+            "paddingBottom":"2px",
+            "color": MAROON,
+            "marginTop": "24px",
+            "marginBottom": "6px",
+        },
+    ),
+    _topic("Matt Baek - Creator and Developer",
+        html.Img(src=app.get_asset_url("Matt_Baek_Intro.png"),
+        style={"maxWidth": "25%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+        html.P(
+            "Hello, my name is Matt Baek "
+            "and I am currently in my last year at University of Southern California studying Applied and Computational Mathematics while " \
+            "working as an analyst for USC baseball! " \
+            "I've spent summers as an analyst with the Santa Barbara Foresters in the Cali Collegiate League and the " \
+            "Brewster Whitecaps in the Cape Cod Baseball League " \
+            "learning and growing a greater love for baseball.",
+            style={"fontFamily": FONT, "fontSize": "16px", "maxWidth": "680px", "lineHeight": "1.5"}
+        ),
+        html.P(
+            "This website is a personal project that I created during my time with the Brewster Whitecaps. " \
+            "Wrestling and working with this project has taught me so much of everything from networking and database management to machine learning modeling. " \
+            "This project will be ongoing as I search for graduate opportunities, hoping to bring what I learned from this project to help a school " \
+            "or front office one day. ",
+            style={"fontFamily": FONT, "fontSize": "16px", "maxWidth": "680px", "lineHeight": "1.5"}
+        ),
+        html.P(
+            "Below is a link that directs you to my resume! Please feel free to reach out to me from the info on the resume!",
+            style={"fontFamily": FONT, "fontSize": "16px", "maxWidth": "680px", "lineHeight": "1.5"}
+        ),
+        html.A("Matt Baek Resume",
+        href=app.get_asset_url("Matt_Baek_Resume.pdf"),    
+        style={"display": "inline-block", "marginTop": "10px", "fontSize": "13px",
+                "fontFamily": FONT, "color": "#fff", "background": MAROON,
+                "padding": "6px 12px", "borderRadius": "4px", "textDecoration": "none"}),
+
+    ),
+    
     # Moving Components
     html.H3(
         "Models and Machinery",
@@ -607,7 +652,7 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
             "marginBottom": "6px",
         },
     ),
-    html.P(["Below are articles that I wrote about the learning process and thoughts that I have had while designing the models" \
+    html.P(["Below are articles that Matt Baek wrote about the learning process and the thoughts while designing the models" \
             " and the inner workings of this app"],
            style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.5",
                   "marginTop": "0"}),
@@ -771,11 +816,399 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
     html.P("Placeholder — VPS, Tailscale tunnel, Caddy, and the home box. Write here.")),
 ])
 
+# ══ Shortlist / scouting ═══════════════════════════════════════════════════════════════════════════
+_SL_INPUT = {"fontSize": "12px", "fontFamily": FONT, "padding": "3px 6px"}
+_SL_FORM_STYLE = {"display": "none", "border": f"1px solid {MAROON}", "background": "#fff",
+                  "padding": "12px 14px", "margin": "10px 0", "maxWidth": "780px"}
+_SL_HDR = {"background": MAROON, "color": "#fff", "fontWeight": 600, "fontSize": "12px",
+           "fontFamily": FONT, "padding": "5px 8px", "borderRight": "1px solid #fff"}
+_SL_COLS = [("Player", 190), ("School", 150), ("Pos", 80), ("OVR", 70), ("Author", 200)]
+_SL_GRID = {"display": "grid", "gridTemplateColumns": " ".join(f"{w}px" for _, w in _SL_COLS)}
+
+
+def _sl_in(id_, ph, w="120px", type_="text"):
+    return dcc.Input(id=id_, type=type_, placeholder=ph, style={**_SL_INPUT, "width": w})
+
+
+def _sl_grade(id_, ph=""):
+    return dcc.Input(id=id_, type="number", placeholder=ph, min=20, max=80, step=5,
+                     style={**_SL_INPUT, "width": "56px"})
+
+
+def _sl_field(label, control):
+    return html.Div([html.Span(label, style={**LABEL, "width": "96px", "display": "inline-block"}), control],
+                    style={"display": "flex", "alignItems": "center", "marginBottom": "6px"})
+
+
+_hitter_grades = html.Div(id="sl-hitter-grades", style={"display": "none"}, children=[
+    html.Div([html.Span(g, style={**LABEL, "width": "56px"}), _sl_grade(f"sl-g-{g}")],
+             style={"display": "inline-flex", "alignItems": "center", "marginRight": "12px", "marginBottom": "4px"})
+    for g in scouting.HITTER_GRADES])
+
+_pitcher_grades = html.Div(id="sl-pitcher-grades", style={"display": "none"}, children=[
+    html.Div([html.Span("Control", style={**LABEL, "width": "56px"}), _sl_grade("sl-g-Control")],
+             style={"marginBottom": "6px"}),
+    html.Div([html.Div([_sl_in(f"sl-p{i}-name", f"Pitch {i}", "120px"), _sl_grade(f"sl-p{i}-grade")],
+                       style={"display": "inline-flex", "gap": "4px", "marginRight": "10px", "marginBottom": "4px"})
+              for i in range(1, 7)]),
+])
+
+shortlist_form = html.Div(id="sl-form", style=_SL_FORM_STYLE, children=[
+    _sl_field("Type", dcc.RadioItems(id="sl-form-role", value="pitcher", inline=True,
+        options=[{"label": "Pitcher", "value": "pitcher"}, {"label": "Hitter", "value": "batter"}],
+        style={"display": "inline-block", "fontSize": "13px", "fontFamily": FONT},
+        inputStyle={"marginRight": "4px", "marginLeft": "10px"})),
+    _sl_field("Find player", dcc.Dropdown(id="sl-form-pick", options=[], placeholder="type a name (optional)…",
+                                          style={"width": "360px", "fontSize": "12px"})),
+    _sl_field("Name", _sl_in("sl-form-name", "player name", "260px")),
+    _sl_field("School", _sl_in("sl-form-school", "school", "220px")),
+    _sl_field("Position", _sl_in("sl-form-pos", "e.g. RHP or 1B/DH", "160px")),
+    _sl_field("OVR", _sl_grade("sl-form-ovr")),
+    _sl_field("Date", dcc.Input(id="sl-form-date", type="date", value=date.today().isoformat(),
+                                style={**_SL_INPUT, "width": "150px"})),
+    _hitter_grades, _pitcher_grades,
+    html.Div([html.Span("Report", style={**LABEL, "display": "block", "marginBottom": "3px"}),
+              dcc.Textarea(id="sl-form-body", placeholder="scouting notes…",
+                           style={"width": "100%", "height": "120px", **_SL_INPUT})],
+             style={"marginTop": "8px"}),
+    html.Div([html.Button("Save report", id="sl-save-btn", n_clicks=0, style=_BTN),
+              html.Span(id="sl-save-status", style={"marginLeft": "10px", "fontSize": "12px", "color": "#666"})],
+             style={"marginTop": "8px"}),
+])
+
+shortlist_panel = html.Div(id="shortlist-panel", style={"display": "none", "padding": "8px 4px"}, children=[
+    html.H2("Shortlist", style={"fontFamily": FONT, "color": MAROON, "margin": "0 0 8px"}),
+    html.Div([
+        dcc.Input(id="sl-search", type="text", placeholder="Search name, school, or position…",
+                  style={**_SL_INPUT, "width": "240px", "marginRight": "10px"}),
+        dcc.RadioItems(id="sl-role", value="all", inline=True,
+            options=[{"label": "All", "value": "all"}, {"label": "Pitchers", "value": "pitcher"},
+                     {"label": "Batters", "value": "batter"}],
+            style={"fontSize": "13px", "fontFamily": FONT, "marginRight": "6px"},
+            inputStyle={"marginRight": "4px", "marginLeft": "10px"}),
+        dcc.Dropdown(id="sl-author-filter", options=[], placeholder="Author…", clearable=True,
+                     style={"width": "130px", "fontSize": "12px"}),
+        html.Span("· click a column heading to sort", style={"fontSize": "12px", "color": "#999"}),
+    ], style={"display": "flex", "alignItems": "center", "gap": "6px", "flexWrap": "wrap", "marginBottom": "8px"}),
+    dcc.Store(id="sl-sort", data={"col": "OVR", "dir": "desc"}),
+    dcc.Store(id="sl-auth", storage_type="session"),      # {initials, pw} — re-verified on every write
+    html.Div([html.Span("Author", style=LABEL),
+              _sl_in("sl-login-initials", "initials", "80px"),
+              dcc.Input(id="sl-login-pw", type="password", placeholder="password",
+                        style={**_SL_INPUT, "width": "130px"}),
+              html.Button("Sign in", id="sl-login-btn", n_clicks=0, style=_BTN),
+              html.Button("Sign out", id="sl-logout-btn", n_clicks=0, style=_BTN),
+              html.Span(id="sl-login-status", style={"marginLeft": "8px", "fontSize": "12px", "color": "#666"})],
+             style={"display": "flex", "alignItems": "center", "gap": "6px", "marginBottom": "6px"}),
+    html.Div(id="sl-editor", style={"display": "none"}, children=[
+        html.Button("+ Add report", id="sl-add-btn", n_clicks=0, style=_BTN),
+        html.Span(id="sl-del-status", style={"marginLeft": "10px", "fontSize": "12px", "color": "#666"}),
+    ]),
+    shortlist_form,
+    dcc.Store(id="sl-version", data=0),
+    html.Div(id="sl-table", style={"marginTop": "10px"}),
+])
+
+
+_SL_CELL_ST = {"padding": "5px 8px", "fontSize": "12px", "fontFamily": FONT, "whiteSpace": "nowrap",
+               "overflow": "hidden", "textOverflow": "ellipsis", "borderBottom": "1px solid #eee"}
+
+
+def _sl_cell(text, i):
+    return html.Div("—" if text in (None, "") else str(text),
+                    style={**_SL_CELL_ST, "fontWeight": 700 if i == 0 else 400})
+
+
+def _sl_version_block(v, role):
+    gl = scouting.grades_line(role, v["grades"])
+    return html.Div([
+        html.Div(f"{scouting.fmt_date(v.get('report_date')) or scouting.stamp(v['created_at'])} · "
+                 f"OVR {v['ovr'] if v['ovr'] is not None else '—'}",
+                 style={"fontSize": "12px", "fontWeight": 600, "color": MAROON, "marginTop": "6px"}),
+        html.Div(gl, style={"fontSize": "12px", "color": "#444"}) if gl else None,
+        html.Div(v["body"] or "", style={"fontSize": "13px", "whiteSpace": "pre-wrap", "marginTop": "2px"}),
+    ], style={"borderTop": "1px dashed #ddd", "paddingTop": "2px"})
+
+
+_SL_SORT_KEY = {"Player": "player_name", "School": "school", "Pos": "position",
+                "OVR": "ovr_max", "Author": "authors_label"}
+
+
+def _sl_sort_rows(rows, sort):
+    """Sort the shortlist by the clicked column; nulls always sink to the bottom."""
+    key = _SL_SORT_KEY.get(sort.get("col"), "ovr_max")
+    present = [r for r in rows if r.get(key) not in (None, "")]
+    absent = [r for r in rows if r.get(key) in (None, "")]
+    present.sort(key=lambda r: r[key] if key == "ovr_max" else str(r[key]).lower(),
+                 reverse=(sort.get("dir") == "desc"))
+    return present + absent
+
+
+def _sl_header(sort):
+    """Clickable column headers; the active column carries a ▲/▼ arrow."""
+    cells = []
+    for name, _w in _SL_COLS:
+        arrow = (" ▲" if sort.get("dir") == "asc" else " ▼") if sort.get("col") == name else ""
+        cells.append(html.Div(name + arrow, id={"type": "sl-hdr", "col": name}, n_clicks=0,
+                              style={**_SL_HDR, "cursor": "pointer", "userSelect": "none"}))
+    return html.Div(cells, style=_SL_GRID)
+
+
+def _sl_report_section(entry, rep, auth):
+    """One author's report inside a player's expansion: header (author · dates · buttons),
+    grades, body, and that author's own version history."""
+    versions = scouting.versions_for_thread(entry["player_key"], rep["thread"]) or [rep]
+    latest, first = versions[0], versions[-1]
+    who = rep.get("author_name") or rep.get("author") or "—"
+    own = bool(auth) and rep.get("author_id") is not None and auth.get("id") == rep.get("author_id")
+    created = scouting.fmt_date(first.get("report_date")) or scouting.stamp(first["created_at"])
+    edited = scouting.fmt_date(latest.get("report_date")) or scouting.stamp(latest["created_at"])
+    meta = f"Created {created}" + (f" · Edited {edited}" if len(versions) > 1 else "")
+    head = [html.Span(who, style={"fontWeight": 700, "color": MAROON, "fontSize": "13px"}),
+            html.Span(f"OVR {latest['ovr']}" if latest["ovr"] is not None else "",
+                      style={"fontWeight": 600, "fontSize": "12px", "marginLeft": "10px"}),
+            html.Span(meta, style={"fontSize": "11px", "color": "#888", "marginLeft": "10px"})]
+    if own:
+        head.append(html.Button("✎ Edit", n_clicks=0, style=_BTN,
+                                id={"type": "sl-edit", "key": entry["player_key"], "thread": rep["thread"]}))
+    if own or (bool(auth) and auth.get("is_admin")):
+        head.append(dcc.ConfirmDialogProvider(
+            html.Button("Remove", style=_BTN),
+            id={"type": "sl-del", "key": entry["player_key"], "thread": rep["thread"]},
+            message=f"Remove {who}'s report on {entry['player_name']}? History stays in the database."))
+    gl = scouting.grades_line(rep["role"], latest["grades"])
+    section = [
+        html.Div(head, style={"display": "flex", "alignItems": "center", "flexWrap": "wrap", "gap": "2px"}),
+        html.Div(gl, style={"fontSize": "13px", "fontWeight": 600, "margin": "4px 0"}) if gl else None,
+        html.Div(latest["body"] or "", style={"fontSize": "13px", "whiteSpace": "pre-wrap"}),
+    ]
+    if len(versions) > 1:
+        section.append(html.Details([
+            html.Summary(f"Previous versions ({len(versions) - 1})",
+                         style={"cursor": "pointer", "fontSize": "12px", "color": MAROON, "marginTop": "6px"}),
+            *[_sl_version_block(v, rep["role"]) for v in versions[1:]]]))
+    return html.Div(section, style={"padding": "6px 0 8px", "borderBottom": "1px dashed #e2c9cc"})
+
+
+def _shortlist_table(entries, sort, auth):
+    if not entries:
+        return html.I("No reports match. Sign in and click “+ Add report” to start one.",
+                      style={"fontSize": "13px", "color": "#777"})
+    blocks = [_sl_header(sort)]
+    for e in entries:
+        player_cell = html.Div([
+            html.Span("▶", className="fam-arrow",
+                      style={"display": "inline-block", "marginRight": "6px", "fontSize": "10px", "color": MAROON}),
+            html.Span(e["player_name"] or "")], style={**_SL_CELL_ST, "fontWeight": 700})
+        summ = html.Div([player_cell, _sl_cell(e.get("school"), 1),
+                         _sl_cell(e.get("position"), 2), _sl_cell(e.get("ovr_label"), 3),
+                         _sl_cell(e.get("authors_label"), 4)], style=_SL_GRID)
+        sections = [_sl_report_section(e, rep, auth) for rep in e["reports"]]
+        blocks.append(html.Details([html.Summary(summ), html.Div(sections, style={"padding": "0 10px 4px"})],
+                                   className="fam"))
+    return html.Div(blocks, style={"border": "1px solid #e2e2e2", "maxWidth": "700px"})
+
+
+@app.callback(Output("sl-table", "children"), Output("sl-author-filter", "options"),
+              Input("role-tabs", "value"), Input("sl-version", "data"),
+              Input("sl-role", "value"), Input("sl-sort", "data"), Input("sl-search", "value"),
+              Input("sl-author-filter", "value"), Input("sl-auth", "data"))
+def cb_sl_table(tab, _v, role, sort, query, author, auth):
+    if tab != "shortlist":
+        raise PreventUpdate
+    sort = sort or {"col": "OVR", "dir": "desc"}
+    entries = scouting.players(role if role in ("pitcher", "batter") else None, author or None)
+    q = (query or "").strip().lower()
+    if q:                                         # match across name / school / position / authors
+        entries = [e for e in entries if q in " ".join(str(e.get(f) or "").lower()
+                   for f in ("player_name", "school", "position", "authors_label"))]
+    entries = _sl_sort_rows(entries, sort)
+    a = auth if isinstance(auth, dict) and auth.get("id") else None
+    return (_shortlist_table(entries, sort, a),
+            [{"label": au["name"], "value": au["initials"]} for au in scouting.report_authors()])
+
+
+@app.callback(Output("sl-sort", "data"), Input({"type": "sl-hdr", "col": ALLPM}, "n_clicks"),
+              State("sl-sort", "data"), prevent_initial_call=True)
+def cb_sl_sort(_clicks, cur):
+    trig = ctx.triggered_id
+    if not trig or not ctx.triggered or not ctx.triggered[0]["value"]:
+        raise PreventUpdate                       # ignore the re-render that recreates the headers
+    col, cur = trig["col"], (cur or {"col": "OVR", "dir": "desc"})
+    if cur.get("col") == col:                     # same column -> flip direction
+        return {"col": col, "dir": "asc" if cur.get("dir") == "desc" else "desc"}
+    return {"col": col, "dir": "desc" if col == "OVR" else "asc"}   # OVR defaults high-first
+
+
+@app.callback(Output("sl-form-pick", "options"), Input("sl-form-pick", "search_value"))
+def cb_sl_pick_search(search):
+    if not search or len(search) < 2:
+        raise PreventUpdate
+    return [{"label": f"{p['name']} · {p['school']} ({'P' if p['role'] == 'pitcher' else 'H'})",
+             "value": json.dumps(p)} for p in data.search_players(search)]
+
+
+@app.callback(Output("sl-form-name", "value"), Output("sl-form-school", "value"),
+              Output("sl-form-role", "value"), Input("sl-form-pick", "value"), prevent_initial_call=True)
+def cb_sl_autofill(val):
+    if not val:
+        raise PreventUpdate
+    p = json.loads(val)
+    return p["name"], p["school"], p["role"]
+
+
+@app.callback(Output("sl-hitter-grades", "style"), Output("sl-pitcher-grades", "style"),
+              Input("sl-form-role", "value"))
+def cb_sl_grade_toggle(role):
+    show, hide = {"display": "block", "margin": "6px 0"}, {"display": "none"}
+    return (show, hide) if role == "batter" else (hide, show)
+
+
+@app.callback(Output("sl-auth", "data"),
+              Input("sl-login-btn", "n_clicks"), Input("sl-logout-btn", "n_clicks"),
+              State("sl-login-initials", "value"), State("sl-login-pw", "value"),
+              prevent_initial_call=True)
+def cb_sl_login(_in, _out, initials, pw):
+    if ctx.triggered_id == "sl-logout-btn":
+        return None
+    a = scouting.verify_author(initials, pw)
+    if a is None:
+        return {"error": ("No authors are registered yet — add one with "
+                          "`python -m delispice_app.scouting add`." if not scouting.any_authors()
+                          else "Wrong initials or password.")}
+    return {"id": a["id"], "initials": a["initials"], "name": a["display_name"],
+            "is_admin": a["is_admin"], "pw": pw}
+
+
+@app.callback(Output("sl-editor", "style"), Output("sl-login-status", "children"),
+              Output("sl-form", "style", allow_duplicate=True),
+              Input("sl-auth", "data"), prevent_initial_call="initial_duplicate")
+def cb_sl_authview(auth):
+    hidden_form = {**_SL_FORM_STYLE, "display": "none"}
+    if not auth:
+        return {"display": "none"}, "", hidden_form
+    if auth.get("error"):
+        return {"display": "none"}, f"✗ {auth['error']}", hidden_form
+    a = scouting.verify_author(auth.get("initials"), auth.get("pw"))   # re-check (deactivations bite)
+    if a is None:
+        return {"display": "none"}, "Session no longer valid — sign in again.", hidden_form
+    label = f"Signed in as {a['display_name']} ({a['initials']})" + (" · admin" if a["is_admin"] else "")
+    return {"display": "block"}, label, no_update
+
+
+@app.callback(Output("sl-form", "style"), Input("sl-add-btn", "n_clicks"),
+              State("sl-form", "style"), prevent_initial_call=True)
+def cb_sl_toggle_form(_n, st):
+    shown = (st or {}).get("display") == "block"
+    return {**_SL_FORM_STYLE, "display": "none" if shown else "block"}
+
+
+@app.callback(Output("sl-save-status", "children"), Output("sl-version", "data"),
+              Output("sl-form", "style", allow_duplicate=True),
+              Input("sl-save-btn", "n_clicks"),
+              State("sl-auth", "data"), State("sl-form-role", "value"), State("sl-form-name", "value"),
+              State("sl-form-school", "value"), State("sl-form-pos", "value"), State("sl-form-ovr", "value"),
+              State("sl-form-body", "value"), State("sl-form-date", "value"),
+              *[State(f"sl-g-{g}", "value") for g in scouting.HITTER_GRADES],
+              State("sl-g-Control", "value"),
+              *[State(f"sl-p{i}-name", "value") for i in range(1, 7)],
+              *[State(f"sl-p{i}-grade", "value") for i in range(1, 7)],
+              State("sl-version", "data"), prevent_initial_call=True)
+def cb_sl_save(_n, auth, role, name, school, pos, ovr, body, report_date, *rest):
+    a = scouting.verify_author((auth or {}).get("initials"), (auth or {}).get("pw"))
+    if a is None:                                 # the REAL gate — auth store alone is forgeable
+        return "✗ Not signed in (or session expired) — not saved.", no_update, no_update
+    if not name or not str(name).strip():
+        return "✗ Player name is required.", no_update, no_update
+    hitter_vals, control = rest[:5], rest[5]
+    pnames, pgrades, version = rest[6:12], rest[12:18], rest[18]
+    if role == "batter":
+        grades = {g: v for g, v in zip(scouting.HITTER_GRADES, hitter_vals) if v is not None}
+    else:
+        grades = {"pitches": [{"name": pn.strip(), "grade": pg} for pn, pg in zip(pnames, pgrades)
+                              if pn and pn.strip()]}
+        if control is not None:
+            grades["Control"] = control
+    scouting.save_version(player_name=name.strip(), role=role, school=school, position=pos,
+                          ovr=ovr, author=a["initials"], author_id=a["id"],
+                          body=body, grades=grades, report_date=report_date)
+    return f"✓ Saved {name.strip()} · {a['display_name']}.", (version or 0) + 1, {**_SL_FORM_STYLE, "display": "none"}
+
+
+# After any save/delete (sl-version bumps for this client), wipe the form so the next
+# "+ Add report" starts from a blank slate instead of the player you just entered.
+@app.callback(
+    Output("sl-form-role", "value", allow_duplicate=True),
+    Output("sl-form-name", "value", allow_duplicate=True),
+    Output("sl-form-school", "value", allow_duplicate=True),
+    Output("sl-form-pos", "value", allow_duplicate=True),
+    Output("sl-form-ovr", "value", allow_duplicate=True),
+    Output("sl-form-date", "value", allow_duplicate=True),
+    Output("sl-form-body", "value", allow_duplicate=True),
+    *[Output(f"sl-g-{g}", "value", allow_duplicate=True) for g in scouting.HITTER_GRADES],
+    Output("sl-g-Control", "value", allow_duplicate=True),
+    *[Output(f"sl-p{i}-name", "value", allow_duplicate=True) for i in range(1, 7)],
+    *[Output(f"sl-p{i}-grade", "value", allow_duplicate=True) for i in range(1, 7)],
+    Input("sl-version", "data"), prevent_initial_call=True)
+def cb_sl_clear_form(_v):
+    return ("pitcher", "", "", "", None, date.today().isoformat(), "",
+            *[None] * len(scouting.HITTER_GRADES), None,
+            *[""] * 6, *[None] * 6)
+
+
+@app.callback(Output("sl-form-role", "value", allow_duplicate=True),
+              Output("sl-form-name", "value", allow_duplicate=True),
+              Output("sl-form-school", "value", allow_duplicate=True),
+              Output("sl-form-pos", "value"), Output("sl-form-ovr", "value"),
+              Output("sl-form-date", "value"), Output("sl-form-body", "value"),
+              *[Output(f"sl-g-{g}", "value") for g in scouting.HITTER_GRADES],
+              Output("sl-g-Control", "value"),
+              *[Output(f"sl-p{i}-name", "value") for i in range(1, 7)],
+              *[Output(f"sl-p{i}-grade", "value") for i in range(1, 7)],
+              Output("sl-form", "style", allow_duplicate=True),
+              Input({"type": "sl-edit", "key": ALLPM, "thread": ALLPM}, "n_clicks"),
+              prevent_initial_call=True)
+def cb_sl_edit(_clicks):
+    trig = ctx.triggered_id
+    if not trig or not ctx.triggered or not ctx.triggered[0]["value"]:
+        raise PreventUpdate                       # table re-renders recreate the buttons
+    versions = scouting.versions_for_thread(trig["key"], trig["thread"])
+    if not versions:
+        raise PreventUpdate
+    v = versions[0]
+    g = v["grades"] or {}
+    pitches = (g.get("pitches") or [])[:6]
+    pnames = [p.get("name") for p in pitches] + [None] * (6 - len(pitches))
+    pgrades = [p.get("grade") for p in pitches] + [None] * (6 - len(pitches))
+    return (v["role"], v["player_name"], v["school"], v["position"], v["ovr"],
+            v.get("report_date") or date.today().isoformat(), v["body"],
+            *[g.get(x) for x in scouting.HITTER_GRADES], g.get("Control"),
+            *pnames, *pgrades, {**_SL_FORM_STYLE, "display": "block"})
+
+
+@app.callback(Output("sl-del-status", "children"), Output("sl-version", "data", allow_duplicate=True),
+              Input({"type": "sl-del", "key": ALLPM, "thread": ALLPM}, "submit_n_clicks"),
+              State("sl-auth", "data"), State("sl-version", "data"), prevent_initial_call=True)
+def cb_sl_delete(_clicks, auth, version):
+    trig = ctx.triggered_id
+    if not trig or not ctx.triggered or not ctx.triggered[0]["value"]:
+        raise PreventUpdate
+    a = scouting.verify_author((auth or {}).get("initials"), (auth or {}).get("pw"))
+    if a is None:
+        return "✗ Not signed in — nothing removed.", no_update
+    thread = trig["thread"]
+    own = thread == f"a{a['id']}"
+    if not (own or a["is_admin"]):                # authors remove their own; admins remove any
+        return "✗ You can only remove your own report.", no_update
+    scouting.delete_thread(trig["key"], thread)
+    return "✓ Report removed.", (version or 0) + 1
+
+
 app.layout = html.Div([dcc.Store(id="retag-version", data=0),
                        dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
                        dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
                        dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"), selection,
-                       html.Div([about_panel, pitcher_report, batter_report], style={"padding": "12px 16px"})],
+                       html.Div([about_panel, shortlist_panel, pitcher_report, batter_report], style={"padding": "12px 16px"})],
                       style={"fontFamily": FONT})
 
 
@@ -787,11 +1220,12 @@ def cb_label(role):
 
 # ── About tab: show the About panel, hide the picker controls (reports hide via the player reset) ──
 @app.callback(Output("about-panel", "style"), Output("picker-controls", "style"),
-              Input("role-tabs", "value"))
+              Output("shortlist-panel", "style"), Input("role-tabs", "value"))
 def cb_about_toggle(role):
-    if role == "about":
-        return {"padding": "8px 4px"}, {"display": "none"}
-    return {"display": "none"}, {"display": "block"}
+    about = {"padding": "8px 4px"} if role == "about" else {"display": "none"}
+    shortlist = {"padding": "8px 4px"} if role == "shortlist" else {"display": "none"}
+    picker = {"display": "none"} if role in ("about", "shortlist") else {"display": "block"}
+    return about, picker, shortlist
 
 
 # ── Cascading pickers (role-aware; all off the small in-memory index) ─────────────────────────────

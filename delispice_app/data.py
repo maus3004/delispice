@@ -276,6 +276,28 @@ def player_options(role: str, years_sel=None, level=ALL, conf=ALL, team=ALL) -> 
     return _opts(scope(role, years_sel, level, conf, team, depth=3), "Player")
 
 
+def search_players(query: str, limit: int = 20) -> list[dict]:
+    """Autocomplete across BOTH role indexes for the scouting form. Tokenized: every word in the
+    query must appear (in any order) in the player's "Last, First" name OR school — so
+    "martin jordan", "jordan martin", and "martin arkansas" all find "Martin, Jordan · Arkansas".
+    Returns ``[{name, role, school}]``."""
+    tokens = [t for t in (query or "").strip().lower().split() if t]
+    if not tokens:
+        return []
+    name_map = team_maps()[0]                     # acronym -> full school name, for school matching
+    out = []
+    for role in ("pitcher", "batter"):
+        searchable = (pl.col("Player").fill_null("").str.to_lowercase() + " "
+                      + pl.col("Team").fill_null("").replace_strict(name_map, default="").str.to_lowercase())
+        mask = pl.lit(True)
+        for tok in tokens:
+            mask = mask & searchable.str.contains(tok, literal=True)
+        hits = get_index(role).filter(mask).select("Player", "Team").unique().head(limit)
+        for name, team in hits.iter_rows():
+            out.append({"name": (name or "").strip(), "role": role, "school": team_label(team)})
+    return out[:limit]
+
+
 # ── Per-player data (targeted, column-projected, cached) ──────────────────────────────────────────
 def _partitions(role: str, player: str, level=ALL, team=ALL, years_sel=None) -> list[tuple[str, str]]:
     """Distinct (Part, Year) the player's selected rows physically live in."""

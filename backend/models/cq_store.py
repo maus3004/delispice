@@ -43,9 +43,10 @@ def load(level: str, year: str):
 
 def _events(level: str, year: str) -> pl.DataFrame:
     """Season events for any Level. D1 has its own partition dir; every other Level lives inside
-    the Others/ partition, so those are scanned and filtered by the Level column."""
+    the Others/ partition, so those are scanned and filtered by the Level column. P4 is a League-
+    based pseudo-level served from the D1 partition (handled inside cq.load_events)."""
     from backend.models import contact_quality as cq
-    if (cq.PIPELINE / level).exists():
+    if level == cq.P4_LEVEL or (cq.PIPELINE / level).exists():
         return cq.load_events(level, year)
     files = sorted((cq.PIPELINE / "Others" / year).glob("**/*.parquet"))
     if not files:
@@ -76,7 +77,7 @@ def available(level: str) -> list[str]:
     """Years trainable for a level: present in the re-matrix AND having data on disk."""
     from backend.models import contact_quality as cq
     rem = pl.read_parquet(cq.REM_PATH).filter(pl.col("Level") == level)
-    part = level if (cq.PIPELINE / level).exists() else "Others"
+    part = "D1" if level == cq.P4_LEVEL else (level if (cq.PIPELINE / level).exists() else "Others")
     return sorted(y for y in rem["year"].unique().to_list() if (cq.PIPELINE / part / y).is_dir())
 
 

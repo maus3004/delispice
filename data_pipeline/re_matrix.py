@@ -14,6 +14,10 @@ drops strikeout-ending innings (~1/3 of them), which biases RE upward.
 Extra innings (10th+) carry a ghost runner on 2nd (see baserunner_state.py). They are KEPT for D1 but
 EXCLUDED here for every other level.
 
+Besides the per-Level matrices, one extra synthetic Level "P4" is appended: the Power-4 conferences
+(League in SEC/ACC/BIG10/BIG12) pooled together. D1 stays intact; P4 is an additional aggregate over
+the same D1 games, keyed off the League column.
+
 Output (one tidy long table -> re_matrices/re288_matrix.{parquet,csv}):
     Level, year, re288_state, base_state, Outs, Balls, Strikes, n_obs, run_expectancy
 """
@@ -32,16 +36,28 @@ import serving
 BASE = Path(__file__).resolve().parent
 OUT = BASE / "re_matrices"
 
-NEEDED = ["Level", "GameUID", "Inning", "Top/Bottom", "PAofInning", "PitchofPA",
+NEEDED = ["Level", "League", "GameUID", "Inning", "Top/Bottom", "PAofInning", "PitchofPA",
           "base_state", "Outs", "Balls", "Strikes", "RunsScored", "OutsOnPlay", "KorBB"]
 HALF = ["GameUID", "Inning", "_tb"]
 KEYS = ["Level", "base_state", "Outs", "Balls", "Strikes"]
+
+# P4 = the four Power-conference leagues, pooled into one synthetic Level="P4". These League values
+# live inside Level=="D1", so P4 games follow the D1 extra-innings rule (ghost runner kept). D1 rows
+# are LEFT INTACT; P4 is an ADDITIONAL aggregate appended to the matrix.
+P4_LEVEL = "P4"
+P4_LEAGUES = ["SEC", "ACC", "BIG10", "BIG12"]
+
+
+def _aggregate(base: pl.LazyFrame, year: str) -> pl.LazyFrame:
+    return (base.group_by(KEYS)
+                .agg(pl.len().alias("n_obs"), pl.col("runs_to_end").mean().alias("run_expectancy"))
+                .with_columns(pl.lit(year).alias("year")))
 
 
 def year_matrix(year: str, paths: list[str]) -> pl.DataFrame:
     if not paths:
         return pl.DataFrame()
-    lf = (
+    base = (
         pl.scan_parquet(paths)
         .select(NEEDED)
         .with_columns(pl.when(pl.col("Top/Bottom") == "Top").then(0).otherwise(1).alias("_tb"))
@@ -55,11 +71,15 @@ def year_matrix(year: str, paths: list[str]) -> pl.DataFrame:
         )
         .filter(pl.col("_tot_outs") >= 3)                      # complete half-innings only
         .filter(~((pl.col("Inning") >= 10) & (pl.col("Level") != "D1")))  # non-D1: drop extra innings (10th+)
-        .group_by(KEYS)
-        .agg(pl.len().alias("n_obs"), pl.col("runs_to_end").mean().alias("run_expectancy"))
-        .with_columns(pl.lit(year).alias("year"))
     )
-    return lf.collect()
+    # Per-Level matrix (unchanged) + a P4 aggregate: the same complete-inning rows whose League is a
+    # Power-4 conference, relabeled Level="P4". P4 games are D1, so they already survive the extra-
+    # innings filter above; the relabel happens only for the grouping key.
+    per_level = _aggregate(base, year)
+    p4 = _aggregate(base.filter(pl.col("League").is_in(P4_LEAGUES))
+                        .with_columns(pl.lit(P4_LEVEL).alias("Level")), year)
+    parts = pl.collect_all([per_level, p4])
+    return pl.concat([p for p in parts if p.height])
 
 
 def build() -> pl.DataFrame:
@@ -75,6 +95,12 @@ def build() -> pl.DataFrame:
         if part.height:
             parts.append(part)
             print(f"  {y}: {part.height} (Level,state) cells")
+    if not parts:
+        raise SystemExit(
+            f"re_matrix: no usable input under {serving.WBASERUNNERS}. Expected "
+            "wbaserunners/<level>/<year>/*.parquet from baserunner_state.py — check that the "
+            "baserunner stage actually produced files and that they sit under a 4-digit year dir."
+        )
     matrix = pl.concat(parts)
     return (
         matrix.with_columns(

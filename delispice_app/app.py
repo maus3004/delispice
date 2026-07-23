@@ -422,6 +422,52 @@ role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": "380px", "ma
                                dcc.Tab(label="Batters", value="batter"),
                                dcc.Tab(label="Shortlist", value="shortlist")])
 
+# Run-Expectancy (xRV) model picker. "Auto" scores each ball against its own (level, year) model;
+# any explicit pick re-scores every ball against that one trained RE matrix. Only (level, year) pairs
+# that actually have a trained artifact are offered (currently D1 + P4 across the seasons on disk).
+AUTO = "Auto"
+_RE_OPTS = data.re_matrix_options()                        # {level: [years]}
+_RE_LEVEL_OPTS = ([{"label": "Auto (per pitch)", "value": AUTO}]
+                  + [{"label": lv, "value": lv} for lv in sorted(_RE_OPTS)])
+_RE_YEAR_OPTS = ([{"label": "Auto (per pitch)", "value": AUTO}]
+                 + [{"label": y, "value": y}
+                    for y in sorted({y for ys in _RE_OPTS.values() for y in ys}, reverse=True)])
+
+
+def _re_sel(v):
+    """Dropdown value -> get_rows arg: the Auto sentinel (and empty) mean 'use each ball's own'."""
+    return None if (not v or v == AUTO) else v
+
+
+def _env_label(re_level, re_year):
+    """Summary text for the collapsed control — reflects the active pick so a non-default run
+    environment stays visible even when collapsed."""
+    lv, yr = _re_sel(re_level), _re_sel(re_year)
+    if lv is None and yr is None:
+        return "⚙ Change run environment"
+    return f"⚙ Run environment: {lv or 'auto'} · {yr or 'auto'}"
+
+
+def _re_env_control(prefix):
+    """Small collapsible 'Change run environment' control (xRV Level + Year), shown under the player
+    name. ``prefix`` ('re' pitcher / 'bre' batter) namespaces the ids. Auto scores each ball by its
+    own (level, year); any pick re-scores every ball — and every RE-based stat — against that one
+    run environment."""
+    lab = {"fontWeight": 600, "fontSize": "12px", "fontFamily": FONT}
+    return html.Details(open=False, style={"margin": "2px 0 6px", "fontFamily": FONT}, children=[
+        html.Summary(_env_label(None, None), id=f"{prefix}-env-summary",
+                     style={"cursor": "pointer", "fontSize": "12px", "color": MAROON}),
+        html.Div([
+            html.Span("Level", style=lab), _dropdown(f"{prefix}-level-dd", _RE_LEVEL_OPTS, AUTO, width="140px"),
+            html.Span("Year", style={**lab, "marginLeft": "8px"}),
+            _dropdown(f"{prefix}-year-dd", _RE_YEAR_OPTS, AUTO, width="120px"),
+            html.Span("re-scores xRV & every RE-based stat",
+                      style={"color": "#888", "fontSize": "11px", "marginLeft": "6px"}),
+        ], style={"display": "flex", "alignItems": "center", "gap": "6px", "flexWrap": "wrap",
+                  "marginTop": "5px"}),
+    ])
+
+
 selection = html.Div([
     role_tabs,
     html.Div(id="picker-controls", style={"display": "none"}, children=[
@@ -493,6 +539,7 @@ retag_panel = html.Details(open=False, style={"margin": "6px 0", "background": "
 pitcher_report = html.Div(id="report", style={"display": "none"}, children=[
     html.Div(id="report-header"),
     _bio_edit_form("bio"),
+    _re_env_control("re"),
     html.Div(id="summary"),
     html.Hr(style={"margin": "10px 0"}),
     html.Div("Splits — Batter AND Count drive the arsenal table AND the heatmap (heatmap stat: "
@@ -513,6 +560,7 @@ pitcher_report = html.Div(id="report", style={"display": "none"}, children=[
 batter_report = html.Div(id="batter-report", style={"display": "none"}, children=[
     html.Div(id="batter-header"),
     _bio_edit_form("bbio"),
+    _re_env_control("bre"),
     html.Div(id="batter-summary"),
     html.Hr(style={"margin": "10px 0"}),
     html.Div([html.Span("Pitch type", style=LABEL),
@@ -801,7 +849,60 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
             ),
         ),
     _topic("Contact Quality - Expected Runs on Contact",
-           html.P("Placeholder — TrackMan ingestion, cleaning, and the parquet layout. Write here.")),
+           html.H4("Not all results are created equal", style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+           html.P("This is an idea that permeates the baseball analytics world and for this particular model, we will be applying this to batted ball events." \
+           " The model measures the quality of contact, removing the noise of defensive capability which might reward a weakly hit grounder squeaking by a defender " \
+           "over a hard hit line drive straight into a well-positioned outfielder. " \
+           "The question itself is very simple: Given three features (Exit Velocity, Launch Angle, and Direction), " \
+           "what would the expected outcome of that batted ball be and what is each outcome worth in runs?"),
+           html.H4("The Current Model - K-Nearest Neighbors", style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+           html.P([
+               "The entire strategy revolves around this simple math: ", html.B("xRV = P(outcome | contact) · weights")]
+           ),
+           html.P(
+               "There are two parts to the equation: finding the probability of an outcome (Out, Single, Double, Triple, HomeRun) " \
+               "given the quality of contact (EV, LA, Direction) and finding the weights of each outcome."
+           ),
+           html.P([
+                "K-Nearest Neighbors is a simple and efficient algorithm to find the probability of eah outcome given the quality of contact. "
+                "For a new observation, the algorithm will find ", html.B(html.I("k")), " nearest neighbors and then the class labels of these neighbors "
+                "(Out, Single, Double, Triple, HomeRun) are used to estimate the conditional probability of these events occuring. "
+            ]),
+            html.Img(src=app.get_asset_url("knn-visual.png"),
+           style={"maxWidth": "50%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+           html.P(
+               "Once we have the probabilities of each event, we multiply them by the linear weights of each event which are calculated from our " \
+               "run expectancy table year over year.  "
+           ),
+           html.H4("Validation", style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+           html.P(
+               "Because the model is predicting probabilities rather than a single outcome, the scoring mechanism has to reward the balance between being correct and appropriately confident." \
+               "Log-loss best serves as the method of validation because it punishes confident and wrong answers the hardest. " \
+               "A stratified K-Fold Cross Validation method was used alongside log-loss to search for the best alpha and k for the dataset." \
+               " Stratified made sure to keep the rare classes like triples and homeruns in every fold."
+           ),
+           html.Img(src=app.get_asset_url("k-folds_example.png"),
+            style={"maxWidth": "50%", "marginTop": "8px", "border": "1px solid #e2c9cc"}),
+           html.P(
+               "As we use log-loss as the scoring mechanism," \
+               " a critical feature of the KNN model comes from Laplace smoothing because triples and homeruns are far more rarer than singles and doubles. " \
+               "With only a certain number of k neighbors, a rare outcome like a triple might not have any neighbors and the model might call it impossible with a probability of 0. " \
+               "Then, if a triple actually does happen, the model is infinitely wrong. " \
+               "Laplace smoothing lets the model keep a sliver of probability for these rare events. "
+           ),
+           html.P(
+               "A last, simple trick to validate the model is also to subtract the mean run value from the mean expected run value and it should arrive at a number close to 0."
+           ),
+           html.H4("Implementation", style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
+           html.P(
+               "KNN is a non-parametric model meaning that there are no learned parameters to export. " \
+               "Rather, the data itself is the model. " \
+               "A KNN model takes minutes to train and that would be disastrous for front-end implementation. " \
+               "Instead a yearly model is created and saved as a .npz and .json file and the frontend would only need to search for the " \
+               "200 or however many k neighbors to arrive at the result."
+           ),
+    ),
+           
     _topic("Eye Metric - Expected Runs on Swing/Take Decisions",
            html.P("The model begins with a simple premise like all swing decision models do, "),
            html.H4("Limitations and Future Developments", style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
@@ -811,9 +912,6 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
                "So, rather than training the model on the raw pitch locations, we would normalize the strike-zone according to each batter's height."
            ),
     ),
-           
-    _topic("Hosting & infrastructure",
-    html.P("Placeholder — VPS, Tailscale tunnel, Caddy, and the home box. Write here.")),
 ])
 
 # ══ Shortlist / scouting ═══════════════════════════════════════════════════════════════════════════
@@ -1268,10 +1366,11 @@ def cb_player(role, years_sel, level, conf, team):
     Output("batter-check", "value"), Output("count-check", "value"), Output("pct-panel", "children"),
     Output("bio-target", "data"),
     Input("player-dd", "value"), Input("retag-version", "data"), Input("bio-version", "data"),
+    Input("re-level-dd", "value"), Input("re-year-dd", "value"),
     State("role-tabs", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
 )
-def cb_build(pitcher, _rv, _bv, role, years_sel, level, team):
+def cb_build(pitcher, _rv, _bv, re_lvl, re_yr, role, years_sel, level, team):
     hidden = {"display": "none"}
     if role != "pitcher":
         return (hidden, *([no_update] * 11))
@@ -1279,7 +1378,7 @@ def cb_build(pitcher, _rv, _bv, role, years_sel, level, team):
         return (hidden, "", "", go.Figure(), go.Figure(), "", go.Figure(),
                 "Pick filters, then choose a pitcher.", [], [], "", None)
 
-    pitches = data.get_rows("pitcher", pitcher, level, team, years_sel)
+    pitches = data.get_rows("pitcher", pitcher, level, team, years_sel, _re_sel(re_lvl), _re_sel(re_yr))
     if pitches.height == 0:
         msg = html.Div(html.I(f"No rows for '{pitcher}' under the current filters."))
         return {"display": "block"}, msg, "", go.Figure(), go.Figure(), "", go.Figure(), "", [], [], "", None
@@ -1304,6 +1403,19 @@ def cb_build(pitcher, _rv, _bv, role, years_sel, level, team):
             report.movement_fig(pitches, colors), report.velocity_fig(pitches, pitcher, hand, colors),
             _arsenal_block(pitches, [], []), report.heatmap_fig(pitches), "", [], [],
             _pct_panel(pitcher, level, years_sel), {"name": pitcher, "id": pid})
+
+
+# Keep the collapsed "Change run environment" summary reflecting the active pick (both reports).
+@app.callback(Output("re-env-summary", "children"),
+              Input("re-level-dd", "value"), Input("re-year-dd", "value"))
+def cb_re_env_label(lv, yr):
+    return _env_label(lv, yr)
+
+
+@app.callback(Output("bre-env-summary", "children"),
+              Input("bre-level-dd", "value"), Input("bre-year-dd", "value"))
+def cb_bre_env_label(lv, yr):
+    return _env_label(lv, yr)
 
 
 def _modal_id(df, col):
@@ -1361,16 +1473,17 @@ def cb_save_batter_bio(n, height_raw, bday_raw, target, ver):
     Output("batter-vs", "value"), Output("batter-family", "value"),
     Output("pick-status", "children", allow_duplicate=True), Output("bbio-target", "data"),
     Input("player-dd", "value"), Input("retag-version", "data"), Input("bbio-version", "data"),
+    Input("bre-level-dd", "value"), Input("bre-year-dd", "value"),
     State("role-tabs", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
     prevent_initial_call=True,
 )
-def cb_build_batter(batter, _rv, _bv, role, years_sel, level, team):
+def cb_build_batter(batter, _rv, _bv, re_lvl, re_yr, role, years_sel, level, team):
     hidden = {"display": "none"}
     if role != "batter" or not batter:
         return hidden, *([no_update] * 10)
 
-    rows = data.get_rows("batter", batter, level, team, years_sel)
+    rows = data.get_rows("batter", batter, level, team, years_sel, _re_sel(re_lvl), _re_sel(re_yr))
     if rows.height == 0:
         return ({"display": "block"}, html.Div(html.I(f"No rows for '{batter}'.")),
                 "", "", go.Figure(), go.Figure(), go.Figure(), "All", "All", "", None)
@@ -1398,12 +1511,13 @@ def cb_build_batter(batter, _rv, _bv, role, years_sel, level, team):
     Input("batter-vs", "value"),
     State("role-tabs", "value"), State("player-dd", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
+    State("bre-level-dd", "value"), State("bre-year-dd", "value"),
     prevent_initial_call=True,
 )
-def cb_batter_vs(vs, role, batter, years_sel, level, team):
+def cb_batter_vs(vs, role, batter, years_sel, level, team, re_lvl, re_yr):
     if role != "batter" or not batter:
         raise PreventUpdate
-    rows = data.get_rows("batter", batter, level, team, years_sel)
+    rows = data.get_rows("batter", batter, level, team, years_sel, _re_sel(re_lvl), _re_sel(re_yr))
     dff = rows.filter(rows["PitcherThrows"] == vs) if vs in ("Right", "Left") else rows
     return (_batter_pitchtable_block(rows, vs),
             report.spray_fig(dff, batter, report.bats_of(rows)),
@@ -1416,12 +1530,13 @@ def cb_batter_vs(vs, role, batter, years_sel, level, team):
     Input("batter-family", "value"), Input("batter-vs", "value"),
     State("role-tabs", "value"), State("player-dd", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
+    State("bre-level-dd", "value"), State("bre-year-dd", "value"),
     prevent_initial_call=True,
 )
-def cb_batter_heat(family, vs, role, batter, years_sel, level, team):
+def cb_batter_heat(family, vs, role, batter, years_sel, level, team, re_lvl, re_yr):
     if role != "batter" or not batter:
         raise PreventUpdate
-    rows = data.get_rows("batter", batter, level, team, years_sel)
+    rows = data.get_rows("batter", batter, level, team, years_sel, _re_sel(re_lvl), _re_sel(re_yr))
     if vs in ("Right", "Left"):
         rows = rows.filter(rows["PitcherThrows"] == vs)
     surfaces, n = report.batter_heat_data(rows, family or "All")
@@ -1442,12 +1557,13 @@ def cb_batter_heat(family, vs, role, batter, years_sel, level, team):
     Input("batter-check", "value"), Input("count-check", "value"),
     State("role-tabs", "value"), State("player-dd", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
+    State("re-level-dd", "value"), State("re-year-dd", "value"),
     prevent_initial_call=True,
 )
-def cb_splits(batter, count, role, pitcher, years_sel, level, team):
+def cb_splits(batter, count, role, pitcher, years_sel, level, team, re_lvl, re_yr):
     if role != "pitcher" or not pitcher:
         raise PreventUpdate
-    pitches = data.get_rows("pitcher", pitcher, level, team, years_sel)
+    pitches = data.get_rows("pitcher", pitcher, level, team, years_sel, _re_sel(re_lvl), _re_sel(re_yr))
     if data.cluster_state(pitcher):
         pitches = data.cluster_view(pitches, pitcher)     # keep the arsenal in cluster labels too
     dff = pitches.filter(report.hand_mask(batter) & report.count_mask(count))

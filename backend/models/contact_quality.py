@@ -15,6 +15,16 @@ FEATS      = ["ExitSpeed", "Angle", "Direction"]
 LABEL_MAP  = {"Out": 0, "Single": 1, "Double": 2, "Triple": 3, "HomeRun": 4}
 DROP_RESULTS = ["Error", "Sacrifice", "StolenBase", "FieldersChoice", "CaughtStealing", "Undefined"]
 N_CLASSES  = 5
+# default hyperparameter search grid for per-(level, year) CV selection
+DEFAULT_K_GRID     = [25, 50, 100, 200, 400, 800, 2000]
+DEFAULT_ALPHA_GRID = [0.1, 0.5, 1.0, 2.0, 5.0]
+_EVENT_COLS = ["GameID", "Inning", "Top/Bottom", "PlayResult", "RunsScored",
+               "Direction", "ExitSpeed", "Angle", "re288_state"]
+
+# P4 is a League-based pseudo-level (Power-4 conferences), physically stored inside the D1 partition;
+# the re288_matrix carries matching Level="P4" rows built by re_matrix.py.
+P4_LEVEL   = "P4"
+P4_LEAGUES = ["SEC", "ACC", "BIG10", "BIG12"]
 
 ## We can use compute_run_delta for future 
 def compute_run_delta(df: pl.DataFrame, rem: pl.DataFrame) -> pl.DataFrame:
@@ -30,13 +40,24 @@ def compute_run_delta(df: pl.DataFrame, rem: pl.DataFrame) -> pl.DataFrame:
         .with_columns((pl.col("RunsScored") + pl.col("re_after") - pl.col("re_before")).alias("run_delta")))
 
 def load_events(level: str, year: str) -> pl.DataFrame:
-    """Scan one (level, year)'s wbaserunners parquets -> the columns we need (incl. Direction)."""
+    """Scan one (level, year)'s wbaserunners parquets -> the columns we need (incl. Direction).
+    P4 has no partition dir of its own: read the D1 partition and keep only Power-4 League rows."""
+    if level == P4_LEVEL:
+        # P4 is League-based: most games sit in D1/, but some P4-League games carry a non-D1 Level
+        # and land in Others/, so scan BOTH partitions for the year and filter on League — this keeps
+        # the training population identical to what delispice_app scores under a P4 selection.
+        files = sorted(PIPELINE.glob(f"*/{year}/**/*.parquet"))
+        if not files:
+            raise FileNotFoundError(f"no parquets for P4 year={year} under {PIPELINE}")
+        return (pl.scan_parquet([str(f) for f in files])
+                  .select([*_EVENT_COLS, "League"])
+                  .filter(pl.col("League").is_in(P4_LEAGUES))
+                  .drop("League").collect())
     files = sorted((PIPELINE / level / year).glob("**/*.parquet"))
     if not files:
         raise FileNotFoundError(f"no parquets for level={level} year={year} under {PIPELINE}")
     return (pl.scan_parquet([str(f) for f in files])
-              .select(["GameID","Inning","Top/Bottom","PlayResult","RunsScored",
-                       "Direction","ExitSpeed","Angle","re288_state"])
+              .select(_EVENT_COLS)
               .collect())
 
 def load_re_matrix(level: str, year: str) -> pl.DataFrame:
@@ -182,11 +203,32 @@ class ContactQualityModel:
         model.feats, model.meta = cfg.get("feats", FEATS), cfg.get("meta", {})
         return model
 
-def expected_run_values(level: str, year: str, k=800, alpha=0.1, honest=False):
-    """Put in level + year -> (df with an `xRV` column, fitted ContactQualityModel)."""
+def expected_run_values(level: str, year: str, k=None, alpha=None,
+                        k_grid=DEFAULT_K_GRID, alpha_grid=DEFAULT_ALPHA_GRID,
+                        honest=False, n_splits=5, seed=0):
+    """Put in level + year -> (df with an `xRV` column, fitted ContactQualityModel).
+
+    (k, alpha) are CV-selected for THIS (level, year) by default: a stratified
+    k-fold search over `k_grid` x `alpha_grid` picks the log-loss argmin on the
+    loaded data. Pass an explicit `k` and/or `alpha` to fix that hyperparameter
+    and skip its search (pass both to skip CV entirely).
+    """
     df, weights = load_training_frame(level, year)
     X = df.select(FEATS).to_numpy().astype(float)
     y = df["PlayResult"].replace_strict(LABEL_MAP, return_dtype=pl.Int64).to_numpy()
+
+    # select the best (k, alpha) for this slice unless both were supplied
+    cv_best = None
+    if k is None or alpha is None:
+        Xs = StandardScaler().fit_transform(X)          # same scaling fit() will use
+        cv_scores, (best_k, best_alpha) = cv_select(
+            Xs, y, k_grid, alpha_grid, n_splits=n_splits, seed=seed)
+        cv_best = float(cv_scores[(best_k, best_alpha)])
+        k = best_k if k is None else k
+        alpha = best_alpha if alpha is None else alpha
+
     model = ContactQualityModel().fit(X, y, weights, k, alpha)
-    model.meta = {"level": level, "year": year, "n_rows": df.height, "feats": FEATS}
+    model.meta = {"level": level, "year": year, "n_rows": df.height, "feats": FEATS,
+                  "k": int(k), "alpha": float(alpha),
+                  "cv_selected": cv_best is not None, "cv_log_loss": cv_best}
     return df.with_columns(pl.Series("xRV", model.training_xrv(honest=honest))), model

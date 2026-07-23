@@ -73,6 +73,13 @@ def _schema_for(cols) -> dict:
 
 ALL = "All"
 
+# P4 — the four Power-conference leagues, exposed as a synthetic Level. These are values of the
+# ``League`` column (all inside Level=="D1"), NOT of ``Level``; every level-aware query below branches
+# on P4 to filter ``League IN P4_LEAGUES`` instead of ``Level == 'P4'``.
+P4_LEVEL = "P4"
+P4_LEAGUES = ("SEC", "ACC", "BIG10", "BIG12")
+_P4_SQL = "(" + ", ".join(f"'{c}'" for c in P4_LEAGUES) + ")"
+
 
 def _mem_limit() -> str:
     """DuckDB memory cap. ``DUCKDB_MEMORY_LIMIT`` env wins; otherwise ~65% of physical
@@ -202,7 +209,7 @@ def get_index(role: str = "pitcher", force_rebuild: bool = False) -> pl.DataFram
     if force_rebuild or not path.exists():
         _build_index_parquet(role)
     df = pl.read_parquet(path)
-    if "Player" not in df.columns:            # stale cache from an older schema -> rebuild once
+    if "Player" not in df.columns or "League" not in df.columns:   # stale/old schema -> rebuild once
         _build_index_parquet(role)
         df = pl.read_parquet(path)
     _, conf = team_maps()
@@ -220,7 +227,7 @@ def _build_index_parquet(role: str) -> None:
         COPY (
           SELECT DISTINCT
             regexp_extract(filename, 'wbaserunners/([^/]+)/', 1) AS Part,
-            Level, {r['team']} AS Team, {r['player']} AS Player, substr(Date, 1, 4) AS Year
+            Level, League, {r['team']} AS Team, {r['player']} AS Player, substr(Date, 1, 4) AS Year
           FROM read_parquet('{GLOB_ALL}', filename = true)
           WHERE {r['player']} IS NOT NULL AND Date IS NOT NULL AND length(Date) >= 4
         ) TO '{path}' (FORMAT PARQUET)
@@ -243,8 +250,30 @@ def years(role: str = "pitcher") -> list[str]:
     return sorted((v for v in get_index(role)["Year"].unique().to_list() if v), reverse=True)
 
 
+def _filter_level(frame: pl.DataFrame, level: str) -> pl.DataFrame:
+    """Filter an index frame to one level. P4 is League-based (Power-4 conferences); every other
+    level matches the ``Level`` column directly."""
+    if level == P4_LEVEL:
+        return frame.filter(pl.col("League").is_in(P4_LEAGUES))
+    return frame.filter(pl.col("Level") == level)
+
+
+def _level_where(level: str) -> tuple[str, list]:
+    """A DuckDB WHERE fragment (+bind params) selecting one level. P4 -> ``League`` membership (no
+    params); every other level -> a parameterized ``Level`` match."""
+    if level == P4_LEVEL:
+        return f"League IN {_P4_SQL}", []
+    return "Level = ?", [level]
+
+
 def levels(role: str = "pitcher") -> list[str]:
-    return _opts(get_index(role), "Level")
+    """Fine game levels for the dropdown, plus the synthetic ``P4`` level (Power-4 conferences),
+    inserted right after D1 whenever the index holds any Power-4 League rows."""
+    idx = get_index(role)
+    out = _opts(idx, "Level")
+    if idx.filter(pl.col("League").is_in(P4_LEAGUES)).height:
+        out.insert(out.index("D1") + 1 if "D1" in out else 0, P4_LEVEL)
+    return out
 
 
 def scope(role: str, years_sel=None, level=ALL, conf=ALL, team=ALL, depth=3) -> pl.DataFrame:
@@ -253,7 +282,7 @@ def scope(role: str, years_sel=None, level=ALL, conf=ALL, team=ALL, depth=3) -> 
     if years_sel:
         d = d.filter(pl.col("Year").is_in(years_sel))
     if depth >= 1 and level and level != ALL:
-        d = d.filter(pl.col("Level") == level)
+        d = _filter_level(d, level)
     if depth >= 2 and conf and conf != ALL:
         d = d.filter(pl.col("Conference") == conf)
     if depth >= 3 and team and team != ALL:
@@ -303,7 +332,7 @@ def _partitions(role: str, player: str, level=ALL, team=ALL, years_sel=None) -> 
     """Distinct (Part, Year) the player's selected rows physically live in."""
     d = get_index(role).filter(pl.col("Player") == player)
     if level and level != ALL:
-        d = d.filter(pl.col("Level") == level)
+        d = _filter_level(d, level)
     if team and team != ALL:
         d = d.filter(pl.col("Team") == team)
     if years_sel:
@@ -322,7 +351,7 @@ def _rows_cached(role: str, player: str, level: str, team: str, years_key: tuple
     glob_list = "[" + ", ".join("'" + g + "'" for g in globs) + "]"
     where, params = [f"{r['player']} = ?"], [player]
     if level and level != ALL:
-        where.append("Level = ?"); params.append(level)
+        frag, p = _level_where(level); where.append(frag); params += p
     if team and team != ALL:
         where.append(f"{r['team']} = ?"); params.append(team)
     if years_sel:
@@ -332,7 +361,9 @@ def _rows_cached(role: str, player: str, level: str, team: str, years_key: tuple
     df = con.execute(f"SELECT {', '.join(r['cols'])} FROM read_parquet({glob_list}) "
                      f"WHERE {' AND '.join(where)}", params).pl()
     con.close()
-    return apply_retags(_with_xrv(df.with_columns(pl.col("Date").str.slice(0, 4).alias("Year"))))
+    # Fetch + retags only. xRV is scored downstream in _scored_cached so the (RE level, year) the user
+    # picks can re-score without re-querying DuckDB.
+    return apply_retags(df.with_columns(pl.col("Date").str.slice(0, 4).alias("Year")))
 
 
 # ── Contact quality (xRV) — expected runs on contact, per batted ball ─────────────────────────────
@@ -344,10 +375,19 @@ def _cq_model(level: str, year: str):
     return cq_store.load(level, year)
 
 
-def _with_xrv(df: pl.DataFrame) -> pl.DataFrame:
+def _with_xrv(df: pl.DataFrame, sel_level: str = ALL,
+              re_level: str | None = None, re_year: str | None = None) -> pl.DataFrame:
     """Append an ``xRV`` column: the k-NN model's expected run value for each ball in play
-    (ExitSpeed/Angle/Direction), scored with that row's own (Level, Year) artifact. Null when the
-    ball wasn't in play, launch data is missing, or the (Level, Year) model isn't trained."""
+    (ExitSpeed/Angle/Direction). Null when the ball wasn't in play, launch data is missing, or the
+    chosen model isn't trained.
+
+    Which (Level, Year) model scores a ball is the user-picked Run-Expectancy override, falling back
+    to the ball's own level/year when a slot is left on Auto:
+      * ``re_level`` — force this level's RE matrix / model (e.g. "D1", "P4"); Auto/None -> the ball's
+        own Level (or P4 when the report itself is filtered to P4, whose rows read Level=="D1").
+      * ``re_year``  — force this season's model; Auto/None -> the ball's own Year.
+    So Auto+Auto reproduces the per-ball default, and any explicit pick re-scores every ball against
+    that one run environment — which flows into xRV/BBE and every stat derived from it."""
     out = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("xRV"))
     scorable = df.filter((pl.col("PitchCall") == "InPlay") & pl.col("PitchUID").is_not_null()
                          & pl.col("ExitSpeed").is_not_null() & pl.col("Angle").is_not_null()
@@ -356,7 +396,9 @@ def _with_xrv(df: pl.DataFrame) -> pl.DataFrame:
         return out
     scored = []
     for (lvl, yr), grp in scorable.partition_by(["Level", "Year"], as_dict=True).items():
-        model = _cq_model(lvl, yr) if lvl and yr else None
+        model_level = re_level or (P4_LEVEL if sel_level == P4_LEVEL else lvl)
+        model_year = re_year or yr
+        model = _cq_model(model_level, model_year) if model_level and model_year else None
         if model is None:
             continue
         X = grp.select(["ExitSpeed", "Angle", "Direction"]).to_numpy().astype(float)
@@ -367,10 +409,34 @@ def _with_xrv(df: pl.DataFrame) -> pl.DataFrame:
                .with_columns(pl.col("xRV_new").alias("xRV")).drop("xRV_new"))
 
 
-def get_rows(role: str, player: str, level=ALL, team=ALL, years_sel=None) -> pl.DataFrame:
-    """The selected player's rows — only needed columns, only the partitions they appear in."""
+@functools.lru_cache(maxsize=64)
+def _scored_cached(role: str, player: str, level: str, team: str, years_key: tuple[str, ...],
+                   re_level: str | None, re_year: str | None) -> pl.DataFrame:
+    """Base rows (cached DuckDB fetch) + an xRV column scored against the picked RE (level, year)."""
+    base = _rows_cached(role, player, level, team, years_key)
+    return _with_xrv(base, sel_level=level, re_level=re_level, re_year=re_year)
+
+
+def get_rows(role: str, player: str, level=ALL, team=ALL, years_sel=None,
+             re_level: str | None = None, re_year: str | None = None) -> pl.DataFrame:
+    """The selected player's rows — only needed columns, only the partitions they appear in. xRV is
+    scored against the Run-Expectancy (level, year) override, or each ball's own when they're None."""
     years_key = tuple(sorted(years_sel)) if years_sel else ()
-    return _rows_cached(role, player, level or ALL, team or ALL, years_key)
+    return _scored_cached(role, player, level or ALL, team or ALL, years_key, re_level, re_year)
+
+
+@functools.lru_cache(maxsize=1)
+def re_matrix_options() -> dict[str, list[str]]:
+    """``{level: [years]}`` for which a trained contact-quality (xRV) artifact exists — the only
+    (level, year) pairs the Run-Expectancy picker can actually re-score against. Currently D1 + P4."""
+    from backend.models import cq_store
+    yrs = years("pitcher")
+    out: dict[str, list[str]] = {}
+    for lv in levels("pitcher"):
+        got = sorted(y for y in yrs if cq_store.exists(lv, y))
+        if got:
+            out[lv] = got
+    return out
 
 
 # ── Pitch retagging: a non-destructive override layer applied at read time ────────────────────────
@@ -397,6 +463,7 @@ def _save_retags() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     RETAG_PATH.write_text(json.dumps(_RETAGS))
     _rows_cached.cache_clear()          # bust per-player cache so reports re-read with the new tags
+    _scored_cached.cache_clear()        # and the xRV-scored layer built on top of it
 
 
 def set_pitch_overrides(uids, new: str | None, pitcher: str) -> None:
@@ -579,7 +646,7 @@ def download_frame(pitcher: str, level=ALL, team=ALL, years_sel=None) -> pl.Data
     glob_list = "[" + ", ".join("'" + g + "'" for g in globs) + "]"
     where, params = ["Pitcher = ?"], [pitcher]
     if level and level != ALL:
-        where.append("Level = ?"); params.append(level)
+        frag, p = _level_where(level); where.append(frag); params += p
     if team and team != ALL:
         where.append("PitcherTeam = ?"); params.append(team)
     if years_sel:
@@ -624,7 +691,7 @@ def percentile_pool(level: str, years_key: tuple[str, ...] = ()) -> pl.DataFrame
     # partitions holding this level (+years), via the picker index
     d = get_index("pitcher")
     if level and level != ALL:
-        d = d.filter(pl.col("Level") == level)
+        d = _filter_level(d, level)
     if years_key:
         d = d.filter(pl.col("Year").is_in(list(years_key)))
     parts = list(d.select("Part", "Year").unique().iter_rows())
@@ -634,7 +701,7 @@ def percentile_pool(level: str, years_key: tuple[str, ...] = ()) -> pl.DataFrame
     glob_list = "[" + ", ".join("'" + g + "'" for g in globs) + "]"
     where, params = ["Pitcher IS NOT NULL"], []
     if level and level != ALL:
-        where.append("Level = ?"); params.append(level)
+        frag, p = _level_where(level); where.append(frag); params += p
     if years_key:
         where.append("substr(Date, 1, 4) IN (" + ", ".join("?" * len(years_key)) + ")")
         params += list(years_key)

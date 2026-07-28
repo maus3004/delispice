@@ -375,6 +375,42 @@ def _cq_model(level: str, year: str):
     return cq_store.load(level, year)
 
 
+@functools.lru_cache(maxsize=16)
+def _xrv_cache(level: str, year: str):
+    """PitchUID -> xRV table for a (level, year), or None if it hasn't been built. Uniqued on the
+    join key defensively: a duplicate PitchUID would fan out the join below and double-count the
+    ball (the serving tree does write some pitches into two partitions)."""
+    from backend.models import cq_store
+    t = cq_store.xrv_lookup(level, year)
+    return None if t is None else t.unique(subset=["PitchUID"])
+
+
+def _xrv_for(df: pl.DataFrame, model_level: str, model_year: str) -> pl.DataFrame | None:
+    """``df`` (PitchUID + ExitSpeed/Angle/Direction) -> the same rows plus an ``xrv`` column.
+
+    Cached outputs first, then ONE live k-NN pass for whatever the cache doesn't hold. The model is
+    a lazy learner, so scoring means an 800-neighbour search per ball (~20s a season) — the cache
+    turns that into a join. Misses are still scored, so a night's new games are correct before the
+    next ``python -m backend.models.cq_store --xrv-only`` run, paying the search only for the delta.
+    Returns None when the model itself isn't trained (callers leave xRV null)."""
+    model = _cq_model(model_level, model_year)
+    if model is None:
+        return None
+    cache = _xrv_cache(model_level, model_year)
+    out = (df.join(cache, on="PitchUID", how="left") if cache is not None
+           else df.with_columns(pl.lit(None, dtype=pl.Float64).alias("xrv")))
+    miss = out.filter(pl.col("xrv").is_null())
+    if miss.height:
+        # Score the misses IN PLACE and concat. Joining the results back on PitchUID would fan out:
+        # ``df`` can legitimately hold the same PitchUID twice (a pitch written into both physical
+        # partitions), so a dup key on both sides of the join turns 2 rows into 4.
+        X = miss.select(["ExitSpeed", "Angle", "Direction"]).to_numpy().astype(float)
+        out = pl.concat([out.filter(pl.col("xrv").is_not_null()),
+                         miss.with_columns(pl.Series("xrv", model.predict_xrv(X)))],
+                        how="vertical")
+    return out
+
+
 def _with_xrv(df: pl.DataFrame, sel_level: str = ALL,
               re_level: str | None = None, re_year: str | None = None) -> pl.DataFrame:
     """Append an ``xRV`` column: the k-NN model's expected run value for each ball in play
@@ -398,23 +434,57 @@ def _with_xrv(df: pl.DataFrame, sel_level: str = ALL,
     for (lvl, yr), grp in scorable.partition_by(["Level", "Year"], as_dict=True).items():
         model_level = re_level or (P4_LEVEL if sel_level == P4_LEVEL else lvl)
         model_year = re_year or yr
-        model = _cq_model(model_level, model_year) if model_level and model_year else None
-        if model is None:
+        got = _xrv_for(grp, model_level, model_year) if (model_level and model_year) else None
+        if got is None:
             continue
-        X = grp.select(["ExitSpeed", "Angle", "Direction"]).to_numpy().astype(float)
-        scored.append(grp.select("PitchUID").with_columns(pl.Series("xRV_new", model.predict_xrv(X))))
+        scored.append(got.select("PitchUID", pl.col("xrv").alias("xRV_new")))
     if not scored:
         return out
-    return (out.join(pl.concat(scored), on="PitchUID", how="left")
+    # Unique on the join key: a pitch written into both physical partitions appears twice, and a
+    # dup key here would fan out the player's whole frame, not just the xRV column.
+    return (out.join(pl.concat(scored).unique(subset=["PitchUID"]), on="PitchUID", how="left")
                .with_columns(pl.col("xRV_new").alias("xRV")).drop("xRV_new"))
+
+
+def _with_rv(df: pl.DataFrame, sel_level: str = ALL,
+             re_level: str | None = None, re_year: str | None = None) -> pl.DataFrame:
+    """Append an ``RV`` column: the pitch's REALIZED change in run expectancy. Null when the
+    artifacts aren't built, or when the pitch sat in an incomplete half-inning (~1%).
+
+    RV cannot be derived here — it depends on the NEXT pitch in the half-inning, which belongs to a
+    different batter (and often a different pitcher) than the one whose rows we scanned. So the
+    state TRANSITION is precomputed per season, and the run-expectancy matrix is applied on top,
+    right here. The split matters: the transition is looked up by the pitch's OWN year (a fact),
+    while the matrix follows the Run-Expectancy override (a choice) — so forcing a different level
+    or season re-values every pitch instead of dropping the ones outside that population."""
+    from backend.models import rv_store
+    out = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("RV"))
+    if df.height == 0 or "PitchUID" not in df.columns:
+        return out
+    parts = []
+    for (lvl, yr), grp in df.partition_by(["Level", "Year"], as_dict=True).items():
+        env_level = re_level or (P4_LEVEL if sel_level == P4_LEVEL else lvl)
+        env_year = re_year or yr
+        if not (env_level and env_year and yr):
+            continue
+        rv = rv_store.attach_rv(grp, data_year=yr, re_level=env_level, re_year=env_year)
+        if rv is not None:
+            parts.append(grp.select("PitchUID").with_columns(rv.alias("rv")))
+    if not parts:
+        return out
+    return (out.drop("RV").join(pl.concat(parts).unique(subset=["PitchUID"]),
+                                on="PitchUID", how="left")
+               .with_columns(pl.col("rv").alias("RV")).drop("rv"))
 
 
 @functools.lru_cache(maxsize=64)
 def _scored_cached(role: str, player: str, level: str, team: str, years_key: tuple[str, ...],
                    re_level: str | None, re_year: str | None) -> pl.DataFrame:
-    """Base rows (cached DuckDB fetch) + an xRV column scored against the picked RE (level, year)."""
+    """Base rows (cached DuckDB fetch) + xRV (model) and RV (realized) columns, both resolved
+    against the picked Run-Expectancy (level, year)."""
     base = _rows_cached(role, player, level, team, years_key)
-    return _with_xrv(base, sel_level=level, re_level=re_level, re_year=re_year)
+    scored = _with_xrv(base, sel_level=level, re_level=re_level, re_year=re_year)
+    return _with_rv(scored, sel_level=level, re_level=re_level, re_year=re_year)
 
 
 def get_rows(role: str, player: str, level=ALL, team=ALL, years_sel=None,
@@ -636,6 +706,49 @@ def set_cluster_assignment(pitcher: str, uid: str, cluster_idx: int) -> None:
     set_cluster_assignments(pitcher, [uid], cluster_idx)
 
 
+SPLIT_FEATS_MOVEMENT = ["InducedVertBreak", "HorzBreak"]     # the four-seam/sinker (and slider/sweeper) axis
+
+
+def split_cluster(pitcher: str, df: pl.DataFrame, cluster_idx: int, k: int = 2,
+                  features: list[str] | None = None) -> dict:
+    """Re-cluster ONE existing cluster into ``k`` sub-clusters and fold them back into the pitcher's
+    assignment — for a known four-seam/sinker (or slider/sweeper) pair the top-level fit merged.
+
+    The biggest sub-group keeps ``cluster_idx``; the rest become new cluster ids appended after the
+    current highest. Split pitches take the sub-model's confidence and are re-opened for review (their
+    old assignment — hand-confirmed or not — described a cluster that no longer exists as such).
+
+    ``features`` defaults to the run's own feature set; pass ``SPLIT_FEATS_MOVEMENT`` to cut on
+    movement alone. That matters for four-seam/sinker: velo and spin carry variance unrelated to seam
+    orientation, so including them tilts the boundary off the movement axis and sweeps slower,
+    lower-spin four-seams into the sinker group.
+    Raises ``ValueError`` if there's no such cluster or too few pitches to split."""
+    ent = cluster_state(pitcher)
+    if ent is None:
+        raise ValueError("Run AutoCluster first, then split one of its clusters.")
+    uids = [u for u, c in ent["assign"].items() if c == int(cluster_idx)]
+    if not uids:
+        raise ValueError(f"Cluster {cluster_idx} has no pitches to split.")
+    sub = df.filter(pl.col("PitchUID").is_in(uids))
+    res = _cluster_mod().split_gmm(sub, features=features or ent["features"], k=k)
+
+    new_ids = {0: int(cluster_idx)}                       # sub-group 0 stays put; others get new ids
+    for g in range(1, k):
+        new_ids[g] = ent["k"]
+        ent["names"][str(ent["k"])] = None
+        ent["k"] += 1
+    conf, reviewed = ent.setdefault("conf", {}), ent.setdefault("reviewed", [])
+    for u, g in res["assign"].items():
+        ent["assign"][u] = new_ids[g]
+        conf[u] = res["conf"][u]
+        if u in reviewed:
+            reviewed.remove(u)
+    _save_autocluster()
+    moved = sum(1 for g in res["assign"].values() if g != 0)
+    return {"moved": moved, "kept": res["n"] - moved, "n": res["n"],
+            "new_ids": [new_ids[g] for g in range(1, k)], "separation": res["separation"]}
+
+
 def download_frame(pitcher: str, level=ALL, team=ALL, years_sel=None) -> pl.DataFrame:
     """The pitcher's FULL raw rows (all original columns) + a ``ClusterTag`` column appended at the
     very end holding the (renamed) cluster labels — for the CSV/parquet export."""
@@ -673,7 +786,9 @@ def download_frame(pitcher: str, level=ALL, team=ALL, years_sel=None) -> pl.Data
 # QUAL_OUTS recorded outs (10 IP); percentiles are taken against the qualified pool only.
 QUAL_OUTS = 60                                            # 10 IP — the qualification threshold
 FASTBALL_TAGS = ("Fastball", "FourSeamFastBall", "TwoSeamFastBall", "OneSeamFastBall", "Sinker")
-_SWINGS_SQL = "('StrikeSwinging','FoulBallNotFieldable','FoulBallFieldable','InPlay')"
+# All three foul spellings — pre-2024 exports use the bare 'FoulBall' tag, so omitting it drops
+# those seasons' fouls out of every swing denominator. Keep in step with report.SWING_CALLS.
+_SWINGS_SQL = "('StrikeSwinging','FoulBall','FoulBallNotFieldable','FoulBallFieldable','InPlay')"
 
 
 def _pool_path(level: str, years_key: tuple[str, ...]) -> Path:

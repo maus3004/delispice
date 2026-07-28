@@ -22,7 +22,7 @@ import plotly.graph_objects as go
 from dash import ALL as ALLPM, Dash, Input, Output, Patch, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
-from . import data, report, scouting
+from . import data, leaderboard, report, scouting
 
 ALL = data.ALL
 RETAG_TYPES = ["Fastball", "Sinker", "FourSeamFastBall", "TwoSeamFastBall", "Cutter", "Slider",
@@ -335,7 +335,10 @@ def _cluster_rename_area(ent):
                       style={"fontSize": "12px", "marginRight": "6px"}),
             dcc.Dropdown(id={"type": "clu-name", "index": i}, options=RETAG_TYPE_OPTS,
                          value=ent["names"].get(str(i)), placeholder=f"name Cluster {i}…",
-                         clearable=True, style=_RDD)],
+                         clearable=True, style=_RDD),
+            html.Button("⑂ Split in 2", id={"type": "clu-split", "index": i}, n_clicks=0, style=_BTN,
+                        title="Force a 2-way GMM inside this cluster — use when you know the pitcher "
+                              "throws two pitches here (four-seam + sinker, slider + sweeper).")],
             style={"display": "flex", "alignItems": "center", "gap": "4px", "marginBottom": "4px"}))
     return html.Div(rows, style={"margin": "2px 0 6px 14px"})
 
@@ -418,6 +421,7 @@ def _dropdown(did, options, value, width=None):
 role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": "380px", "marginBottom": "10px"},
                      colors={"primary": MAROON, "background": "#faf7f7", "border": "#e2c9cc"},
                      children=[dcc.Tab(label="About", value="about"),
+                               dcc.Tab(label="Lookup", value="lookup"),
                                dcc.Tab(label="Pitchers", value="pitcher"),
                                dcc.Tab(label="Batters", value="batter"),
                                dcc.Tab(label="Shortlist", value="shortlist")])
@@ -521,6 +525,12 @@ retag_panel = html.Details(open=False, style={"margin": "6px 0", "background": "
                   dcc.Checklist(id="cluster-release",
                                 options=[{"label": " + RelHeight & Extension", "value": "r"}], value=[],
                                 style={"display": "inline-block", "fontSize": "12px", "fontFamily": FONT}),
+                  html.Span(dcc.Checklist(id="split-movement-only",
+                                options=[{"label": " split on movement only", "value": "m"}], value=[],
+                                style={"display": "inline-block", "fontSize": "12px", "fontFamily": FONT}),
+                            title="Cut splits on IVB/HB alone. Velo and spin carry variance unrelated "
+                                  "to seam orientation, so including them pulls slower, lower-spin "
+                                  "four-seams into the sinker group."),
                   html.Button("Run AutoCluster", id="cluster-run", n_clicks=0, style=_BTN),
                   html.Button("Revert clustering", id="cluster-revert", n_clicks=0, style=_BTN),
                   html.Span(id="cluster-status", style={"marginLeft": "6px", "color": "#666", "fontSize": "12px"})],
@@ -904,13 +914,7 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
     ),
            
     _topic("Eye Metric - Expected Runs on Swing/Take Decisions",
-           html.P("The model begins with a simple premise like all swing decision models do, "),
-           html.H4("Limitations and Future Developments", style={"fontFamily": FONT, "color": MAROON, "fontSize": "14px", "margin": "12px 0 4px"}),
-           html.P(
-               "Heights are not taken into consideration and with the upcoming NCAA rule change to introduce ABS to D1 games, " \
-               "adding heights would be the obvious next step. " \
-               "So, rather than training the model on the raw pitch locations, we would normalize the strike-zone according to each batter's height."
-           ),
+           html.P("Coming soon!")
     ),
 ])
 
@@ -1307,11 +1311,298 @@ def cb_sl_delete(_clicks, auth, version):
     return "✓ Report removed.", (version or 0) + 1
 
 
+# ── Lookup tab: population-wide leaderboard with stackable statistical conditions ────────────────
+# Scope (role / levels / years) picks WHICH cached pool is read; the condition rows filter inside it.
+# All the heavy work is leaderboard.pool(), cached to .cache/lb_*.parquet on first use per scope.
+_LK_IN = {"fontSize": "12px", "fontFamily": FONT, "padding": "3px 6px"}
+_LK_OPS = [{"label": "＞ greater than", "value": ">"}, {"label": "＜ less than", "value": "<"},
+           {"label": "≥ at least", "value": ">="}, {"label": "≤ at most", "value": "<="},
+           {"label": "↔ between", "value": "between"}]
+_LK_BLANK = {"metric": None, "op": ">", "value": None, "value2": None,
+             "scope": leaderboard.SCOPE_ANY, "min_n": leaderboard.DEFAULT_MIN_SCOPED}
+
+
+def _lk_row(i, c, role):
+    """One condition row: [metric] [op] [value] (between -> second value) [pitch scope] [min n] [✕]."""
+    scoped_ok = c.get("metric") in leaderboard.scoped_metric_keys()
+    m = leaderboard.METRICS.get(c.get("metric"))
+    unit = " %" if (m and m.fmt == "pct1") else ""
+    return html.Div([
+        dcc.Dropdown(id={"type": "lk-metric", "i": i}, options=leaderboard.metric_options(role),
+                     value=c.get("metric"), placeholder="statistic…",
+                     style={"width": "260px", "fontSize": "12px", "display": "inline-block"}),
+        dcc.Dropdown(id={"type": "lk-op", "i": i}, options=_LK_OPS, value=c.get("op") or ">",
+                     clearable=False,
+                     style={"width": "150px", "fontSize": "12px", "display": "inline-block"}),
+        # No debounce: these are read as State, so a keystroke costs nothing, and an un-synced
+        # value would otherwise be wiped by the re-render that a metric/op/scope change triggers.
+        dcc.Input(id={"type": "lk-val", "i": i}, type="number", value=c.get("value"),
+                  placeholder="value", style={**_LK_IN, "width": "80px"}),
+        dcc.Input(id={"type": "lk-val2", "i": i}, type="number", value=c.get("value2"),
+                  placeholder="and…",
+                  style={**_LK_IN, "width": "80px",
+                         "display": "inline-block" if c.get("op") == "between" else "none"}),
+        html.Span(unit, style={"fontSize": "11px", "color": "#888"}),
+        html.Span("on", style={"fontSize": "11px", "color": "#888", "marginLeft": "6px"}),
+        dcc.Dropdown(id={"type": "lk-scope", "i": i},
+                     options=[{"label": s, "value": s} for s in leaderboard.SCOPE_OPTIONS],
+                     value=c.get("scope") or leaderboard.SCOPE_ANY, clearable=False,
+                     disabled=not scoped_ok,
+                     style={"width": "165px", "fontSize": "12px", "display": "inline-block"}),
+        html.Span("min n", style={"fontSize": "11px", "color": "#888", "marginLeft": "6px"}),
+        dcc.Input(id={"type": "lk-minn", "i": i}, type="number",
+                  value=c.get("min_n", leaderboard.DEFAULT_MIN_SCOPED),
+                  style={**_LK_IN, "width": "62px"}),
+        html.Button("✕", id={"type": "lk-del", "i": i}, n_clicks=0,
+                    style={**_BTN, "color": MAROON}),
+    ], style={"display": "flex", "alignItems": "center", "gap": "5px", "marginBottom": "6px",
+              "flexWrap": "wrap"})
+
+
+lookup_panel = html.Div(id="lookup-panel", style={"display": "none"}, children=[
+    dcc.Store(id="lk-conds", data=[dict(_LK_BLANK)]),
+    html.Div("Lookup", style={"fontSize": "20px", "fontWeight": 700, "fontFamily": FONT}),
+    html.Div("Search the whole population instead of one player. Pick a scope, stack as many "
+             "statistical conditions as you like, and rank whoever clears them.",
+             style={"fontFamily": FONT, "fontSize": "13px", "color": "#555", "margin": "2px 0 10px"}),
+
+    # ── Scope ────────────────────────────────────────────────────────────────────────────────────
+    html.Div([
+        html.Span("Role", style=LABEL),
+        dcc.RadioItems(id="lk-role", value="pitcher", inline=True,
+                       options=[{"label": "Pitchers", "value": "pitcher"},
+                                {"label": "Batters", "value": "batter"}],
+                       inputStyle={"marginRight": "4px", "marginLeft": "10px"},
+                       style={"display": "inline-block", "fontFamily": FONT, "fontSize": "13px"}),
+        html.Span("Min pitches", style={**LABEL, "marginLeft": "20px"}),
+        dcc.Input(id="lk-min", type="number", value=leaderboard.DEFAULT_MIN_PITCHES,
+                  style={**_LK_IN, "width": "80px"}),
+        html.Span(id="lk-min-note", style={"fontSize": "11px", "color": "#888", "marginLeft": "6px"}),
+    ], style={"display": "flex", "alignItems": "center", "marginBottom": "8px", "flexWrap": "wrap"}),
+    html.Div([html.Span("Year(s):", style=LABEL), _checklist("lk-year", data.years()),
+              html.Span("  (none = All years)", style={"color": "#888", "fontSize": "12px"})],
+             style={"marginBottom": "8px"}),
+    html.Div([
+        html.Div([html.Span("Level(s)", style=LABEL),
+                  dcc.Dropdown(id="lk-levels", multi=True,
+                               options=[{"label": l, "value": l} for l in data.levels()],
+                               value=[_default_level] if _default_level != ALL else ["D1"],
+                               style={"width": "300px", "fontSize": "13px"})]),
+        html.Div([html.Span("Conference", style=LABEL),
+                  _dropdown("lk-conf", [{"label": ALL, "value": ALL}], ALL, width="170px")]),
+        html.Div([html.Span("Team", style=LABEL),
+                  _dropdown("lk-team", [{"label": ALL, "value": ALL}], ALL, width="280px")]),
+    ], style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "alignItems": "center"}),
+
+    # ── Conditions ───────────────────────────────────────────────────────────────────────────────
+    html.Hr(style={"margin": "12px 0 8px"}),
+    html.Div("Conditions — every row must be true (AND). “on” restricts a row to one pitch type, so "
+             "“Vert Break > 18 on Fastballs” means the player HAS such a fastball; the table still "
+             "shows their overall line, plus a column for the pitch that qualified them.",
+             style={"fontFamily": FONT, "fontSize": "12px", "color": "#555", "marginBottom": "8px",
+                    "maxWidth": "900px"}),
+    html.Div(id="lk-cond-rows"),
+    html.Div([html.Button("＋ Add condition", id="lk-add", n_clicks=0, style=_BTN),
+              html.Button("Clear all", id="lk-clear", n_clicks=0, style=_BTN)],
+             style={"margin": "4px 0 10px"}),
+
+    # ── Output controls ──────────────────────────────────────────────────────────────────────────
+    html.Div([
+        html.Span("Sort by", style=LABEL),
+        dcc.Dropdown(id="lk-sort", options=[], value=None,
+                     style={"width": "280px", "fontSize": "12px", "display": "inline-block"}),
+        dcc.RadioItems(id="lk-dir", value="desc", inline=True,
+                       options=[{"label": "High→Low", "value": "desc"},
+                                {"label": "Low→High", "value": "asc"}],
+                       inputStyle={"marginRight": "4px", "marginLeft": "10px"},
+                       style={"display": "inline-block", "fontFamily": FONT, "fontSize": "12px"}),
+        html.Span("Show", style={**LABEL, "marginLeft": "16px"}),
+        dcc.Input(id="lk-limit", type="number", value=100,
+                  style={**_LK_IN, "width": "70px"}),
+        html.Button("Run lookup", id="lk-run", n_clicks=0,
+                    style={**_BTN, "fontWeight": 700, "padding": "4px 14px"}),
+    ], style={"display": "flex", "alignItems": "center", "gap": "6px", "flexWrap": "wrap"}),
+    html.Div([html.Span("Columns", style=LABEL),
+              dcc.Dropdown(id="lk-cols", multi=True, options=[], value=[],
+                           style={"width": "760px", "fontSize": "12px"})],
+             style={"display": "flex", "alignItems": "center", "marginTop": "8px"}),
+    html.Div([html.Button("⬇ CSV", id="lk-dl", n_clicks=0, style=_BTN), dcc.Download(id="lk-download")],
+             style={"marginTop": "8px"}),
+
+    html.Div(id="lk-status", style={"fontFamily": FONT, "fontSize": "12px", "color": "#666",
+                                    "margin": "10px 0 4px"}),
+    dcc.Loading(type="default", children=html.Div(id="lk-results")),
+])
+
+
+def _lk_read_rows(metrics, ops, vals, val2s, scopes, minns) -> list[dict]:
+    """Current form state -> the condition-store shape (so a re-render never loses typed values)."""
+    return [{"metric": m, "op": o or ">", "value": v, "value2": v2,
+             "scope": s or leaderboard.SCOPE_ANY,
+             "min_n": mn if mn is not None else leaderboard.DEFAULT_MIN_SCOPED}
+            for m, o, v, v2, s, mn in zip(metrics, ops, vals, val2s, scopes, minns)]
+
+
+def _lk_conditions(rows) -> list[leaderboard.Condition]:
+    """Store rows -> engine Conditions, with percent inputs (70) scaled to fractions (0.70)."""
+    out = []
+    for c in rows:
+        if not c.get("metric") or c.get("value") is None:
+            continue
+        out.append(leaderboard.Condition(
+            metric=c["metric"], op=c.get("op") or ">",
+            value=leaderboard.scale_input(c["metric"], c.get("value")),
+            value2=leaderboard.scale_input(c["metric"], c.get("value2")),
+            scope=c.get("scope") or leaderboard.SCOPE_ANY,
+            min_n=int(c.get("min_n") or 0)))
+    return out
+
+
+@app.callback(Output("lk-cond-rows", "children"),
+              Input("lk-conds", "data"), Input("lk-role", "value"))
+def cb_lk_rows(rows, role):
+    return [_lk_row(i, c, role) for i, c in enumerate(rows or [])]
+
+
+# Add / delete / clear all rewrite the store, folding in whatever is currently typed first.
+@app.callback(Output("lk-conds", "data"),
+              Input("lk-add", "n_clicks"), Input("lk-clear", "n_clicks"),
+              Input({"type": "lk-del", "i": ALLPM}, "n_clicks"),
+              Input({"type": "lk-metric", "i": ALLPM}, "value"),
+              Input({"type": "lk-op", "i": ALLPM}, "value"),
+              # Scope is an Input, not a State: the sort menu offers a scoped column per scoped
+              # condition, and it can only do that if a scope change reaches the store.
+              Input({"type": "lk-scope", "i": ALLPM}, "value"),
+              State({"type": "lk-val", "i": ALLPM}, "value"),
+              State({"type": "lk-val2", "i": ALLPM}, "value"),
+              State({"type": "lk-minn", "i": ALLPM}, "value"),
+              prevent_initial_call=True)
+def cb_lk_edit(_add, _clear, _dels, metrics, ops, scopes, vals, val2s, minns):
+    rows = _lk_read_rows(metrics, ops, vals, val2s, scopes, minns)
+    trig = ctx.triggered_id
+    if trig == "lk-clear":
+        return [dict(_LK_BLANK)]
+    if trig == "lk-add":
+        return rows + [dict(_LK_BLANK)]
+    if isinstance(trig, dict) and trig.get("type") == "lk-del":
+        # A row only leaves on a real click — the pattern Input also fires when rows re-render.
+        if not any(ctx.triggered_prop_ids) or not _dels[trig["i"]]:
+            raise PreventUpdate
+        out = [r for j, r in enumerate(rows) if j != trig["i"]]
+        return out or [dict(_LK_BLANK)]
+    return rows          # metric/op change: re-render so the scope box and 2nd value box follow
+
+
+@app.callback(Output("lk-conf", "options"), Output("lk-conf", "value"),
+              Input("lk-role", "value"), Input("lk-year", "value"), Input("lk-levels", "value"))
+def cb_lk_conf(role, years_sel, levels):
+    """Conferences across every selected level (the picker's cascade is per-level; this is a union)."""
+    confs = sorted({c for lv in (levels or [ALL])
+                    for c in data.conference_options(role, years_sel, lv) if c != ALL})
+    return [{"label": ALL, "value": ALL}] + [{"label": c, "value": c} for c in confs], ALL
+
+
+@app.callback(Output("lk-team", "options"), Output("lk-team", "value"),
+              Input("lk-role", "value"), Input("lk-year", "value"),
+              Input("lk-levels", "value"), Input("lk-conf", "value"))
+def cb_lk_team(role, years_sel, levels, conf):
+    seen, opts = set(), []
+    for lv in (levels or [ALL]):
+        for o in data.team_options(role, years_sel, lv, conf):
+            if o["value"] not in seen:
+                seen.add(o["value"])
+                opts.append(o)
+    return sorted(opts, key=lambda o: (o["value"] != ALL, o["label"].lower())), ALL
+
+
+@app.callback(Output("lk-cols", "options"), Output("lk-cols", "value"),
+              Output("lk-sort", "options"), Output("lk-sort", "value"),
+              Output("lk-min-note", "children"),
+              Input("lk-role", "value"), Input("lk-conds", "data"))
+def cb_lk_outputs(role, rows):
+    """Column + sort menus follow the role; sort also offers each scoped condition's own column,
+    so "rank by the fastball's IVB" is distinguishable from "rank by IVB over everything"."""
+    opts = leaderboard.metric_options(role)
+    sort_opts = list(opts)
+    for c in rows or []:
+        m = leaderboard.METRICS.get(c.get("metric"))
+        scope = c.get("scope") or leaderboard.SCOPE_ANY
+        if m and scope != leaderboard.SCOPE_ANY and m.scoped:
+            sort_opts.append({"label": f"▸ {m.label_for(role)} ({scope})",
+                              "value": f"{m.key}__{scope}"})
+    default_sort = sort_opts[-1]["value"] if len(sort_opts) > len(opts) else "n_pitches"
+    note = "pitches thrown" if role == "pitcher" else "pitches seen"
+    return opts, leaderboard.default_columns(role), sort_opts, default_sort, f"({note})"
+
+
+@app.callback(Output("lk-results", "children"), Output("lk-status", "children"),
+              Input("lk-run", "n_clicks"),
+              State("lk-role", "value"), State("lk-year", "value"), State("lk-levels", "value"),
+              State("lk-conf", "value"), State("lk-team", "value"), State("lk-min", "value"),
+              State("lk-conds", "data"), State("lk-cols", "value"), State("lk-sort", "value"),
+              State("lk-dir", "value"), State("lk-limit", "value"),
+              State({"type": "lk-metric", "i": ALLPM}, "value"),
+              State({"type": "lk-op", "i": ALLPM}, "value"),
+              State({"type": "lk-val", "i": ALLPM}, "value"),
+              State({"type": "lk-val2", "i": ALLPM}, "value"),
+              State({"type": "lk-scope", "i": ALLPM}, "value"),
+              State({"type": "lk-minn", "i": ALLPM}, "value"),
+              prevent_initial_call=True)
+def cb_lk_run(_n, role, years_sel, levels, conf, team, min_pitches, _rows, cols, sort_by, direction,
+              limit, metrics, ops, vals, val2s, scopes, minns):
+    if not levels:
+        return None, "Pick at least one level."
+    rows = _lk_read_rows(metrics, ops, vals, val2s, scopes, minns)
+    conds = _lk_conditions(rows)
+    res = leaderboard.query(role, levels, years_sel, conf, team,
+                            min_pitches=int(min_pitches or 0), conditions=conds,
+                            display=cols or None, sort_by=sort_by,
+                            descending=(direction != "asc"), limit=int(limit or 100))
+    if res.frame.height == 0:
+        return None, " ".join(res.diagnostics) or "No one matches those conditions."
+    shown = min(res.total, int(limit or 100))
+    bits = [f"{res.total:,} {role}s match", f"showing {shown:,}"]
+    if conds:
+        bits.append("· " + "  ·  ".join(c.label(role) for c in conds))
+    # xRV only exists where a contact-quality artifact is trained (currently D1 + P4).
+    if "xrv" in (cols or []) and not any(l in leaderboard.data.re_matrix_options() for l in levels):
+        bits.append("— xRV is blank: no contact-quality model trained for the selected level(s)")
+    return _scroll(html_table(leaderboard.format_board(res, role))), "  ".join(bits)
+
+
+@app.callback(Output("lk-download", "data"),
+              Input("lk-dl", "n_clicks"),
+              State("lk-role", "value"), State("lk-year", "value"), State("lk-levels", "value"),
+              State("lk-conf", "value"), State("lk-team", "value"), State("lk-min", "value"),
+              State("lk-cols", "value"), State("lk-sort", "value"), State("lk-dir", "value"),
+              State({"type": "lk-metric", "i": ALLPM}, "value"),
+              State({"type": "lk-op", "i": ALLPM}, "value"),
+              State({"type": "lk-val", "i": ALLPM}, "value"),
+              State({"type": "lk-val2", "i": ALLPM}, "value"),
+              State({"type": "lk-scope", "i": ALLPM}, "value"),
+              State({"type": "lk-minn", "i": ALLPM}, "value"),
+              prevent_initial_call=True)
+def cb_lk_download(_n, role, years_sel, levels, conf, team, min_pitches, cols, sort_by, direction,
+                   metrics, ops, vals, val2s, scopes, minns):
+    """Export the full match set (not just the displayed page)."""
+    if not levels:
+        raise PreventUpdate
+    conds = _lk_conditions(_lk_read_rows(metrics, ops, vals, val2s, scopes, minns))
+    res = leaderboard.query(role, levels, years_sel, conf, team, min_pitches=int(min_pitches or 0),
+                            conditions=conds, display=cols or None, sort_by=sort_by,
+                            descending=(direction != "asc"), limit=10 ** 9)
+    if res.frame.height == 0:
+        raise PreventUpdate
+    return dcc.send_string(leaderboard.format_board(res, role).write_csv(),
+                           f"lookup_{role}_{'-'.join(levels)}.csv")
+
+
 app.layout = html.Div([dcc.Store(id="retag-version", data=0),
                        dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
                        dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
                        dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"), selection,
-                       html.Div([about_panel, shortlist_panel, pitcher_report, batter_report], style={"padding": "12px 16px"})],
+                       html.Div([about_panel, lookup_panel, shortlist_panel, pitcher_report,
+                                 batter_report], style={"padding": "12px 16px"})],
                       style={"fontFamily": FONT})
 
 
@@ -1323,12 +1614,15 @@ def cb_label(role):
 
 # ── About tab: show the About panel, hide the picker controls (reports hide via the player reset) ──
 @app.callback(Output("about-panel", "style"), Output("picker-controls", "style"),
-              Output("shortlist-panel", "style"), Input("role-tabs", "value"))
+              Output("shortlist-panel", "style"), Output("lookup-panel", "style"),
+              Input("role-tabs", "value"))
 def cb_about_toggle(role):
     about = {"padding": "8px 4px"} if role == "about" else {"display": "none"}
     shortlist = {"padding": "8px 4px"} if role == "shortlist" else {"display": "none"}
-    picker = {"display": "none"} if role in ("about", "shortlist") else {"display": "block"}
-    return about, picker, shortlist
+    lookup = {"padding": "8px 4px"} if role == "lookup" else {"display": "none"}
+    # Lookup carries its own scope controls, so the shared player picker stays hidden there too.
+    picker = {"display": "none"} if role in ("about", "shortlist", "lookup") else {"display": "block"}
+    return about, picker, shortlist, lookup
 
 
 # ── Cascading pickers (role-aware; all off the small in-memory index) ─────────────────────────────
@@ -1578,6 +1872,7 @@ def cb_splits(batter, count, role, pitcher, years_sel, level, team, re_lvl, re_y
 def cb_refresh(_n, role):
     data.get_index(role, force_rebuild=True)
     data.clear_percentile_pools()          # new games must flow into the percentile pools too
+    leaderboard.clear_pools()              # …and into the Lookup tab's leaderboard pools
     s = data.index_stats(role)
     return f"{role.title()} index rebuilt — {s['players']:,} {role}s · {s['teams']:,} teams · {s['combos']:,} combos."
 
@@ -1687,6 +1982,34 @@ def cb_cluster_ui(_rv, pitcher, role):
               + (f" · {ent['n_unclustered']:,} unclustered" if ent["n_unclustered"] else "")
               + f" · {feats}. Name the clusters below — the report updates live.")
     return status, _cluster_rename_area(ent)
+
+
+# ── AutoCluster: force a 2-way split inside one cluster (known 4-seam/sinker, slider/sweeper) ─────
+@app.callback(Output("retag-version", "data", allow_duplicate=True),
+              Output("cluster-status", "children", allow_duplicate=True),
+              Input({"type": "clu-split", "index": ALLPM}, "n_clicks"),
+              State("split-movement-only", "value"),
+              State("player-dd", "value"), State("role-tabs", "value"), State("year-check", "value"),
+              State("level-dd", "value"), State("team-dd", "value"), State("retag-version", "data"),
+              prevent_initial_call=True)
+def cb_cluster_split(_clicks, move_only, pitcher, role, years_sel, level, team, ver):
+    tid = ctx.triggered_id
+    # Freshly rendered pattern buttons fire at n_clicks=0 — only act on a real click.
+    if role != "pitcher" or not pitcher or not isinstance(tid, dict) or not ctx.triggered[0]["value"]:
+        raise PreventUpdate
+    rows = data.get_rows("pitcher", pitcher, level, team, years_sel)
+    try:
+        res = data.split_cluster(pitcher, rows, tid["index"],
+                                 features=data.SPLIT_FEATS_MOVEMENT if move_only else None)
+    except ValueError as e:
+        return no_update, str(e)
+    # Separation = how far apart the two sub-centres sit in pooled-sigma units. Reported as context
+    # only — a forced split is a judgement call, and the tags often confirm a split this reads as tight.
+    return ((ver or 0) + 1,
+            f"Split Cluster {tid['index']} ({res['n']:,} pitches) on "
+            f"{'movement' if move_only else 'all features'} → kept {res['kept']:,}, "
+            f"moved {res['moved']:,} to Cluster {res['new_ids'][0]} "
+            f"(separation {res['separation']:.1f}σ). Name the new cluster below.")
 
 
 # ── AutoCluster: one-at-a-time review of low-confidence pitches ───────────────────────────────────

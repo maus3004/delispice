@@ -37,6 +37,7 @@ K_RANGE             = range(1, 7)
 GMM_KW              = dict(covariance_type="full", n_init=20, random_state=42)
 MIN_PITCHES_POOLED  = 300                                            # notebook's per-pitcher floor
 MIN_PITCHES_SINGLE  = 30                                             # sane floor for one pitcher
+MIN_PITCHES_SPLIT   = 20                                             # floor for splitting one cluster
 
 
 # ── Data prep (notebook cells 1 + 3) ──────────────────────────────────────────────────────────────
@@ -129,6 +130,50 @@ def autotag_pitcher(df: pl.DataFrame, use_release: bool = False, features: list[
             "bic_table": res["bic_table"], "features": feats,
             "model": res["model"], "scaler": res["scaler"],
             "means": means, "counts": np.bincount(labels, minlength=k)}
+
+
+def split_pitches(df: pl.DataFrame, features: list[str], k: int = 2,
+                  min_pitches: int = MIN_PITCHES_SPLIT) -> dict:
+    """Force a ``k``-way split of pitches that already sit in ONE cluster — for when the pitcher is
+    known to throw two distinct pitches the top-level fit merged (a true four-seam/sinker mix, or a
+    slider/sweeper pair). ``k`` is fixed by the caller's domain knowledge, deliberately bypassing the
+    ICL sweep that chose to merge them.
+
+    Scaling is re-fit on just this subset, so the within-cluster spread fills the feature space
+    instead of being dwarfed by the pitcher's full arsenal — that's what makes the sub-split separable.
+
+    Returns {labels, index, conf, k, n, means, counts}; labels are 0..k-1 ordered by usage."""
+    d = (df.with_row_index("_row")
+           .pipe(anchor_lefties)
+           .drop_nulls(subset=features))
+    n = d.height
+    if n < min_pitches:
+        raise ValueError(f"Need at least {min_pitches} pitches in the cluster to split it (have {n}).")
+
+    X = d.select(features).to_numpy()
+    res = fit_gmm(X, range(k, k + 1))                     # single fixed k — no model selection
+    conf = res["model"].predict_proba(res["scaler"].transform(X)).max(axis=1)
+    labels, order = relabel_by_size(res["labels"], k)      # 0 = most thrown of the sub-clusters
+    means = res["scaler"].inverse_transform(res["model"].means_)[order]
+    return {"labels": labels, "index": d["_row"].to_numpy(), "conf": conf, "k": k, "n": n,
+            "means": means, "counts": np.bincount(labels, minlength=k),
+            "separation": separation(res["model"])}
+
+
+def separation(model) -> float:
+    """Smallest gap between any two of a fitted GMM's components, in pooled-sigma units — how far
+    apart their centres sit relative to their own spread. A forced split ALWAYS returns components,
+    so this is what says whether it found two real pitches (roughly >2.5) or just sliced one cloud in
+    half (roughly <2). ``inf`` for a single-component model."""
+    m, cov, K = model.means_, model.covariances_, model.n_components
+    if K < 2:
+        return float("inf")
+    gaps = []
+    for i in range(K):
+        for j in range(i + 1, K):
+            d = m[i] - m[j]
+            gaps.append(float(np.sqrt(d @ np.linalg.inv((cov[i] + cov[j]) / 2) @ d)))
+    return min(gaps)
 
 
 def autotag_by_pitcher(df: pl.DataFrame, use_release: bool = False,

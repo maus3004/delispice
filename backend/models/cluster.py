@@ -31,3 +31,16 @@ def run_gmm(df: pl.DataFrame, use_release: bool = False) -> dict:
     return {"assign": assign, "conf": conf, "k": res["k"], "n": res["n"],
             "n_unclustered": df.height - res["n"], "features": res["features"],
             "bic_table": res["bic_table"]}
+
+
+def split_gmm(df: pl.DataFrame, features: list[str], k: int = 2) -> dict:
+    """Force a ``k``-way GMM within one cluster's pitches (``df`` = just that cluster's rows).
+    Returns ``{assign: {PitchUID: 0..k-1}, conf: {PitchUID: max_posterior}, n}`` — sub-group 0 is the
+    most-thrown. Raises ``ValueError`` when the cluster is too small to split."""
+    at = _autotagger()
+    d = df.filter(pl.col("PitchUID").is_not_null())
+    res = at.split_pitches(d, features=features, k=k)
+    uids = d["PitchUID"].to_list()
+    return {"assign": {uids[i]: int(lab) for i, lab in zip(res["index"], res["labels"])},
+            "conf": {uids[i]: round(float(cf), 4) for i, cf in zip(res["index"], res["conf"])},
+            "n": res["n"], "separation": round(res["separation"], 2)}

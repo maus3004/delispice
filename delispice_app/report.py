@@ -19,9 +19,17 @@ import plotly.graph_objects as go
 from scipy.stats import gaussian_kde
 from scipy.ndimage import gaussian_filter
 
-# ── Vocabulary (unchanged from the notebook) ────────────────────────────────────────────────────
-STRIKE_CALLS = ["StrikeCalled", "StrikeSwinging", "FoulBallNotFieldable", "FoulBallFieldable", "InPlay"]
-SWING_CALLS  = ["StrikeSwinging", "FoulBallNotFieldable", "FoulBallFieldable", "InPlay"]
+# ── Vocabulary ──────────────────────────────────────────────────────────────────────────────────
+# ALL THREE foul spellings count as a swing. TrackMan exports before 2024 use the bare "FoulBall"
+# tag exclusively (2022: 148,324 of them and zero of the split pair; 2023: 192,123); 2024 is mixed;
+# 2025+ use the split pair. Omitting the legacy tag — as this list did originally — drops every
+# pre-2024 foul out of the swing and strike denominators, which inflated D1 2022-23 Whiff% from
+# 24.1% to 38.0% and understated Swing% by ~16pp.
+# ``data._SWINGS_SQL`` and ``leaderboard._FOULS`` must carry the same three values; report.py is
+# DuckDB-free and data.py is plotly-free, so the constant genuinely cannot be shared.
+FOUL_CALLS   = ["FoulBall", "FoulBallNotFieldable", "FoulBallFieldable"]
+SWING_CALLS  = ["StrikeSwinging", *FOUL_CALLS, "InPlay"]
+STRIKE_CALLS = ["StrikeCalled", *SWING_CALLS]
 HIT_RESULTS  = ["Single", "Double", "Triple", "HomeRun"]
 HARD_HIT_MPH = 95
 PITCH_NAMES  = {"FourSeamFastBall": "Four-Seam", "TwoSeamFastBall": "Two-Seam", "ChangeUp": "Changeup"}
@@ -75,6 +83,17 @@ def num(x, d=2):
     return f"{x:.{d}f}" if x is not None else ""
 
 
+def rv100(mean_rv):
+    """Mean per-pitch run value -> runs per 100 pitches, signed so the direction is unmissable.
+
+    OFFENSE-POSITIVE for both roles, matching the xRV/BBE column beside it: +1.41 for a home run,
+    -0.33 for a strikeout. So on a PITCHER report a negative RV/100 is the good one (runs prevented),
+    and RV vs xRV reads directly as actual-vs-expected in the same run environment."""
+    if mean_rv is None:
+        return ""
+    return f"{mean_rv * 100:+.2f}"
+
+
 def pct(x):
     return f"{x:.0%}" if x is not None else ""
 
@@ -107,6 +126,9 @@ def build_summary(df: pl.DataFrame) -> pl.DataFrame:
         "Rel Height": num(df["RelHeight"].mean()), "Rel Side": num(df["RelSide"].mean()),
         "Extension": num(df["Extension"].mean()),
         "K%": pct(so / bf) if bf else "", "BB%": pct(bb / bf) if bf else "",
+        # Whole-outing run value: the mean over EVERY pitch, so it reflects the full body of work
+        # rather than only balls in play the way xRV/BBE does.
+        "RV/100": rv100(df["RV"].mean() if "RV" in df.columns else None),
         "xRV/BBE": num(df["xRV"].mean() if "xRV" in df.columns else None, 3),
     }])
 
@@ -130,6 +152,7 @@ def build_arsenal(df: pl.DataFrame) -> pl.DataFrame:
                  pl.col("ExitSpeed").mean().alias("ev"),
                  (pl.col("ExitSpeed") >= HARD_HIT_MPH).filter(pl.col("ExitSpeed").is_not_null()).mean().alias("hh"),
                  pl.col("xRV").mean().alias("xrv"),      # expected runs allowed per ball in play
+                 pl.col("RV").mean().alias("rv"),        # REALIZED runs per pitch (RE288 delta)
              ).sort("count", descending=True))
     rows = []
     for r in agg.iter_rows(named=True):
@@ -142,7 +165,7 @@ def build_arsenal(df: pl.DataFrame) -> pl.DataFrame:
                      "Strike %": pct(r["strike"]), "WHIFF %": pct(whiff), "Vert Break": num(r["vb"]),
                      "Horz Break": num(r["hb"]), "Tilt": spin_clock(axis), "Rel Height": num(r["rh"]),
                      "Rel Side": num(r["rs"]), "Extension": num(r["ext"]), "Hard Hit %": pct(r["hh"]),
-                     "Avg EV": num(r["ev"]), "xRV/BBE": num(r["xrv"], 3)})
+                     "Avg EV": num(r["ev"]), "RV/100": rv100(r["rv"]), "xRV/BBE": num(r["xrv"], 3)})
     return pl.DataFrame(rows)
 
 
@@ -197,6 +220,8 @@ def build_batter_summary(df: pl.DataFrame) -> pl.DataFrame:
         "AVG": _avg3(avg), "OBP": _avg3(obp), "SLG": _avg3(slg), "OPS": _avg3(ops),
         "K%": pct(so / pa) if pa else "", "BB%": pct(bb / pa) if pa else "",
         "Avg EV": num(ev, 1), "Hard Hit %": pct(hh), "Avg LA": num(la, 1),
+        # Whole-PA run value: mean over EVERY pitch seen, not just balls in play.
+        "RV/100": rv100(df["RV"].mean() if "RV" in df.columns else None),
         "xRV/BBE": num(df["xRV"].mean() if "xRV" in df.columns else None, 3),
     }])
 
@@ -231,9 +256,9 @@ SUB_DISPLAY = {"FourSeamFastBall": "Four-Seam", "TwoSeamFastBall": "Two-Seam",
                "OneSeamFastBall": "Fastball", "ChangeUp": "Changeup"}
 BATTER_TABLE_COLS = ["Pitch", "Pitches Seen", "Pitch Seen %", "Swing %", "Contact %",
                      "Good Decision %", "Whiff %", "I-Zone Swing %", "I-Zone Whiff %", "Chase %",
-                     "Hard Hit %", "Avg EV", "xRV/BBE"]
+                     "Hard Hit %", "Avg EV", "RV/100", "xRV/BBE"]
 _COMPONENT_KEYS = ("count", "swings", "whiffs", "loc_n", "good", "iz_n", "iz_sw", "iz_whiff",
-                   "oz_n", "oz_sw", "ev_n", "hh", "ev_sum", "xrv_n", "xrv_sum")
+                   "oz_n", "oz_sw", "ev_n", "hh", "ev_sum", "xrv_n", "xrv_sum", "rv_n", "rv_sum")
 
 
 def _pitch_components(df: pl.DataFrame) -> list[dict]:
@@ -262,6 +287,8 @@ def _pitch_components(df: pl.DataFrame) -> list[dict]:
         pl.col("ExitSpeed").filter(inplay).sum().alias("ev_sum"),
         pl.col("xRV").is_not_null().sum().alias("xrv_n"),   # xRV is only scored on balls in play
         pl.col("xRV").sum().alias("xrv_sum"),
+        pl.col("RV").is_not_null().sum().alias("rv_n"),     # RV is scored on EVERY pitch
+        pl.col("RV").sum().alias("rv_sum"),
     ).to_dicts()
 
 
@@ -277,6 +304,7 @@ def _pitch_row(name, c, total) -> dict:
         "Chase %": pct(c["oz_sw"] / c["oz_n"]) if c["oz_n"] else "",
         "Hard Hit %": pct(c["hh"] / c["ev_n"]) if c["ev_n"] else "",
         "Avg EV": num(c["ev_sum"] / c["ev_n"], 1) if c["ev_n"] else "",
+        "RV/100": rv100(c["rv_sum"] / c["rv_n"]) if c["rv_n"] else "",
         "xRV/BBE": num(c["xrv_sum"] / c["xrv_n"], 3) if c["xrv_n"] else "",
     }
 

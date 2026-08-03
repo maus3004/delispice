@@ -102,9 +102,14 @@ def relabel_by_size(labels: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]
 
 # ── High-level entrypoints ────────────────────────────────────────────────────────────────────────
 def autotag_pitcher(df: pl.DataFrame, use_release: bool = False, features: list[str] | None = None,
-                    min_pitches: int = MIN_PITCHES_SINGLE, relabel: bool = True) -> dict:
+                    min_pitches: int = MIN_PITCHES_SINGLE, relabel: bool = True,
+                    k: int | None = None) -> dict:
     """Cluster ONE pitcher's pitches. ``df`` is any frame holding PitcherThrows + the features —
     no tag filtering here (assigning Undefined/Other pitches is the point when retagging).
+
+    ``k`` pins the number of clusters instead of sweeping ``K_RANGE`` for the best ICL — use it when
+    you know the arsenal and the sweep disagrees (ICL merges pitches that overlap, e.g. a true
+    four-seam/sinker pair). Left ``None``, the ICL sweep picks k as before.
 
     Returns {labels, index, k, n, bic_table, features, model, scaler, means, counts} where
     ``index`` holds the df row positions that were clustered (rows missing a feature are skipped)
@@ -116,8 +121,10 @@ def autotag_pitcher(df: pl.DataFrame, use_release: bool = False, features: list[
     n = d.height
     if n < min_pitches:
         raise ValueError(f"Need at least {min_pitches} pitches with complete features to cluster (have {n}).")
+    if k is not None and not 1 <= k <= n:
+        raise ValueError(f"k must be between 1 and the {n} usable pitches (asked for {k}).")
 
-    res = fit_gmm(d.select(feats).to_numpy(), K_RANGE)
+    res = fit_gmm(d.select(feats).to_numpy(), range(k, k + 1) if k else K_RANGE)
     labels, k = res["labels"], res["k"]
     # Per-pitch confidence = the model's max posterior (responsibility). It's a max over components,
     # so the size-relabel below (which only renumbers ids) leaves it unchanged — no reordering needed.

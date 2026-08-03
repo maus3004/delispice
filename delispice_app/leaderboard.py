@@ -212,9 +212,41 @@ def _rv_join_sql(level: str, years_key: tuple[str, ...]) -> tuple[str, str]:
     return joins, agg
 
 
+def _eye_join_sql(level: str, years_key: tuple[str, ...]) -> tuple[str, str]:
+    """(JOIN clause, aggregate exprs) summing per-pitch EYE (swing/take decision runs) in the
+    aggregate pass.
+
+    Far simpler than RV's three joins: an eye score is already finished in the artifact, because its
+    run environment is baked in at build time (see backend/models/eye_store). So this is one join on
+    PitchUID. Only THIS level's artifacts are unioned — a D1 pitch is scored in both eye_D1_* and
+    eye_P4_*, and mixing them would double-count it against two different league policies. Emits
+    null columns when no artifact is built yet."""
+    from backend.models import eye_store
+    yrs = years_key or tuple(data.years("pitcher"))
+    lvl = level or ""
+    if not lvl or lvl == ALL:
+        return "", "NULL::DOUBLE AS sum_eye, 0::BIGINT AS n_eye"
+    paths = [str(eye_store._eye_path(lvl, y)) for y in yrs if eye_store.eye_exists(lvl, y)]
+    if not paths:
+        return "", "NULL::DOUBLE AS sum_eye, 0::BIGINT AS n_eye"
+    lst = "[" + ", ".join(f"'{p}'" for p in paths) + "]"
+    joins = f"LEFT JOIN read_parquet({lst}) AS ey ON ey.PitchUID = p.PitchUID"
+    # count(ey.eye), not count(*): pitches with no competitive decision (HBP, intentional balls)
+    # miss the join and must stay out of the denominator rather than counting as a 0.00 decision.
+    agg = "sum(ey.eye) AS sum_eye, count(ey.eye)::BIGINT AS n_eye"
+    return joins, agg
+
+
+# Bump when the pool's COLUMN SET changes: a cached parquet written by an older build would be
+# missing the new counters and every metric reading them would blow up at query time. The version
+# lives in the filename so stale pools are simply never opened (and clear_pools still globs them).
+_POOL_SCHEMA_VERSION = 2      # v2: + sum_eye / n_eye (batter eye metric)
+
+
 def _pool_path(role: str, level: str, years_key: tuple[str, ...]) -> Path:
     yk = "-".join(years_key) if years_key else "all"
-    return CACHE_DIR / f"lb_{role}_{(level or ALL).replace(' ', '')}_{yk}.parquet"
+    return (CACHE_DIR /
+            f"lb_{role}_{(level or ALL).replace(' ', '')}_{yk}_v{_POOL_SCHEMA_VERSION}.parquet")
 
 
 def _scan_target(role: str, level: str, years_key: tuple[str, ...]) -> tuple[str, list[str], list]:
@@ -288,13 +320,14 @@ def pool(role: str, level: str, years_key: tuple[str, ...] = ()) -> pl.DataFrame
     r = data.ROLES[role]
     full_where = [f"{r['player']} IS NOT NULL", *where]
     rv_join, rv_agg = _rv_join_sql(level, years_key)
+    eye_join, eye_agg = _eye_join_sql(level, years_key)
     con = data._con()
     df = con.execute(f"""
         WITH p AS (SELECT {_flags_sql(role)}, PitchUID, substr(Date, 1, 4) AS Year
                    FROM read_parquet({glob_list})
                    WHERE {' AND '.join(full_where)})
-        SELECT Player, Team, PitchType, {_AGG_SQL}, {rv_agg}
-        FROM p {rv_join}
+        SELECT Player, Team, PitchType, {_AGG_SQL}, {rv_agg}, {eye_agg}
+        FROM p {rv_join} {eye_join}
         GROUP BY Player, Team, PitchType
     """, params).pl()
     con.close()
@@ -304,6 +337,8 @@ def pool(role: str, level: str, years_key: tuple[str, ...] = ()) -> pl.DataFrame
                  on=["Player", "Team", "PitchType"], how="left")
     df = df.with_columns(pl.col("n_xrv").fill_null(0).cast(pl.Int64),
                          pl.col("sum_xrv").fill_null(0.0),
+                         pl.col("n_eye").fill_null(0).cast(pl.Int64),
+                         pl.col("sum_eye").fill_null(0.0),
                          pl.lit(level).alias("Level"))
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     df.write_parquet(path)
@@ -397,6 +432,16 @@ _M: list[Metric] = [
     Metric("chase_pct", "Chase %", lambda: _safe("oz_swings", "oz_n"), "pct1", denom="oz_n"),
     Metric("iz_whiff_pct", "In-Zone Whiff %", lambda: _safe("iz_whiffs", "iz_swings"), "pct1",
            denom="iz_swings"),
+    # Swing/take DECISION value: runs added versus the league's average decision on the same pitch
+    # in the same count. Batter-only — it is a hitter's plate-discipline skill, and a pitcher-facing
+    # reading ("how well did hitters choose against me") would be a different metric.
+    # Deliberately contact-agnostic: every swing is valued at the LEAGUE-average result of swinging
+    # there, so this measures the eye, never the bat — that is what makes it complement xRV/BBE
+    # rather than duplicate it.
+    Metric("eye100", "Eye / 100 pitches",
+           lambda: pl.when(pl.col("n_eye") > 0)
+                     .then(pl.col("sum_eye") / pl.col("n_eye") * 100).otherwise(None),
+           "signed2", denom="n_eye", roles=("batter",), blabel="Eye / 100 pitches"),
 
     # Contact quality
     Metric("ev", "Avg EV", lambda: _safe("sum_ev", "n_ev"), "1f", denom="n_ev", group="Contact"),
@@ -612,7 +657,8 @@ def query(role: str, levels, years_sel=None, conf=ALL, team=ALL,
 DEFAULT_PITCHER_COLS = ["n_pitches", "velo", "ivb", "hb_arm", "csw_pct", "whiff_pct", "chase_pct",
                         "k_pct", "bb_pct", "hardhit_pct", "ev", "rv100", "xrv"]
 DEFAULT_BATTER_COLS = ["n_pitches", "pa", "avg", "obp", "slg", "ops", "k_pct", "bb_pct",
-                       "swing_pct", "whiff_pct", "chase_pct", "hardhit_pct", "ev", "rv100", "xrv"]
+                       "swing_pct", "whiff_pct", "chase_pct", "hardhit_pct", "ev", "rv100",
+                       "eye100", "xrv"]
 
 
 def default_columns(role: str) -> list[str]:

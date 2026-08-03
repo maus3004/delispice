@@ -50,6 +50,7 @@ BATTER_COLS = [
     "Date", "Batter", "BatterId", "BatterSide", "BatterTeam", "Level", "Pitcher", "PitcherThrows", "PitchUID",
     "PitchofPA", "PitchCall", "KorBB", "PlayResult", "TaggedPitchType", "AutoPitchType", "TaggedHitType",
     "PlateLocHeight", "PlateLocSide", "ExitSpeed", "Angle", "Direction", "Bearing", "Distance",
+    "Balls", "Strikes",              # count — the eye model's decision context
 ]
 
 ROLES = {
@@ -477,14 +478,98 @@ def _with_rv(df: pl.DataFrame, sel_level: str = ALL,
                .with_columns(pl.col("rv").alias("RV")).drop("rv"))
 
 
+# ── Eye (swing/take decision value) — runs above the league's average decision ────────────────────
+# Models are trained OFFLINE per (Level, Year) — `python -m backend.models.eye_store --eye` — and
+# served from small artifacts. Never trained at request time; rows score null until one exists.
+@functools.lru_cache(maxsize=16)
+def _eye_model(level: str, year: str):
+    from backend.models import eye_store
+    return eye_store.load(level, year)
+
+
+@functools.lru_cache(maxsize=4)
+def _eye_cache(level: str, year: str):
+    """PitchUID -> eye table for a (level, year), or None if it hasn't been built.
+
+    maxsize=4, not one-per-season: these tables are dominated by 36-char PitchUIDs, so holding every
+    level-year would cost hundreds of MB to save a reload — the same trade rv_store makes."""
+    from backend.models import eye_store
+    return eye_store.eye_lookup(level, year)
+
+
+def _eye_for(df: pl.DataFrame, level: str, year: str) -> pl.DataFrame | None:
+    """``df`` (raw app rows) -> ``PitchUID`` + an ``eye`` column, for the rows that are scorable.
+
+    Cached scores first, then ONE live pass for whatever the cache doesn't hold, mirroring
+    ``_xrv_for``. Trees are cheap to evaluate, so the live path is not a performance cliff the way
+    the k-NN's is — it exists so a night's new games are correct before the next
+    ``python -m backend.models.eye_store --eye-only`` run.
+
+    Returns None when the model itself isn't trained (callers leave Eye null)."""
+    from backend.models import eye_v1
+    cache = _eye_cache(level, year)
+    uids = df.select("PitchUID").unique()
+    got = (uids.join(cache, on="PitchUID", how="left") if cache is not None
+           else uids.with_columns(pl.lit(None, dtype=pl.Float32).alias("eye")))
+    miss = got.filter(pl.col("eye").is_null()).select("PitchUID")
+    if miss.height == 0:
+        return got
+    model = _eye_model(level, year)
+    if model is None:
+        return got if cache is not None else None
+    # prepare() drops the rows that aren't competitive decisions, so anything still missing
+    # afterwards is legitimately unscorable (HBP, intentional ball, no location) and stays null.
+    prepared = eye_v1.prepare(df.join(miss, on="PitchUID", how="semi"))
+    if prepared.height == 0:
+        return got
+    live = prepared.select("PitchUID").with_columns(model.predict_eye(prepared).cast(pl.Float32))
+    return pl.concat([got.filter(pl.col("eye").is_not_null()),
+                      got.filter(pl.col("eye").is_null()).drop("eye")
+                         .join(live, on="PitchUID", how="left")], how="vertical")
+
+
+def _with_eye(df: pl.DataFrame, sel_level: str = ALL) -> pl.DataFrame:
+    """Append an ``Eye`` column: runs added by this pitch's swing/take DECISION, versus the league's
+    average decision on the same pitch in the same count. Null when the artifact isn't built, or when
+    the pitch wasn't a competitive decision (HBP, intentional/automatic calls, missing location).
+
+    Deliberately does NOT take the Run-Expectancy override. Unlike RV — where the state transition is
+    a fact and the matrix is applied on top — an eye score bakes its run environment into BOTH the
+    count run values and the EV(swing) model it was trained against, so the artifact holds one
+    finished number per pitch. Each pitch is therefore scored by its OWN (level, year) model, which
+    is what the Auto+Auto default would give anyway. See backend/models/eye_store for the v2 note."""
+    out = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("Eye"))
+    need = {"PitchUID", "Balls", "Strikes", "PitchCall", "PlateLocHeight", "PlateLocSide",
+            "BatterSide", "AutoPitchType"}
+    if df.height == 0 or not need.issubset(df.columns):
+        return out
+    scored = []
+    for (lvl, yr), grp in df.partition_by(["Level", "Year"], as_dict=True).items():
+        model_level = P4_LEVEL if sel_level == P4_LEVEL else lvl
+        if not (model_level and yr):
+            continue
+        got = _eye_for(grp, model_level, yr)
+        if got is not None:
+            scored.append(got.select("PitchUID", pl.col("eye").alias("Eye_new")))
+    if not scored:
+        return out
+    # Unique on the join key: a pitch written into both physical partitions appears twice, and a
+    # dup key here would fan out the player's whole frame, not just the Eye column.
+    return (out.drop("Eye").join(pl.concat(scored).unique(subset=["PitchUID"]),
+                                 on="PitchUID", how="left")
+               .with_columns(pl.col("Eye_new").cast(pl.Float64).alias("Eye")).drop("Eye_new"))
+
+
 @functools.lru_cache(maxsize=64)
 def _scored_cached(role: str, player: str, level: str, team: str, years_key: tuple[str, ...],
                    re_level: str | None, re_year: str | None) -> pl.DataFrame:
-    """Base rows (cached DuckDB fetch) + xRV (model) and RV (realized) columns, both resolved
-    against the picked Run-Expectancy (level, year)."""
+    """Base rows (cached DuckDB fetch) + xRV (model), RV (realized) and Eye (decision) columns. The
+    first two are resolved against the picked Run-Expectancy (level, year); Eye is pre-scored in its
+    own environment (see _with_eye)."""
     base = _rows_cached(role, player, level, team, years_key)
     scored = _with_xrv(base, sel_level=level, re_level=re_level, re_year=re_year)
-    return _with_rv(scored, sel_level=level, re_level=re_level, re_year=re_year)
+    scored = _with_rv(scored, sel_level=level, re_level=re_level, re_year=re_year)
+    return _with_eye(scored, sel_level=level)
 
 
 def get_rows(role: str, player: str, level=ALL, team=ALL, years_sel=None,
@@ -614,9 +699,11 @@ def cluster_state(pitcher: str) -> dict | None:
     return _load_autocluster().get(pitcher)
 
 
-def run_autocluster(pitcher: str, df: pl.DataFrame, use_release: bool = False) -> dict:
-    """Run the GMM on this pitcher's (current selection of) pitches and store the assignment."""
-    res = _cluster_mod().run_gmm(df, use_release=use_release)
+def run_autocluster(pitcher: str, df: pl.DataFrame, use_release: bool = False,
+                    k: int | None = None) -> dict:
+    """Run the GMM on this pitcher's (current selection of) pitches and store the assignment.
+    ``k`` pins the cluster count; left ``None``, ICL picks it."""
+    res = _cluster_mod().run_gmm(df, use_release=use_release, k=k)
     res["names"] = {str(i): None for i in range(res["k"])}
     _load_autocluster()[pitcher] = res
     _save_autocluster()

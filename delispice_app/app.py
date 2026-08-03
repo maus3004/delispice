@@ -158,7 +158,7 @@ _VS_LABEL = {"All": "All pitchers", "Right": "vs RHP", "Left": "vs LHP"}
 # Per-column widths sized so every header fits on one line.
 _BT_W = {"Pitch": 160, "Pitches Seen": 92, "Pitch Seen %": 92, "Swing %": 68, "Contact %": 80,
          "Good Decision %": 112, "Whiff %": 64, "I-Zone Swing %": 112, "I-Zone Whiff %": 112,
-         "Chase %": 66, "Hard Hit %": 84, "Avg EV": 68, "xRV/BBE": 76}
+         "Chase %": 66, "Hard Hit %": 84, "Avg EV": 68, "Eye/100": 76, "xRV/BBE": 76}
 
 
 def _bt_grid(cols):
@@ -531,6 +531,9 @@ retag_panel = html.Details(open=False, style={"margin": "6px 0", "background": "
                             title="Cut splits on IVB/HB alone. Velo and spin carry variance unrelated "
                                   "to seam orientation, so including them pulls slower, lower-spin "
                                   "four-seams into the sinker group."),
+                  html.Span("k", style={"fontSize": "12px", "marginLeft": "6px"}),
+                  dcc.Input(id="cluster-k", type="number", min=1, max=12, step=1, placeholder="auto",
+                            debounce=True, style={"width": "62px", "fontSize": "12px"}),
                   html.Button("Run AutoCluster", id="cluster-run", n_clicks=0, style=_BTN),
                   html.Button("Revert clustering", id="cluster-revert", n_clicks=0, style=_BTN),
                   html.Span(id="cluster-status", style={"marginLeft": "6px", "color": "#666", "fontSize": "12px"})],
@@ -1950,10 +1953,11 @@ def cb_retag_reset(_np, _na, pitcher, ver):
               Output("cluster-status", "children", allow_duplicate=True),
               Output("cluster-skip", "data", allow_duplicate=True),
               Input("cluster-run", "n_clicks"), Input("cluster-revert", "n_clicks"),
-              State("cluster-release", "value"), State("player-dd", "value"), State("role-tabs", "value"),
+              State("cluster-release", "value"), State("cluster-k", "value"),
+              State("player-dd", "value"), State("role-tabs", "value"),
               State("year-check", "value"), State("level-dd", "value"), State("team-dd", "value"),
               State("retag-version", "data"), prevent_initial_call=True)
-def cb_cluster_run(_nr, _nv, release, pitcher, role, years_sel, level, team, ver):
+def cb_cluster_run(_nr, _nv, release, k, pitcher, role, years_sel, level, team, ver):
     if role != "pitcher" or not pitcher:
         raise PreventUpdate
     if ctx.triggered_id == "cluster-revert":
@@ -1963,7 +1967,7 @@ def cb_cluster_run(_nr, _nv, release, pitcher, role, years_sel, level, team, ver
         return (ver or 0) + 1, no_update, []          # fresh run -> clear any skipped-pitch memory
     rows = data.get_rows("pitcher", pitcher, level, team, years_sel)
     try:
-        data.run_autocluster(pitcher, rows, use_release=bool(release))
+        data.run_autocluster(pitcher, rows, use_release=bool(release), k=int(k) if k else None)
     except ValueError as e:
         return no_update, str(e), no_update
     return (ver or 0) + 1, no_update, []
@@ -1978,7 +1982,9 @@ def cb_cluster_ui(_rv, pitcher, role):
     if not ent:
         return "No clustering for this pitcher.", ""
     feats = "6 features (+release)" if len(ent["features"]) == 6 else "4 features"
-    status = (f"k={ent['k']} clusters · {ent['n']:,} pitches clustered"
+    # A pinned k fits exactly one model, so a single-row sweep table means k was set by hand.
+    chosen = "k set by hand" if len(ent.get("bic_table") or []) == 1 else "k chosen by ICL"
+    status = (f"k={ent['k']} clusters ({chosen}) · {ent['n']:,} pitches clustered"
               + (f" · {ent['n_unclustered']:,} unclustered" if ent["n_unclustered"] else "")
               + f" · {feats}. Name the clusters below — the report updates live.")
     return status, _cluster_rename_area(ent)

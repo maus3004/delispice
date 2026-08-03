@@ -17,14 +17,15 @@ def _autotagger():
     return autotagger
 
 
-def run_gmm(df: pl.DataFrame, use_release: bool = False) -> dict:
+def run_gmm(df: pl.DataFrame, use_release: bool = False, k: int | None = None) -> dict:
     """Cluster one pitcher's pitches via the shared autotagger. Returns the app's JSON-safe shape:
     ``{assign: {PitchUID: cluster_int}, conf: {PitchUID: max_posterior}, k, n, n_unclustered,
     features, bic_table}``. ``conf`` is the GMM's confidence in each pitch's assignment (0–1) — the
-    app flags the low ones for review. Raises ``ValueError`` when there is too little complete data."""
+    app flags the low ones for review. ``k`` pins the cluster count instead of letting ICL choose.
+    Raises ``ValueError`` when there is too little complete data."""
     at = _autotagger()
     d = df.filter(pl.col("PitchUID").is_not_null())
-    res = at.autotag_pitcher(d, use_release=use_release, min_pitches=MIN_PITCHES)
+    res = at.autotag_pitcher(d, use_release=use_release, min_pitches=MIN_PITCHES, k=k)
     uids = d["PitchUID"].to_list()
     assign = {uids[i]: int(lab) for i, lab in zip(res["index"], res["labels"])}
     conf = {uids[i]: round(float(cf), 4) for i, cf in zip(res["index"], res["conf"])}

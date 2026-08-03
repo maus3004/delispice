@@ -32,6 +32,15 @@ SWING_CALLS  = ["StrikeSwinging", *FOUL_CALLS, "InPlay"]
 STRIKE_CALLS = ["StrikeCalled", *SWING_CALLS]
 HIT_RESULTS  = ["Single", "Double", "Triple", "HomeRun"]
 HARD_HIT_MPH = 95
+
+# TrackMan records ExitSpeed on FOUL BALLS, not just balls in play — in a D1/2025 sample, 42% of all
+# rows carrying an ExitSpeed were fouls (1,289 fouls vs 1,789 in play). Every exit-velocity metric
+# (Avg EV, Hard Hit%, Barrel%) is defined over BATTED BALLS, so filtering on "ExitSpeed is not null"
+# alone silently folds fouls into the denominator: it moved this file's arsenal Hard Hit% by 12.6
+# points and Avg EV by 4.9 mph. Filter on BATTED_BALL, never on a bare null-check.
+# Mirrors data.percentile_pool's `bbe_ev` and leaderboard._flags_sql's `ev`.
+IN_PLAY = pl.col("PitchCall") == "InPlay"
+BATTED_BALL = IN_PLAY & pl.col("ExitSpeed").is_not_null()
 PITCH_NAMES  = {"FourSeamFastBall": "Four-Seam", "TwoSeamFastBall": "Two-Seam", "ChangeUp": "Changeup"}
 NON_PITCHES  = ["Undefined", "Other"]
 PITCH_COLORS = {"Four-Seam": "#d62728", "Fastball": "#d62728", "Two-Seam": "#ff7f0e", "Sinker": "#ff7f0e",
@@ -149,8 +158,8 @@ def build_arsenal(df: pl.DataFrame) -> pl.DataFrame:
                  pl.col("SpinAxis").radians().cos().mean().alias("ax_cos"),
                  pl.col("RelHeight").mean().alias("rh"),
                  pl.col("RelSide").mean().alias("rs"), pl.col("Extension").mean().alias("ext"),
-                 pl.col("ExitSpeed").mean().alias("ev"),
-                 (pl.col("ExitSpeed") >= HARD_HIT_MPH).filter(pl.col("ExitSpeed").is_not_null()).mean().alias("hh"),
+                 pl.col("ExitSpeed").filter(BATTED_BALL).mean().alias("ev"),
+                 (pl.col("ExitSpeed") >= HARD_HIT_MPH).filter(BATTED_BALL).mean().alias("hh"),
                  pl.col("xRV").mean().alias("xrv"),      # expected runs allowed per ball in play
                  pl.col("RV").mean().alias("rv"),        # REALIZED runs per pitch (RE288 delta)
              ).sort("count", descending=True))
@@ -210,7 +219,7 @@ def build_batter_summary(df: pl.DataFrame) -> pl.DataFrame:
     obp = (h + bb + hbp) / obp_den if obp_den else None
     slg = tb / ab if ab else None
     ops = (obp + slg) if (obp is not None and slg is not None) else None
-    bip = df.filter((pl.col("PitchCall") == "InPlay") & pl.col("ExitSpeed").is_not_null())
+    bip = df.filter(BATTED_BALL)
     ev = bip["ExitSpeed"].mean() if bip.height else None
     hh = (bip["ExitSpeed"] >= HARD_HIT_MPH).mean() if bip.height else None
     la = df.filter(pl.col("PitchCall") == "InPlay")["Angle"].mean()
@@ -222,6 +231,7 @@ def build_batter_summary(df: pl.DataFrame) -> pl.DataFrame:
         "Avg EV": num(ev, 1), "Hard Hit %": pct(hh), "Avg LA": num(la, 1),
         # Whole-PA run value: mean over EVERY pitch seen, not just balls in play.
         "RV/100": rv100(df["RV"].mean() if "RV" in df.columns else None),
+        "Eye/100": rv100(df["Eye"].mean() if "Eye" in df.columns else None),
         "xRV/BBE": num(df["xRV"].mean() if "xRV" in df.columns else None, 3),
     }])
 
@@ -256,9 +266,10 @@ SUB_DISPLAY = {"FourSeamFastBall": "Four-Seam", "TwoSeamFastBall": "Two-Seam",
                "OneSeamFastBall": "Fastball", "ChangeUp": "Changeup"}
 BATTER_TABLE_COLS = ["Pitch", "Pitches Seen", "Pitch Seen %", "Swing %", "Contact %",
                      "Good Decision %", "Whiff %", "I-Zone Swing %", "I-Zone Whiff %", "Chase %",
-                     "Hard Hit %", "Avg EV", "RV/100", "xRV/BBE"]
+                     "Hard Hit %", "Avg EV", "RV/100", "Eye/100", "xRV/BBE"]
 _COMPONENT_KEYS = ("count", "swings", "whiffs", "loc_n", "good", "iz_n", "iz_sw", "iz_whiff",
-                   "oz_n", "oz_sw", "ev_n", "hh", "ev_sum", "xrv_n", "xrv_sum", "rv_n", "rv_sum")
+                   "oz_n", "oz_sw", "ev_n", "hh", "ev_sum", "xrv_n", "xrv_sum", "rv_n", "rv_sum",
+                   "eye_n", "eye_sum")
 
 
 def _pitch_components(df: pl.DataFrame) -> list[dict]:
@@ -272,7 +283,6 @@ def _pitch_components(df: pl.DataFrame) -> list[dict]:
     loc = pl.col("PlateLocSide").is_not_null() & pl.col("PlateLocHeight").is_not_null()
     in_zone = loc & (pl.col("PlateLocSide").abs() <= ZONE["h"]) & pl.col("PlateLocHeight").is_between(ZONE["b"], ZONE["t"])
     out_zone = loc & ~in_zone
-    inplay = pl.col("PitchCall") == "InPlay"
     eff = _eff_type_expr(df)
     d = df.with_columns(_family_expr(eff).alias("fam"), eff.replace(SUB_DISPLAY).alias("sub"))
     return d.group_by(["fam", "sub"]).agg(
@@ -282,13 +292,17 @@ def _pitch_components(df: pl.DataFrame) -> list[dict]:
         in_zone.sum().alias("iz_n"), (in_zone & swing).sum().alias("iz_sw"),
         (in_zone & whiff).sum().alias("iz_whiff"),
         out_zone.sum().alias("oz_n"), (out_zone & swing).sum().alias("oz_sw"),
-        (inplay & pl.col("ExitSpeed").is_not_null()).sum().alias("ev_n"),
-        (inplay & (pl.col("ExitSpeed") >= HARD_HIT_MPH)).sum().alias("hh"),
-        pl.col("ExitSpeed").filter(inplay).sum().alias("ev_sum"),
+        BATTED_BALL.sum().alias("ev_n"),
+        (BATTED_BALL & (pl.col("ExitSpeed") >= HARD_HIT_MPH)).sum().alias("hh"),
+        pl.col("ExitSpeed").filter(BATTED_BALL).sum().alias("ev_sum"),
         pl.col("xRV").is_not_null().sum().alias("xrv_n"),   # xRV is only scored on balls in play
         pl.col("xRV").sum().alias("xrv_sum"),
         pl.col("RV").is_not_null().sum().alias("rv_n"),     # RV is scored on EVERY pitch
         pl.col("RV").sum().alias("rv_sum"),
+        # Eye is scored on competitive swing/take decisions only, so HBP and intentional/automatic
+        # calls sit outside its denominator.
+        pl.col("Eye").is_not_null().sum().alias("eye_n"),
+        pl.col("Eye").sum().alias("eye_sum"),
     ).to_dicts()
 
 
@@ -305,6 +319,7 @@ def _pitch_row(name, c, total) -> dict:
         "Hard Hit %": pct(c["hh"] / c["ev_n"]) if c["ev_n"] else "",
         "Avg EV": num(c["ev_sum"] / c["ev_n"], 1) if c["ev_n"] else "",
         "RV/100": rv100(c["rv_sum"] / c["rv_n"]) if c["rv_n"] else "",
+        "Eye/100": rv100(c["eye_sum"] / c["eye_n"]) if c["eye_n"] else "",
         "xRV/BBE": num(c["xrv_sum"] / c["xrv_n"], 3) if c["xrv_n"] else "",
     }
 
@@ -434,7 +449,7 @@ STATS = {
     "Pitch density":  None,
     "Whiff%":         (pl.col("PitchCall").is_in(SWING_CALLS),                    pl.col("PitchCall") == "StrikeSwinging"),
     "Called strike%": (pl.col("PitchCall").is_in(["StrikeCalled", "BallCalled"]), pl.col("PitchCall") == "StrikeCalled"),
-    "Hard hit%":      (pl.col("ExitSpeed").is_not_null(),                         pl.col("ExitSpeed") >= HARD_HIT_MPH),
+    "Hard hit%":      (BATTED_BALL,                                               pl.col("ExitSpeed") >= HARD_HIT_MPH),
 }
 STAT_NAMES = list(STATS)
 

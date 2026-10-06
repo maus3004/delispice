@@ -8,9 +8,10 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.model_selection import StratifiedKFold
 from itertools import product
 
-ROOT       = Path(__file__).resolve().parent.parent.parent          # repo root (robust to CWD)
-PIPELINE   = ROOT / "data_pipeline" / "wbaserunners"
-REM_PATH   = ROOT / "data_pipeline" / "re_matrices" / "re288_matrix.parquet"
+from pipeline_v2 import config
+
+PIPELINE   = config.PITCHES_DIR
+REM_PATH   = config.RE288_PATH
 FEATS      = ["ExitSpeed", "Angle", "Direction"]
 LABEL_MAP  = {"Out": 0, "Single": 1, "Double": 2, "Triple": 3, "HomeRun": 4}
 DROP_RESULTS = ["Error", "Sacrifice", "StolenBase", "FieldersChoice", "CaughtStealing", "Undefined"]

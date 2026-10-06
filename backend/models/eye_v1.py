@@ -50,9 +50,10 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-ROOT = Path(__file__).resolve().parents[2]              # repo root (robust to CWD)
-PIPELINE = ROOT / "data_pipeline" / "wbaserunners"
-REM_PATH = ROOT / "data_pipeline" / "re_matrices" / "re288_matrix.parquet"
+from pipeline_v2 import config
+
+PIPELINE = config.PITCHES_DIR
+REM_PATH = config.RE288_PATH
 
 # Outcome vocabulary. FoulBall is the legacy tag from older TrackMan CSVs; keep both spellings.
 SWING_CALLS = ["StrikeSwinging", "InPlay", "FoulBall", "FoulBallFieldable", "FoulBallNotFieldable"]

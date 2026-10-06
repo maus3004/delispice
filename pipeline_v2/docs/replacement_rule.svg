@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="660" viewBox="0 0 760 660" role="img">
+<title>Unverified to verified replacement rule</title>
+<desc>Each new file's name is read into GameID, kind and verified flag, then compared with the games table for the same GameID and kind. With no version yet it loads as current. A verified file, or a re-sent file with new content, replaces the current version. An unverified file is skipped and logged if a verified version is already loaded. Loads and replacements mark that year as changed so build.py rebuilds it. A PitchUID uniqueness check backs this up.</desc>
+<style>
+.t{font:600 14px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
+.s{font:400 12px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
+.h{font:600 16px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
+</style>
+<defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#5F5E5A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="0" y="0" width="760" height="660" rx="12" fill="#FFFFFF"/>
+<text class="h" x="40" y="36" fill="#2C2C2A">Unverified → verified: what happens to each new file</text>
+
+<g><rect x="200" y="60" width="360" height="56" rx="8" fill="#F1EFE8" stroke="#888780"/><text class="t" x="380" y="80" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">New file lands in raw/</text><text class="s" x="380" y="98" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">Any CSV or JSON from v3/</text></g>
+<line x1="380" y1="116" x2="380" y2="148" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
+<g><rect x="200" y="152" width="360" height="56" rx="8" fill="#F1EFE8" stroke="#888780"/><text class="t" x="380" y="172" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">Read its name</text><text class="s" x="380" y="190" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">GameID, kind, verified or not</text></g>
+<line x1="380" y1="208" x2="380" y2="240" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
+<g><rect x="200" y="244" width="360" height="56" rx="8" fill="#F1EFE8" stroke="#888780"/><text class="t" x="380" y="264" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">Compare to the games table</text><text class="s" x="380" y="282" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">Same GameID and kind</text></g>
+<path d="M380 300 L380 336 L160 336 L160 368" fill="none" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
+<line x1="380" y1="300" x2="380" y2="368" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
+<path d="M380 300 L380 336 L600 336 L600 368" fill="none" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
+<g><rect x="60" y="372" width="200" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56"/><text class="t" x="160" y="392" text-anchor="middle" dominant-baseline="central" fill="#085041">Load as current</text><text class="s" x="160" y="410" text-anchor="middle" dominant-baseline="central" fill="#0F6E56">No version yet</text></g>
+<g><rect x="280" y="372" width="200" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56"/><text class="t" x="380" y="392" text-anchor="middle" dominant-baseline="central" fill="#085041">Replace current</text><text class="s" x="380" y="410" text-anchor="middle" dominant-baseline="central" fill="#0F6E56">Verified, or re-sent file</text></g>
+<g><rect x="500" y="372" width="200" height="56" rx="8" fill="#F1EFE8" stroke="#888780"/><text class="t" x="600" y="392" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">Skip, log it</text><text class="s" x="600" y="410" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">Verified already loaded</text></g>
+<line x1="380" y1="428" x2="380" y2="476" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
+<path d="M160 428 L160 508 L196 508" fill="none" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
+<g><rect x="200" y="480" width="360" height="56" rx="8" fill="#F1EFE8" stroke="#888780"/><text class="t" x="380" y="500" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">Mark that year as changed</text><text class="s" x="380" y="518" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">build.py rebuilds it tonight</text></g>
+
+<rect x="60" y="564" width="640" height="40" rx="8" fill="#FFFFFF" stroke="#888780" stroke-dasharray="4 3"/>
+<text class="s" x="380" y="584" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">Safety net: build.py checks every PitchUID is unique across games (keeps the newer game, flags both)</text>
+
+<rect x="60" y="626" width="12" height="12" rx="2" fill="#E1F5EE" stroke="#0F6E56"/><text class="s" x="78" y="632" dominant-baseline="central" fill="#5F5E5A">Changes the data</text>
+<rect x="200" y="626" width="12" height="12" rx="2" fill="#F1EFE8" stroke="#888780"/><text class="s" x="218" y="632" dominant-baseline="central" fill="#5F5E5A">No data change</text>
+</svg>

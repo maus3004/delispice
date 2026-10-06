@@ -26,8 +26,10 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
+from pipeline_v2 import config
+
 REPO = Path(__file__).resolve().parents[1]
-WBASE = REPO / "data_pipeline" / "wbaserunners"
+WBASE = config.PITCHES_DIR
 # team_acronyms.csv lives at backend/models/ in playgroundv2 and backend/research/ in delispice —
 # take whichever exists so the app runs unchanged from either repo.
 _ACR_CANDIDATES = (REPO / "backend" / "models" / "team_acronyms.csv",
@@ -125,7 +127,7 @@ def team_label(acr: str) -> str:
 # ── Player bio: height + birthday from data_pipeline/heights.csv (scraped by height_scraper.py) ────
 # The table is keyed (Name, TrackManId). The app's manual edits are appended as Status='manual' rows
 # that win on read (last row for a key wins); height_scraper skips them (status isn't a retry status).
-HEIGHTS_CSV = REPO / "data_pipeline" / "heights.csv"
+HEIGHTS_CSV = config.HEIGHTS_CSV
 # Column order for a NEW file only — must match height_scraper.FIELDS. An existing file is appended
 # using its own header (read below), so reads/writes stay aligned even if the schema drifts.
 _HEIGHTS_FIELDS = ["Name", "TrackManId", "HeightIn", "Height", "WeightLb", "BirthDate",
@@ -598,7 +600,18 @@ def re_matrix_options() -> dict[str, list[str]]:
 #   * pitch[PitchUID] = {"t": new, "p": pitcher} -> retag individual pitches (from the movement lasso)
 # Both reports read through this, so an edit shows up everywhere and is fully reversible. (Tag→tag
 # "remap" rules — global and per-pitcher — were removed; per-pitch retag + AutoCluster replace them.)
-RETAG_PATH = CACHE_DIR / "retags.json"
+def _state_file(name: str) -> Path:
+    """A user-data file in ``delispice_app/state/`` (``config.APP_STATE_DIR``), kept out of ``.cache`` so
+    the cache is always safe to delete. A copy left in ``.cache`` by an older version is moved over
+    on first use, so a deploy needs no manual step."""
+    path, legacy = config.APP_STATE_DIR / name, CACHE_DIR / name
+    if not path.exists() and legacy.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(legacy, path)
+    return path
+
+
+RETAG_PATH = _state_file("retags.json")
 _RETAGS: dict = {}
 _RETAGS_LOADED = [False]
 
@@ -615,7 +628,7 @@ def load_retags() -> dict:
 
 
 def _save_retags() -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    RETAG_PATH.parent.mkdir(parents=True, exist_ok=True)
     RETAG_PATH.write_text(json.dumps(_RETAGS))
     _rows_cached.cache_clear()          # bust per-player cache so reports re-read with the new tags
     _scored_cached.cache_clear()        # and the xRV-scored layer built on top of it
@@ -667,7 +680,7 @@ def get_pitches(pitcher: str, level=ALL, team=ALL, years_sel=None) -> pl.DataFra
 # n_unclustered, features} }. Kept apart from retags.json so clustering can be reverted wholesale
 # without touching manual retags. While a pitcher has an entry, the PITCHER report shows cluster
 # labels ("Cluster 0", … or their renames) instead of TaggedPitchType; revert deletes the entry.
-AUTOCLUSTER_PATH = CACHE_DIR / "autocluster.json"
+AUTOCLUSTER_PATH = _state_file("autocluster.json")
 UNCLUSTERED = "Unclustered"
 UNSURE_THRESHOLD = 0.70          # GMM max-posterior below this = flag the pitch for hand review
 _ACLUSTER: dict = {}
@@ -691,7 +704,7 @@ def _load_autocluster() -> dict:
 
 
 def _save_autocluster() -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    AUTOCLUSTER_PATH.parent.mkdir(parents=True, exist_ok=True)
     AUTOCLUSTER_PATH.write_text(json.dumps(_ACLUSTER))
 
 

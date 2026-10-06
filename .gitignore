@@ -14,9 +14,17 @@
 # data_pipeline/ by default, then re-include only the scripts + small refs.
 /data_pipeline/*
 !/data_pipeline/*.py
-!/data_pipeline/re_matrices/
+# re_matrices/ is NOT tracked: the server's monthly job rewrites it (derived data).
 # heights.csv is intentionally NOT tracked — it's mutable scraped data each machine
 # appends to (the box runs its own scraper). Sync by rsync if ever needed, like the parquet.
+
+# ── pipeline_v2: track the code, plan and diagrams; ignore all the data ─
+# raw/, games/, serving/, logs/, pipeline.db, heights.csv and .env (secrets)
+# never go through git: data moves box-to-box by rsync or is rebuilt.
+/pipeline_v2/*
+!/pipeline_v2/*.py
+!/pipeline_v2/plan.md
+!/pipeline_v2/docs/
 
 # ── Model artifacts (~10 MB per level-year; rebuild anywhere with
 #    `python -m backend.models.cq_store` — the data is already on each box) ─
@@ -26,11 +34,12 @@
 #    regenerated. Machine-local (lives on the box), git-ignored. BACK IT UP. ─
 /delispice_app/.data/
 
-# ── App: cached picker index + user retags/clusters (rebuildable/local) ─
-# .cache holds the derived parquet indexes (rebuilt on first run) plus
-# autocluster.json / retags.json (your edits). To carry the edits to a new
-# box, copy the .json files by hand — see deploy/DEPLOY.md.
+# ── App: derived caches (always safe to delete; rebuilt on first run) ───
 /delispice_app/.cache/
+
+# ── App: user data (retags.json, autocluster.json) — your edits, machine-
+#    local, can't be regenerated. To carry them to a new box, copy by hand. ─
+/delispice_app/state/
 
 # ── App: generated double-click launcher bundle (Mac desktop only) ──────
 /delispice_app.app/

@@ -42,10 +42,12 @@ from pathlib import Path
 
 import polars as pl
 
+from pipeline_v2 import config
+
 ROOT = Path(__file__).resolve().parents[2]
 ARTIFACT_DIR = ROOT / "backend" / "models" / "artifacts"
-PIPELINE = ROOT / "data_pipeline" / "wbaserunners"
-REM_PATH = ROOT / "data_pipeline" / "re_matrices" / "re288_matrix.parquet"
+PIPELINE = config.PITCHES_DIR
+REM_PATH = config.RE288_PATH
 
 HALF = ["GameUID", "Inning", "_tb"]
 _COLS = ["PitchUID", "GameUID", "Inning", "Top/Bottom", "PAofInning", "PitchofPA",

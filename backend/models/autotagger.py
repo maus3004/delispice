@@ -18,15 +18,14 @@ Cluster ids are renumbered by usage (Cluster 0 = most thrown) unless ``relabel=F
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import polars as pl
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
-ROOT     = Path(__file__).resolve().parent.parent.parent            # repo root (robust to CWD)
-PIPELINE = ROOT / "data_pipeline" / "wbaserunners"
+from pipeline_v2 import config
+
+PIPELINE = config.PITCHES_DIR
 
 FEATS_DEFAULT = ["RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak"]
 FEATS_RELEASE = ["RelSpeed", "SpinRate", "RelHeight", "InducedVertBreak", "HorzBreak", "Extension"]

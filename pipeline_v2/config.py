@@ -37,9 +37,10 @@ ARTIFACTS_DIR = REPO / "backend" / "models" / "artifacts"
 APP_STATE_DIR = REPO / "delispice_app" / "state"              # retags.json, autocluster.json (user data)
 
 # ── FTP ───────────────────────────────────────────────────────────────────────────────────────────
-FTP_HOST     = "ftp.trackmanbaseball.com"
-FTP_ROOT     = "/v3"      # practice/ is skipped for now (plan.md §16)
-RECHECK_DAYS = 7          # nightly: re-list the last N upload-date folders; full recheck on the 1st
+FTP_HOST          = "ftp.trackmanbaseball.com"
+FTP_ROOT          = "/v3"   # practice/ is skipped for now (plan.md §16)
+RECHECK_DAYS      = 7       # nightly: re-list upload-date folders from the last N days; full recheck on the 1st
+BACKFILL_WORKERS  = 4       # FTP connections for --all; nightly uses 1 (~0.7 s fixed cost per file)
 
 # ── Schedule and tracking ─────────────────────────────────────────────────────────────────────────
 SEASON_START    = (2, 1)  # (month, day): the zero-new-files check only runs inside this window
@@ -50,3 +51,15 @@ APP_SERVICE     = "delispice"   # systemd unit the pipeline gracefully reloads (
 
 # ── Heights ───────────────────────────────────────────────────────────────────────────────────────
 HEIGHTS_RATE_S = 6.5      # seconds between Baseball Reference requests; never below ~4 (IP bans)
+
+
+def secrets() -> dict[str, str]:
+    """``KEY=value`` pairs from ``SECRETS_ENV`` (FTP_USER, FTP_PASS; later the Discord webhook).
+    Never log or print these."""
+    out = {}
+    for line in SECRETS_ENV.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            out[key.strip()] = value.strip()
+    return out

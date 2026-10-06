@@ -47,8 +47,8 @@ Readers: `delispice_app` (`data.py`, `leaderboard.py`) and `backend/models` read
 | How late do verified files arrive? | Median ~13 h after the unverified file, max ~19 days. |
 | Can bat-tracking JSON join to the pitch CSV? | Yes. JSON `GameReference` = CSV `GameID`, JSON `SessionId` = CSV `GameUID`, and plays match on `PitchUID` and `PlayID` (272 / 272). |
 | What's in the JSON? | Header plus `Plays[]`. BatSpeed/HAA/VAA are copies of CSV columns (58 / 58 identical). The new data is the swing path `BatPath.PreImpactSwing {Time, Barrel, UpperGrip}` (40–51 samples per swing) and raw camera tracks (`BatUnsmoothedXYZ`). Summer files are nearly empty (353 files, 0.08 MB average). Spring files (1,606, Feb–Jun 2026) average **9.4 MB**, with raw tracks on most plays and swing paths on ~15–30% of plays. All are Version 1.0.1. About 8% of 2026 games have a full-size JSON. |
-| Name suffixes seen | `_unverified`, `_unverified_playerpositioning_FHC`, `_battracking`, `_unverified_battracking`. Stadium names can contain spaces and dots (`David F. Couch`). |
-| Positioning files | Only 5 since June, all unverified, all Charles Schwab Field. We've never kept one, so the schema is unknown. |
+| Name suffixes seen | `_unverified`, `_unverified_playerpositioning_FHC`, `_battracking`, `_unverified_battracking`. Stadium names can contain spaces and dots (`David F. Couch`). **All 91,469 names on the FTP match the §5 pattern** (FTP inventory, 2026-10-06). |
+| Positioning files | `factory.sh` only ever saw 5, but the FTP holds **25,105** (1,640 verified, 23,465 unverified, 3.9 GB). We've never kept one, so the schema is unknown. |
 | Can a pitch appear in two games? | Yes, once: `20260221-` and `20260222-RiddlePaceField-1` share the same 178 `PitchUID`s (one game delivered under two dates; their `GameUID`s differ too). |
 | Missing dates | 1,827 pitch rows have a null `Date`. |
 | Quarantine history | 0 files quarantined in all 13 logged runs (the fix dictionary was built from a full scan). |
@@ -57,6 +57,8 @@ Readers: `delispice_app` (`data.py`, `leaderboard.py`) and `backend/models` read
 | Column-count variants | All 32,017 server CSVs are 167 or 170 columns, with no `SpinAxis3d*` block at all. Only 191 Mac CSVs (Jun 13 – Aug 2 2026) have the block: 199 columns, including `SpinAxis3dConfidence` (always empty so far), which today's pipeline drops. **Added to the v2 schemas** as a nullable string at TrackMan's position (after `SpinAxis3dVectorZ`), so the canonical schema is now 202 columns. TrackMan orders the `SpinAxis3dSeamOrientationBall…Amb1–4` block differently from the schema; output is reordered to the schema, so this is cosmetic. |
 | Game counts per year | 3,047 (2022), 3,939 (2023), 5,317 (2024), 9,282 (2025), 10,432 (2026 so far) |
 | Disk | 457 GB total, 302 GB free; the current data takes ~33 GB. |
+| FTP inventory (2026-10-06) | `/v3`: 949 day folders (2022 – 2026-09-28), each with one `CSV/` subfolder holding every file type. **91,469 files, 38.9 GB**: pitch CSVs 34,512 verified (11.0 GB) + 29,874 unverified (8.9 GB); bat-tracking JSON 983 + 995 (15.1 GB); positioning 1,640 + 23,465 (3.9 GB). 88,273 unique names; 3,009 names delivered more than once (2,187 with a different size; max 6 copies). Upload lag (folder date − game date): median 1 day, p90 3, p99 256, max 1,640 days, so TrackMan re-sends old games into new folders. |
+| FTP behavior | Login + encrypted transfers work with plain `ftplib` (self-signed cert, verification off; cert SHA-256 `5b940f17…6c6a`). MLSD returns size + modify time per file in one call (493 files in 0.5 s). Quirks: `OPTS MLST` is rejected (use the default facts), and MLSD lists `.`/`..` as `type=dir`. Supports `REST` (resume) and `XSHA256`. Speed: ~0.7 s fixed cost per file, ~5 MB/s on large files. |
 
 ### Storage estimates
 
@@ -159,7 +161,7 @@ pipeline_v2/
 | `config.py` | Paths and settings (also imported by `delispice_app` and `backend/models`) |
 | `ledger.py` | SQLite schema and helpers |
 | `names.py` | Filename parser (checked against every real name from the logs) |
-| `download.py` | FTP → `raw/` + ledger. **Only reads the `v3/` tree**; `practice/` is skipped for now. FTP password read from an uncommitted file. |
+| `download.py` | FTP → `raw/` + ledger. **Only reads the `v3/` tree**; `practice/` is skipped for now. FTP password read from `.env`. A file is fetched when its (remote path, size, modified time) isn't in the ledger. Writes `<name>.part`, checks the size, hashes while streaming, renames into `raw/YYYY/MM/DD/`. Identical re-delivery (same name + sha256) → `duplicate` row pointing at the first copy, no second copy stored; same name re-uploaded into the same folder with new contents → kept as `<stem>__<modified><ext>`. Nightly window = folders from the last 7 days, reaching further back if the last successful run was longer ago. Flags: `--all`, `--since/--until`, `--workers`, `--limit`, `--dry-run`. |
 | `load.py` | Pitch CSVs in `raw/` → `games/`: the existing cast → fix → validate path plus baserunner state, **including `next_re288_state` and `half_complete`** (§8, run value) |
 | `build.py` | `games/` → `serving/` (changed years only), `PitchUID` uniqueness check, RE288 matrix |
 | `heights.py` | The current scraper wrapped in a loop for the always-on service |
@@ -285,7 +287,7 @@ The app keeps serving yesterday's data, and nothing partial is ever published.
 
 | Step | Parallel? |
 |---|---|
-| `download.py` | No: one FTP connection, polite to TrackMan (could use 2–4 for the bulk redownload if slow) |
+| `download.py` | Nightly: one connection (a few hundred files). **Backfill: 3–4 connections**, because the ~0.7 s per-file cost makes 91k files take ~15–20 h on one. |
 | `load.py` | **Yes: a process pool, one worker per CPU (12 on the server).** Same code path for the bulk (~32k files, ~30 min) and nightly (hundreds of files, seconds). Workers write `logs/workers/<date>/` and return their results to the parent, which records them in the ledger and run log. |
 | `build.py` | Polars' own multithreading (scan → sink per year); no worker processes |
 | Model training | One (level, year) at a time; sklearn/LightGBM use threads internally (memory limits parallel fits) |
@@ -521,10 +523,10 @@ Build and test locally first, but **don't delete the old files first**. Add the 
 **Before starting:**
 - Commit `main`'s uncommitted changes (`backend/notebooks/eye_v1.ipynb`, the resume PDF) separately, so they don't mix into pipeline commits.
 - Work on a `pipeline-v2` branch.
-- The Mac can run at full scale: 226 GB free, 8 cores, 16 GB RAM. Put a copy of the FTP password in an uncommitted file there.
+- **The bulk download runs on the server** (on 24/7, and it's where the data lives), straight into `~/delispice/pipeline_v2/raw/`: no Mac-awake requirement, no second download, no rsync. The Mac develops and tests against copies pulled down from the server (a sample, or all of `raw/`: ~39 GB, and the Mac has 226 GB free).
 
 **Steps:**
-1. **Build on the Mac** (phases 0–3). Run the full redownload locally: the real end-to-end test, not a sample.
+1. **Build on the Mac** (phases 0–3), on the `pipeline-v2` branch. Once phase 1's downloader is tested, merge to `main` (still no live change, see step 3), pull on the server, and start the bulk download there.
 2. **Prove it locally:**
    - name-parser tests against every real filename in the logs
    - replacement-rule tests: verified after unverified, unverified after verified, a re-sent file with new contents, the double-dated Riddle Pace game
@@ -533,7 +535,7 @@ Build and test locally first, but **don't delete the old files first**. Add the 
    - model retraining
    - run the app locally pointed at `serving/` and click through it
 3. **Merge to main with no live change.** `config.py` still points at the old `wbaserunners/`, so `git pull` on the server leaves the app exactly as it is; the new modules sit unused.
-4. **Run in parallel on the server** (phase 4). rsync `raw/` + `pipeline.db` from the Mac over the LAN (no second TrackMan download). Install `lightgbm`. Run load, build and models at night into the new folders. Run the v2 nightly by hand for a few nights without reloading the app, and compare.
+4. **Run in parallel on the server** (phase 4). `raw/` + `pipeline.db` are already there from the bulk download. Install `lightgbm`. Run load, build and models at night into the new folders. Run the v2 nightly by hand for a few nights without reloading the app, and compare.
 5. **Cut over with one small commit** (phase 5): `config.py` → `serving/`, App edit 4 (picker index folder pattern), App edit 7 (run value from columns), App edit 1 (remove the button). Pull, reload, swap the crontab. Start the heights service only after the old cron entry is gone (two scrapers would risk a Baseball Reference ban).
 6. **Rollback:** revert that one commit and restore the old crontab; `wbaserunners/` is still there.
 7. **Clean up a week later** (phase 6): `git rm` the replaced scripts in a normal commit, and delete the old data folders, `factory.sh` and the untracked requirements file on the server.
@@ -547,10 +549,10 @@ Build and test locally first, but **don't delete the old files first**. Add the 
 **Every server change gets explicit approval first.**
 
 - [x] **0. Prep (Mac, branch, no behavior change):** *done 2026-10-03, verified on the Mac: paths unchanged, retags/autocluster moved byte-for-byte, a real CSV validates with the pins, the app loads. On the server, installing the pins adds only `lightgbm` (pandera 0.32.0 and pandas 3.0.3 are already there).* `config.py` pointing at today's paths; App edits 2–3 from §11 (move user data out of `.cache`, switch to `config.py`); pin dependencies in `requirements.txt` and test that exact install on the Mac (§10.7); stop tracking the RE288 matrix in git (§10.5).
-- [ ] **1. Ledger, names, download (Mac):** first, **check that TrackMan's FTP server supports what `download.py` needs**: FTPS login with Python's `ftplib` and the self-signed certificate, MLSD listings (or a fallback to per-file SIZE/MDTM), the folder layout (confirm `v3/YYYY/MM/DD/CSV/` and that `practice/` is skipped), and download speed. Then `ledger.py`, `names.py` with tests on every real name in the logs, and `download.py`. Then the **bulk redownload** into `raw/`.
+- [ ] **1. Ledger, names, download (Mac):** first, **check that TrackMan's FTP server supports what `download.py` needs** *(done 2026-10-06, see §2: works with plain `ftplib`; handle the MLSD quirks; the bulk download is 91,469 files / 38.9 GB, ~15–20 h on one connection because of the per-file cost, so use 3–4 connections for the backfill only)*: FTPS login with Python's `ftplib` and the self-signed certificate, MLSD listings (or a fallback to per-file SIZE/MDTM), the folder layout (confirm `v3/YYYY/MM/DD/CSV/` and that `practice/` is skipped), and download speed. Then `ledger.py`, `names.py` with tests on every real name in the logs, and `download.py`. *(Written and tested 2026-10-06: `names.py` parses all 88,273 FTP names and 34,100 server names with correct splits. `download.py`: a dry run changes nothing, re-runs skip known files, identical re-deliveries become `duplicate` rows without a second copy, changed re-deliveries are kept as separate versions, 3 parallel connections work, and downloads match the server's own SHA-256.)* Then **merge to `main`, pull on the server** (with the four-step RE288 order, §10.5) **and run the bulk download there**: `download.py --all`, 4 connections, ~6–8 h, detached so it survives logout.
 - [ ] **2. Load and build (Mac):** `load.py` + `build.py` → new `games/` + `serving/`. Compare row counts per level/year with the server's `wbaserunners/`. Check CSV PitchUIDs across unverified/verified pairs. Compare RE288 with the current matrix.
 - [ ] **3. Models + local app test (Mac):** RE288, retrain cq + eye for every level + P4, re-score caches, built from the new `serving/`. Make App edit 7 (run value from columns) and compare RV against today's `rvstate` results. Run the app locally against `serving/`.
-- [ ] **4. Merge + parallel run (server):** merge to `main` (config still on old paths) and pull. rsync `raw/` + `pipeline.db` from the Mac; install `lightgbm` and the other new pins from `requirements.txt`, then click through the live app (§10.7); run load/build/models into the new folders; run the v2 nightly by hand a few nights without reloading the app.
+- [ ] **4. Merge + parallel run (server):** merge to `main` (config still on old paths) and pull; install `lightgbm` and the other new pins from `requirements.txt`, then click through the live app (§10.7); run load/build/models into the new folders; run the v2 nightly by hand a few nights without reloading the app.
 - [ ] **5. Cutover (one commit):** copy `heights.csv` from `data_pipeline/` into `pipeline_v2/`; flip `config.py` (`PITCHES_DIR`, `RE288_PATH`, `HEIGHTS_CSV`), App edit 4, App edit 7 (run value from columns), App edit 1 (remove the button); pull + graceful reload; swap the crontab to the one v2 line; then install the heights service (admin step). Rollback = revert the commit + restore the old crontab.
 - [ ] **6. Cleanup (a week later):** `git rm` replaced scripts; delete old data folders, `factory.sh`, the untracked requirements file on the server; update `deploy/DEPLOY.md` (new cron line, heights service, `status`, graceful reload for code deploys instead of `sudo systemctl restart`).
 - [ ] **7. Polish:** finish `status`; pipeline page (behind the shortlist login) and unverified badge in the app (§11, items 5–6); check games by month per level for fall/exhibition games mixed into season data.
@@ -576,6 +578,8 @@ Decided:
 - App extras: **unverified badge + pipeline page** (§11, items 5–6); no ExecReload change
 - Duplicate PitchUIDs across games: **keep the most recently delivered game, flag both in `status`**
 - Unknown category values: **load + warn**. Record column → value → count in the ledger, list it in `status` and the Discord alert, and fix with `run --reload-warned` after updating the fix map.
+- Identical re-deliveries: **store one copy**; the ledger records every delivery (`duplicate` rows point at the stored copy)
+- Bulk download: **on the server, straight into its final `raw/`** (not the Mac)
 - Storage: **keep every file, including superseded unverified ones** (~27 GB/year at today's pace; see §2). Revisit if bat-tracking JSON coverage grows.
 - Heights storage: **keep `heights.csv`** (appending is safe); revisit only if a garbled row ever appears
 - Season window for the zero-file check: **calendar window in `config.py`, Feb 1 – Aug 31**

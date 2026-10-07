@@ -48,6 +48,7 @@ SEASON_END      = (8, 31)
 WORKER_LOG_DAYS = 365
 DISK_ALERT_PCT  = 80
 APP_SERVICE     = "delispice"   # systemd unit the pipeline gracefully reloads (HUP to its MainPID)
+NOTIFY_PROGRESS_S = 3600        # download --notify: a Discord progress message this often (plan.md §17)
 
 # ── Heights ───────────────────────────────────────────────────────────────────────────────────────
 HEIGHTS_RATE_S = 6.5      # seconds between Baseball Reference requests; never below ~4 (IP bans)

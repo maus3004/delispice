@@ -4,6 +4,7 @@
     python -m pipeline_v2.download --all                 # monthly full recheck / the first bulk download
     python -m pipeline_v2.download --since 2026-05-01 --until 2026-05-31
     python -m pipeline_v2.download --dry-run             # list what would download; changes nothing
+    python -m pipeline_v2.download --all --notify        # also post start / hourly progress / end to Discord
 
 Only /v3 is read (practice/ is skipped). A file is downloaded when its (remote path, size, modified
 time) isn't in the ledger yet, so re-runs are cheap and a stopped run resumes where it left off. The
@@ -30,6 +31,7 @@ import ftplib
 import hashlib
 import logging
 import os
+import signal
 import ssl
 import sys
 import threading
@@ -40,7 +42,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
-from pipeline_v2 import config, ledger, names
+from pipeline_v2 import config, ledger, names, notify
 
 log = logging.getLogger("download")
 RETRIES = 3
@@ -249,20 +251,42 @@ def _setup_logging(to_file: bool) -> Path | None:
     return log_path
 
 
+def _hm(seconds: float) -> str:
+    """3725 -> '1 h 02 m'."""
+    m = int(seconds // 60)
+    return f"{m // 60} h {m % 60:02d} m" if m >= 60 else f"{m} m"
+
+
+def _eta(elapsed: float, files_done: int, bytes_done: int, files_all: int, bytes_all: int) -> float:
+    """Seconds left. Work is weighted by what it costs (plan.md §2: ~0.7 s per file, ~5 MB/s), so the
+    large bat-tracking JSON near the end of the queue doesn't make the estimate optimistic."""
+    work_done = files_done * 0.7 + bytes_done / 5e6
+    work_all = files_all * 0.7 + bytes_all / 5e6
+    return elapsed * (work_all - work_done) / max(work_done, 1e-6)
+
+
+def _on_sigterm(signum, frame):
+    raise SystemExit("killed (SIGTERM)")             # so `kill` records the run as failed and notifies
+
+
 def run(args: argparse.Namespace) -> int:
     workers = args.workers or (config.BACKFILL_WORKERS if args.all else 1)
     log_path = _setup_logging(to_file=not args.dry_run)
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    send = notify.send if args.notify and not args.dry_run else (lambda *a, **k: False)
     if args.dry_run:
         con = ledger.connect(readonly=True) if config.LEDGER_DB.exists() else None
     else:
         con = ledger.connect()
     since, until = window(con, args)
+    what = "Bulk download" if args.all else f"Download {since}..{until}"
     run_id = None
     if not args.dry_run:
         run_id = ledger.start_run(con, "download", {"since": args.since, "until": args.until, "all": args.all,
                                                     "limit": args.limit, "workers": workers}, log_path)
     counts: Counter = Counter()
-    pool = None
+    pool, t0, failed = None, None, []
+    files_all = bytes_all = files_done = bytes_done = 0
     try:
         ftp = connect()
         folders = day_folders(ftp, since, until)
@@ -288,25 +312,53 @@ def run(args: argparse.Namespace) -> int:
 
         if args.limit:
             todo = todo[:args.limit]
-        t0 = time.time()
+        files_all, bytes_all = len(todo), sum(r.size for r in todo)
+        send(f"{what} started", f"{files_all:,} files ({bytes_all / 1e9:.1f} GB) in {len(folders):,} upload folders",
+             "info", {"Connections": workers})
+        t0 = last_note = time.time()
         pool = ThreadPoolExecutor(max_workers=workers)
         futures = [pool.submit(fetch, r) for r in todo]
-        for i, fut in enumerate(as_completed(futures), 1):
-            counts[record(con, run_id, fut.result())] += 1     # a ConnectionError here stops the run
-            if i % 250 == 0 or i == len(todo):
-                rate = i / max(time.time() - t0, 1e-6)
-                log.info("downloaded %d/%d (%.1f files/s, ~%.0f min left) %s", i, len(todo), rate,
-                         (len(todo) - i) / rate / 60, dict(counts))
+        for fut in as_completed(futures):
+            res = fut.result()                       # a ConnectionError here stops the run
+            status = record(con, run_id, res)
+            counts[status] += 1
+            files_done += 1
+            bytes_done += res["remote"].size
+            if status == "failed":
+                failed.append((res["remote"].name, res["error"]))
+            if files_done % 250 == 0 or files_done == files_all:
+                left = _eta(time.time() - t0, files_done, bytes_done, files_all, bytes_all)
+                log.info("downloaded %d/%d (%.2f GB, ~%s left) %s", files_done, files_all, bytes_done / 1e9,
+                         _hm(left), dict(counts))
+            if time.time() - last_note >= config.NOTIFY_PROGRESS_S and files_done < files_all:
+                last_note = time.time()
+                left = _eta(last_note - t0, files_done, bytes_done, files_all, bytes_all)
+                send(f"{what}: {files_done / files_all:.0%} of files",
+                     f"{counts['new']:,} new · {counts['duplicate']:,} duplicates · {counts['failed']:,} failed",
+                     "info", {"Files": f"{files_done:,} / {files_all:,}",
+                              "GB": f"{bytes_done / 1e9:.1f} / {bytes_all / 1e9:.1f}", "Left": f"~{_hm(left)}"})
         pool.shutdown()
         ledger.finish_run(con, run_id, "ok", dict(counts))
         log.info("done: %s", dict(counts))
+        msg = f"{files_done:,} files · {bytes_done / 1e9:.1f} GB in {_hm(time.time() - t0)}"
+        if failed:                                   # listed so they can be checked; the run still counts as ok
+            msg += "\n\nThe server refused:\n" + "\n".join(f"`{n}`: {err[:80]}" for n, err in failed[:15])
+            if len(failed) > 15:
+                msg += f"\n…and {len(failed) - 15:,} more (ledger rows with status 'failed')"
+        send(f"{what} finished", msg, "warn" if failed else "ok",
+             {"New": f"{counts['new']:,}", "Duplicates": f"{counts['duplicate']:,}",
+              "Failed": f"{counts['failed']:,}", "Unknown names": f"{counts['unknown']:,}"})
         return 0
-    except BaseException as e:                       # includes Ctrl-C: record the run as failed
+    except BaseException as e:                       # includes Ctrl-C and kill: record the run as failed
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
-        log.error("download failed: %s: %s", type(e).__name__, e)
+        reason = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        log.error("download failed: %s", reason)
         if run_id is not None:
-            ledger.finish_run(con, run_id, "failed", dict(counts), error=f"{type(e).__name__}: {e}")
+            ledger.finish_run(con, run_id, "failed", dict(counts), error=reason)
+        where = ("while listing the FTP folders" if t0 is None else
+                 f"after {files_done:,} / {files_all:,} files ({bytes_done / 1e9:.1f} GB)")
+        send(f"{what} STOPPED", f"{reason}\nStopped {where}. Re-run the same command to resume.", "error")
         return 1
     finally:
         for c in _connections:
@@ -324,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, help=f"FTP connections (default 1, or {config.BACKFILL_WORKERS} with --all)")
     ap.add_argument("--limit", type=int, help="download at most N files (testing)")
     ap.add_argument("--dry-run", action="store_true", help="list what would download; change nothing")
+    ap.add_argument("--notify", action="store_true", help="post start / hourly progress / stopped / finished to Discord")
     return run(ap.parse_args(argv))
 
 

@@ -2,7 +2,7 @@
 
 Status (2026-10-06): **phase 0 done; phase 1 code done and deployed to the server (`main` @ `1996c65`). The bulk download has NOT started:** first we set up Discord notifications (§17) so the download can report progress there. The server's `pipeline_v2/.env` already holds the FTP login. The live app is unchanged: it still reads `data_pipeline/`.
 
-**Next session, start here:** settle the open choices in §17 → you create the webhook and add `DISCORD_WEBHOOK_URL` to both `.env` files → write `notify.py` + send a test message → wire it into `download.py` → dry run on the server → start the bulk download (phase 1).
+**Next session, start here:** §17 choices are settled and `notify.py` + `download.py --notify` are written and tested against a fake Discord (2026-10-07, on `pipeline-v2`, not yet on the server). Remaining: you create the webhook and add `DISCORD_WEBHOOK_URL` + `DISCORD_USER_ID` to both `.env` files → real test message from the Mac → merge to `main` + pull on the server → test message + dry run there → start the bulk download with `--notify` (phase 1).
 
 The new pipeline lives in its own folder, **`pipeline_v2/`** (code, this plan, `docs/`), built on the **`pipeline-v2`** git branch. The old `data_pipeline/` keeps running untouched until cutover and is deleted in the cleanup.
 
@@ -552,7 +552,7 @@ Build and test locally first, but **don't delete the old files first**. Add the 
 
 - [x] **0. Prep (Mac, branch, no behavior change):** *done 2026-10-03, verified on the Mac: paths unchanged, retags/autocluster moved byte-for-byte, a real CSV validates with the pins, the app loads. On the server, installing the pins adds only `lightgbm` (pandera 0.32.0 and pandas 3.0.3 are already there).* `config.py` pointing at today's paths; App edits 2–3 from §11 (move user data out of `.cache`, switch to `config.py`); pin dependencies in `requirements.txt` and test that exact install on the Mac (§10.7); stop tracking the RE288 matrix in git (§10.5).
 - [ ] **1. Ledger, names, download (Mac):** first, **check that TrackMan's FTP server supports what `download.py` needs** *(done 2026-10-06, see §2: works with plain `ftplib`; handle the MLSD quirks; the bulk download is 91,469 files / 38.9 GB, ~15–20 h on one connection because of the per-file cost, so use 3 connections for the backfill only)*: FTPS login with Python's `ftplib` and the self-signed certificate, MLSD listings (or a fallback to per-file SIZE/MDTM), the folder layout (confirm `v3/YYYY/MM/DD/CSV/` and that `practice/` is skipped), and download speed. Then `ledger.py`, `names.py` with tests on every real name in the logs, and `download.py`. *(Written and tested 2026-10-06: `names.py` parses all 88,273 FTP names and 34,100 server names with correct splits. `download.py`: a dry run changes nothing, re-runs skip known files, identical re-deliveries become `duplicate` rows without a second copy, changed re-deliveries are kept as separate versions, 3 parallel connections work, and downloads match the server's own SHA-256. 2026-10-07: a refused login (e.g. `530` too many connections) or a lapsed session is now a connection error: retried with a fresh login, then the run stops; before, it marked every remaining file `failed` for good.)* Then **merge to `main`, pull on the server** (with the four-step RE288 order, §10.5) *(done 2026-10-06: server at `1996c65`, graceful reload with no downtime, retags/autocluster moved to `state/` byte-for-byte, site OK)* **and run the bulk download there**: `download.py --all`, 3 connections (`config.BACKFILL_WORKERS`), ~7–8 h, detached so it survives logout (`nohup … < /dev/null &`). Start it by ~5 pm so it finishes before the old `factory.sh` opens its own FTP session at 02:00 (an extra connection could hit TrackMan's per-account limit); if a login is refused anyway, the run retries, then stops cleanly and resumes on re-run. The Mac's 49 test files and test ledger are throwaway: the Mac later works from copies pulled from the server.
-- [ ] **1b. Discord notifications (before the bulk download):** `notify.py` + hook it into `download.py` (start / progress / stopped / finished). Design and open choices in §17. This builds phase 9's foundation early.
+- [ ] **1b. Discord notifications (before the bulk download):** `notify.py` + hook it into `download.py` (start / progress / stopped / finished). Design and choices in §17. This builds phase 9's foundation early. *(Written 2026-10-07 and tested against a fake Discord + fake FTP: message colors and mentions, size trimming, Discord down/rejecting/missing URL never stops a download, refused logins and `kill` send STOPPED. Waiting on the webhook for a real test message.)*
 - [ ] **2. Load and build (Mac):** `load.py` + `build.py` → new `games/` + `serving/`. Compare row counts per level/year with the server's `wbaserunners/`. Check CSV PitchUIDs across unverified/verified pairs. Compare RE288 with the current matrix.
 - [ ] **3. Models + local app test (Mac):** RE288, retrain cq + eye for every level + P4, re-score caches, built from the new `serving/`. Make App edit 7 (run value from columns) and compare RV against today's `rvstate` results. Run the app locally against `serving/`.
 - [ ] **3b. Orchestrator, heights service, basic status (Mac):** `run.py` (nightly + 1st-of-month sequence, lock, failure rules from §6, warm caches + graceful reload, worker-log cleanup), `heights.py` (always-on loop) + its systemd unit file in `deploy/`, and a basic `python -m pipeline_v2 status`. Phase 4 runs these on the server; phase 7 finishes `status`.
@@ -589,6 +589,7 @@ Decided:
 - Season window for the zero-file check: **calendar window in `config.py`, Feb 1 – Aug 31**
 - Logs: **keep run logs; delete worker logs after 1 year**
 - Alerts: **Discord webhook, phase 9**, including new-column pings
+- Bulk download notifications (§17): **hourly progress + start / stopped / finished; one channel; @-mention on problems only; opt-in with `download.py --notify`**
 - Backups: **phase 10, the very last item**, once everything is running
 - Tests: **phase 8, bottom priority** once everything is in place
 - Failure handling: **a failed step stops the run and publishes nothing; the app keeps yesterday's data; the 7-day window retries.** A single file that fails validation is **skipped and flagged** (ledger `failed`, `status`, Discord), and the rest publish (§6).
@@ -605,7 +606,7 @@ Decided:
 - Folder + branch: **`pipeline_v2/` (separate from `data_pipeline/`), built on the `pipeline-v2` branch**; code, `plan.md` and `docs/` tracked, all data ignored
 - Rollout: **build + validate on the Mac, run in parallel on the server, cut over with one commit, clean up a week later** (§14)
 
-Open: the Discord choices in §17.
+Open: none.
 
 Deferred:
 - `SpinAxis3dSeamOrientationBall…Amb1–4` column order: decide after the bulk download (§2).
@@ -625,42 +626,49 @@ pipeline on the server  ──HTTP POST──▶  https://discord.com/api/webhoo
 ```
 
 - A message is plain text or an **embed**: a card with a title, a colored side bar (blue / green / yellow / red) and labeled fields (Files, GB, ETA).
-- Limits: 2,000 characters per message; about 5 messages per 2 seconds per webhook. Progress updates are nowhere near that.
+- Limits: 2,000 characters of plain text per message (embeds have their own limits, below); about 5 messages per 2 seconds per webhook. Progress updates are nowhere near that.
 - **Security:** the URL is a secret. Anyone with it can post to that channel, nothing more. It lives in `pipeline_v2/.env` (gitignored) as `DISCORD_WEBHOOK_URL`, next to the FTP login. If it leaks: delete the webhook in Discord and make a new one.
 
 ### Design
 
-- **`notify.py`**, one function: `send(title, message, level, fields=None)` → posts an embed. Uses the standard library (`urllib`) with an explicit User-Agent (Discord rejects Python's default one), so the downloader stays dependency-free.
-- **A notification can never break the pipeline:** if Discord is down or the URL is missing or wrong, it logs a warning and the work carries on.
+- **`notify.py`**, one function: `send(title, message, level, fields=None)` → posts an embed. Levels: `info` (blue), `ok` (green), `warn` (yellow), `error` (red). The footer names the machine, so Mac tests and server runs are easy to tell apart. Uses the standard library (`urllib`) with an explicit User-Agent (Discord rejects Python's default one), so the downloader stays dependency-free. `python -m pipeline_v2.notify [--level error]` sends a test message.
+- **A notification can never break the pipeline:** if Discord is down or the URL is missing or wrong, it logs a warning and the work carries on. The webhook URL never appears in logs.
+- **Size limits:** an embed holds at most 6,000 characters (4,096 in the description, 1,024 per field, 25 fields); `send()` trims to fit, because Discord rejects an oversized message outright. The finished message lists at most 15 failed files ("…and N more").
+- **@-mentions:** `warn` and `error` messages mention `DISCORD_USER_ID` (from `.env`) in the message text, since a mention inside an embed doesn't send a push notification.
+- **Opt-in:** `download.py` posts only with `--notify`. The nightly run (phase 3b) won't pass it; its single summary comes from the orchestrator in phase 9.
+- **`kill` is reported:** SIGTERM is turned into a normal stop, so the run is recorded as failed and the STOPPED message goes out. A power cut or `kill -9` can't send anything; the missing hourly message is the signal.
 - **Reused later:** phase 9 sends the nightly alerts (failed runs, zero new files in season, disk, heights blocked, new category values, new columns) through the same function.
 
 ### Bulk download messages (proposed)
 
 | When | Example | Color |
 |---|---|---|
-| Start | **Bulk download started** · 91,469 files (38.9 GB) in 949 folders · 3 connections | blue |
-| Progress | **Bulk download 40%** · 36,600 / 91,469 files · 15.2 GB · ~4 h 10 m left | blue |
-| Stopped | **Bulk download STOPPED** · connection lost after 3 retries · 52,310 files done · re-run resumes | red |
-| Finished | **Bulk download finished** · 88,273 new · 3,009 duplicates · 0 failed · 38.9 GB in 6 h 12 m | green |
+| Start (after the ~15 min folder listing) | **Bulk download started** · 91,469 files (38.9 GB) in 949 upload folders · 3 connections | blue |
+| Progress, hourly | **Bulk download: 40% of files** · 36,600 / 91,469 files · 15.2 / 38.9 GB · ~4 h 10 m left | blue |
+| Stopped (connection lost after 3 retries, refused login, Ctrl-C, `kill`) | **Bulk download STOPPED** · the error · stopped after 52,310 / 91,469 files · re-run the same command to resume | red + @-mention |
+| Finished | **Bulk download finished** · new / duplicates / failed / unknown names · 38.9 GB in 7 h 12 m | green, or yellow + @-mention if any file failed (listed) |
 
-Files the server refuses (`failed`) are listed in the finished message.
+The time left weights files and bytes by their measured cost (~0.7 s per file, ~5 MB/s), so the large bat-tracking JSON near the end of the queue doesn't make it optimistic. Expect well under 3,009 duplicates: that number counts re-delivered names, and most re-deliveries have new contents, so they're stored as `new`.
 
 ### Setup steps (Matt, ~1 minute, once the choices below are settled)
 
 1. Pick or create a channel (e.g. `#pipeline`) in a Discord server you manage.
 2. Channel settings (gear icon) → **Integrations** → **Webhooks** → **New Webhook**.
 3. Name it (e.g. "delispice pipeline"), optionally set an avatar, click **Copy Webhook URL**.
-4. Add one line to `pipeline_v2/.env` on **both** the server and the Mac (the Mac's copy is for testing):
+4. Your Discord user ID: Settings → Advanced → turn on **Developer Mode**, then right-click your name → **Copy User ID**.
+5. Add two lines to `pipeline_v2/.env` on **both** the server and the Mac (the Mac's copy is for testing), **without quotes**, and make the file private (`chmod 600 pipeline_v2/.env`):
    ```
    DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+   DISCORD_USER_ID=123456789012345678
    ```
 
-Then Claude writes `notify.py`, sends a test message, wires it into `download.py`, and runs a small real download to show the messages before the bulk run.
+Then Claude sends a test message from each machine, and the bulk download runs with `--notify`.
 
-### Open choices
+### Decided (2026-10-07)
 
-1. **Progress cadence for the bulk download:** every 10% (~10 messages over 7–8 h), once an hour, or only start / finish / problems?
-2. **@-mention on problems:** should "stopped" / "failed" messages @-mention you, so you get a push notification even if the channel is muted? Needs your Discord user ID (Settings → Advanced → Developer Mode on, then right-click your name → Copy User ID); it would go in `.env` too.
-3. **Channels:** one channel for everything (recommended), or separate channels for progress and problems (two webhooks)?
-4. **Webhook name and avatar:** e.g. "delispice pipeline"; any avatar, or Discord's default.
-5. **Nightly runs later (phase 9):** post only when something's wrong, or also a short daily summary ("downloaded 214 files, loaded 27 games, all OK")? Can be decided in phase 9.
+1. **Progress cadence:** hourly, plus start / stopped / finished (a missing hourly message means the process died).
+2. **@-mention on problems:** yes, on `warn` and `error` messages only (`DISCORD_USER_ID` in `.env`).
+3. **Channels:** one channel for everything.
+4. **Webhook name and avatar:** "delispice pipeline", Discord's default avatar.
+5. **Nightly runs:** decided in phase 9.
+6. **When `download.py` posts:** only with `--notify`.

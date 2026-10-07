@@ -1,6 +1,8 @@
 # pipeline_v2: the data_pipeline rewrite
 
-Status: **phase 0 in progress** (plan written 2026-10-03). Nothing on the server has changed yet.
+Status (2026-10-06): **phase 0 done; phase 1 code done and deployed to the server (`main` @ `1996c65`). The bulk download has NOT started:** first we set up Discord notifications (§17) so the download can report progress there. The server's `pipeline_v2/.env` already holds the FTP login. The live app is unchanged: it still reads `data_pipeline/`.
+
+**Next session, start here:** settle the open choices in §17 → you create the webhook and add `DISCORD_WEBHOOK_URL` to both `.env` files → write `notify.py` + send a test message → wire it into `download.py` → dry run on the server → start the bulk download (phase 1).
 
 The new pipeline lives in its own folder, **`pipeline_v2/`** (code, this plan, `docs/`), built on the **`pipeline-v2`** git branch. The old `data_pipeline/` keeps running untouched until cutover and is deleted in the cleanup.
 
@@ -54,7 +56,7 @@ Readers: `delispice_app` (`data.py`, `leaderboard.py`) and `backend/models` read
 | Quarantine history | 0 files quarantined in all 13 logged runs (the fix dictionary was built from a full scan). |
 | Server model setup | Only `cq_D1` artifacts exist (Jul 11). `lightgbm` isn't installed, so eye can't train there. The Mac has cq/eye/eyescore/rvstate/xrv for D1 + P4. |
 | FTP | TrackMan's FTP uses a **self-signed certificate** (why `factory.sh` disables verification). The password was never committed to git. The root has two folders, `v3/` (game files, by upload date) and `practice/` (contents not explored yet). |
-| Column-count variants | All 32,017 server CSVs are 167 or 170 columns, with no `SpinAxis3d*` block at all. Only 191 Mac CSVs (Jun 13 – Aug 2 2026) have the block: 199 columns, including `SpinAxis3dConfidence` (always empty so far), which today's pipeline drops. **Added to the v2 schemas** as a nullable string at TrackMan's position (after `SpinAxis3dVectorZ`), so the canonical schema is now 202 columns. TrackMan orders the `SpinAxis3dSeamOrientationBall…Amb1–4` block differently from the schema; output is reordered to the schema, so this is cosmetic. |
+| Column-count variants | All 32,017 server CSVs are 167 or 170 columns, with no `SpinAxis3d*` block at all. Only 191 Mac CSVs (Jun 13 – Aug 2 2026) have the block: 199 columns, including `SpinAxis3dConfidence` (always empty so far), which today's pipeline drops. **Added to the v2 schemas** as a nullable string at TrackMan's position (after `SpinAxis3dVectorZ`), so the canonical schema is now 202 columns. TrackMan orders the `SpinAxis3dSeamOrientationBall…Amb1–4` block differently from the schema (one consistent order in all 191 files); output is reordered to the schema, so this is cosmetic. **Decide after the bulk download:** if every file uses TrackMan's order, match it; if it varies, keep the schema's tidy order. |
 | Game counts per year | 3,047 (2022), 3,939 (2023), 5,317 (2024), 9,282 (2025), 10,432 (2026 so far) |
 | Disk | 457 GB total, 302 GB free; the current data takes ~33 GB. |
 | FTP inventory (2026-10-06) | `/v3`: 949 day folders (2022 – 2026-09-28), each with one `CSV/` subfolder holding every file type. **91,469 files, 38.9 GB**: pitch CSVs 34,512 verified (11.0 GB) + 29,874 unverified (8.9 GB); bat-tracking JSON 983 + 995 (15.1 GB); positioning 1,640 + 23,465 (3.9 GB). 88,273 unique names; 3,009 names delivered more than once (2,187 with a different size; max 6 copies). Upload lag (folder date − game date): median 1 day, p90 3, p99 256, max 1,640 days, so TrackMan re-sends old games into new folders. |
@@ -170,9 +172,9 @@ pipeline_v2/
 
 ### Ledger sketch (`pipeline.db`)
 
-- **files**: `path, name, game_id, kind (pitches/positioning/battracking/unknown), verified, size, sha256, ftp_mtime, first_seen, status (new/loaded/superseded/failed/tracked/unknown), error, rows, rows_dropped, warnings (json), run_id`
+- **files** (one row per downloaded copy): `file_id, remote_path, ftp_size, ftp_modify, folder_date, name, path, sha256, game_id, kind (pitches/positioning/battracking/unknown), verified, status (new/duplicate/loaded/superseded/tracked/failed/unknown), error, rows, rows_dropped, warnings (json), first_seen, run_id`; unique on (remote_path, ftp_size, ftp_modify). Schema lives in `ledger.py`.
 - **games**: `game_id, kind, current_file, verified, level, year, game_uid, rows, updated_at, excluded, note`. One row per (game_id, kind). For positioning/battracking, `current_file` points into `raw/`.
-- **runs**: `run_id, job, started, finished, status, counts (json), log_path`
+- **runs**: `run_id, job, args (json), started, finished, status (running/ok/failed), counts (json), error, log_path`
 - All paths are stored **relative to the data folder**, so `raw/` + `pipeline.db` can be copied between machines as-is.
 
 **Why SQLite for the ledger:** DuckDB stays, for querying parquet in the app. The ledger is bookkeeping: thousands of tiny inserts and updates, read by `status` and the pipeline page while the pipeline writes. SQLite allows readers while one process writes; a DuckDB database file can't be opened by a second process at all while someone is writing to it. SQLite is also built into Python and already used for shortlists. DuckDB can still query the ledger with `ATTACH 'pipeline.db' (TYPE sqlite)`.
@@ -287,7 +289,7 @@ The app keeps serving yesterday's data, and nothing partial is ever published.
 
 | Step | Parallel? |
 |---|---|
-| `download.py` | Nightly: one connection (a few hundred files). **Backfill: 3–4 connections**, because the ~0.7 s per-file cost makes 91k files take ~15–20 h on one. |
+| `download.py` | Nightly: one connection (a few hundred files). **Backfill: 3 connections** (the number tested), because the ~0.7 s per-file cost makes 91k files take ~15–20 h on one. |
 | `load.py` | **Yes: a process pool, one worker per CPU (12 on the server).** Same code path for the bulk (~32k files, ~30 min) and nightly (hundreds of files, seconds). Workers write `logs/workers/<date>/` and return their results to the parent, which records them in the ledger and run log. |
 | `build.py` | Polars' own multithreading (scan → sink per year); no worker processes |
 | Model training | One (level, year) at a time; sklearn/LightGBM use threads internally (memory limits parallel fits) |
@@ -301,7 +303,7 @@ Worker logs are kept (deleted after 1 year); the ledger and run log hold the sum
 
 | When | What |
 |---|---|
-| 03:00 nightly (one cron line, `flock`); imports the previous day's uploads | download (**last 7 upload-date folders under `v3/`**) → load → build (changed years) → re-score new pitches → warm app caches → reload app → write status |
+| 03:00 nightly (one cron line, `flock`); imports the previous day's uploads | download (**upload folders from the last 7 days under `v3/`, reaching back to the last successful run after missed nights**) → load → build (changed years) → re-score new pitches → warm app caches → reload app → write status |
 | 1st of the month (same run, after nightly) | **full FTP recheck** (list every `v3/` folder, download anything missing or changed) → rebuild RE288 → retrain models (every level; **current season + any past year whose games changed that month**) → re-score → reload app |
 | Always (systemd service) | heights: scrape at ~6.5 s/request, sleep when the queue is empty, back off on 5xx/timeouts, sleep 24 h after repeated 403/429, never crash |
 
@@ -320,7 +322,7 @@ The only shell left is one crontab line:
 - One language and orchestrator means errors, retries and logging work the same way in every step.
 - It's testable and lives in git (the password stays in an uncommitted file).
 - Python's built-in `ftplib` handles FTPS with the self-signed certificate; nothing extra to install.
-- Phase 1 checks that TrackMan's server supports MLSD listings (sizes and times in one call), with a per-file SIZE/MDTM fallback.
+- Phase 1 confirmed TrackMan's server supports MLSD listings (sizes and times in one call), so no per-file fallback was needed.
 
 ### Why the app needs a refresh
 
@@ -461,14 +463,14 @@ The same report appears on the app's pipeline page (§11) and feeds the Discord 
    | `data_pipeline/height_scraper.py` | `wbaserunners/`, `backend/models/team_acronyms.csv` |
 
    The risk is the reverse of July's break: when v2 moves the output to `serving/`, a missed reader keeps reading stale data without erroring. `config.py` makes it a one-place change.
-2. **Pinned dependencies.** The root `requirements.txt` is the single pinned list for the shared venv; **update it whenever a dependency is added.** First additions: `pandera==0.32.0` and `pandas==3.0.3` (today only in an untracked, unpinned `data_pipeline/requirements.txt` on the server, to be deleted), and a version pin for `lightgbm` (`4.6.0` on the Mac; not installed on the server). Pinning also lines up the Mac (pandas 3.0.2) with the server (3.0.3) so local tests mean something.
+2. **Pinned dependencies.** The root `requirements.txt` is the single pinned list for the shared venv; **update it whenever a dependency is added.** First additions (**done in phase 0**): `pandera==0.32.0` and `pandas==3.0.3` (today only in an untracked, unpinned `data_pipeline/requirements.txt` on the server, to be deleted), and a version pin for `lightgbm` (`4.6.0` on the Mac; not installed on the server). Pinning also lines up the Mac (pandas 3.0.2) with the server (3.0.3) so local tests mean something.
 3. **Secrets:** the FTP password and the Discord webhook URL stay in uncommitted files (never in git). `download.py` is committed and reads the password from its file.
 4. **A missed night loses files forever:** fixed by the 7-day window plus the monthly full recheck.
 5. **The RE288 matrix is tracked in git** (`.gitignore` re-includes `data_pipeline/re_matrices/`), but the server's monthly job rewrites it. The server's copy currently shows as modified in `git status`, so the next `git pull` that changes those files will refuse to run. It's derived data: stop tracking it in phase 0 (`git rm --cached` + drop the `.gitignore` exception). v2 writes `serving/re288_matrix.parquet`, which isn't tracked.
    - **Why the pull refuses:** git won't overwrite uncommitted changes. If a commit touches the matrix while the server's copy is modified, the whole pull aborts, blocking every other change in it.
    - **The real danger is the quick fix:** `git checkout -- <file>`, `git stash` or `git reset --hard` would swap the server's fresh matrix for the older committed one, and the app would use a stale RE table without any error.
    - **The server runs fine untracked:** the app reads the file by path; git tracking doesn't affect that (like `wbaserunners/`, `heights.csv` and the artifacts today).
-   - **Untracking trap:** to the server, the untracking commit means "file deleted", so pulling it removes the server's copy (and the pull refuses while the copy is modified). Safe order on the server: (1) copy both matrix files aside, (2) `git checkout -- data_pipeline/re_matrices/`, (3) `git pull` (removes them), (4) copy them back (now untracked and ignored). Fallback: rerun `re_matrix.py` (~1 min).
+   - **Untracking trap:** to the server, the untracking commit means "file deleted", so pulling it removes the server's copy (and the pull refuses while the copy is modified). Safe order on the server: (1) copy both matrix files aside, (2) `git checkout -- data_pipeline/re_matrices/`, (3) `git pull` (removes them, **and the now-empty folder**), (4) `mkdir -p data_pipeline/re_matrices` and copy them back (now untracked and ignored). Fallback: rerun `re_matrix.py` (~1 min). **Done 2026-10-06** (the temporary backup was deleted after confirming the restored files matched).
 6. **`deploy/delispice.service` is also locally modified on the server** (setup filled in the username). Same pull hazard if the template ever changes upstream; keep in mind when editing it.
 7. **Installing packages can break the live app.** The app and pipeline share one venv, so installing `lightgbm`, `pandera` or `pandas` can quietly upgrade shared libraries (numpy, scipy) under the running app. Rule: install only from the pinned `requirements.txt`, test that exact install on the Mac first, then click through the live app after installing on the server.
 
@@ -549,15 +551,17 @@ Build and test locally first, but **don't delete the old files first**. Add the 
 **Every server change gets explicit approval first.**
 
 - [x] **0. Prep (Mac, branch, no behavior change):** *done 2026-10-03, verified on the Mac: paths unchanged, retags/autocluster moved byte-for-byte, a real CSV validates with the pins, the app loads. On the server, installing the pins adds only `lightgbm` (pandera 0.32.0 and pandas 3.0.3 are already there).* `config.py` pointing at today's paths; App edits 2–3 from §11 (move user data out of `.cache`, switch to `config.py`); pin dependencies in `requirements.txt` and test that exact install on the Mac (§10.7); stop tracking the RE288 matrix in git (§10.5).
-- [ ] **1. Ledger, names, download (Mac):** first, **check that TrackMan's FTP server supports what `download.py` needs** *(done 2026-10-06, see §2: works with plain `ftplib`; handle the MLSD quirks; the bulk download is 91,469 files / 38.9 GB, ~15–20 h on one connection because of the per-file cost, so use 3–4 connections for the backfill only)*: FTPS login with Python's `ftplib` and the self-signed certificate, MLSD listings (or a fallback to per-file SIZE/MDTM), the folder layout (confirm `v3/YYYY/MM/DD/CSV/` and that `practice/` is skipped), and download speed. Then `ledger.py`, `names.py` with tests on every real name in the logs, and `download.py`. *(Written and tested 2026-10-06: `names.py` parses all 88,273 FTP names and 34,100 server names with correct splits. `download.py`: a dry run changes nothing, re-runs skip known files, identical re-deliveries become `duplicate` rows without a second copy, changed re-deliveries are kept as separate versions, 3 parallel connections work, and downloads match the server's own SHA-256.)* Then **merge to `main`, pull on the server** (with the four-step RE288 order, §10.5) **and run the bulk download there**: `download.py --all`, 4 connections, ~6–8 h, detached so it survives logout.
+- [ ] **1. Ledger, names, download (Mac):** first, **check that TrackMan's FTP server supports what `download.py` needs** *(done 2026-10-06, see §2: works with plain `ftplib`; handle the MLSD quirks; the bulk download is 91,469 files / 38.9 GB, ~15–20 h on one connection because of the per-file cost, so use 3 connections for the backfill only)*: FTPS login with Python's `ftplib` and the self-signed certificate, MLSD listings (or a fallback to per-file SIZE/MDTM), the folder layout (confirm `v3/YYYY/MM/DD/CSV/` and that `practice/` is skipped), and download speed. Then `ledger.py`, `names.py` with tests on every real name in the logs, and `download.py`. *(Written and tested 2026-10-06: `names.py` parses all 88,273 FTP names and 34,100 server names with correct splits. `download.py`: a dry run changes nothing, re-runs skip known files, identical re-deliveries become `duplicate` rows without a second copy, changed re-deliveries are kept as separate versions, 3 parallel connections work, and downloads match the server's own SHA-256. 2026-10-07: a refused login (e.g. `530` too many connections) or a lapsed session is now a connection error: retried with a fresh login, then the run stops; before, it marked every remaining file `failed` for good.)* Then **merge to `main`, pull on the server** (with the four-step RE288 order, §10.5) *(done 2026-10-06: server at `1996c65`, graceful reload with no downtime, retags/autocluster moved to `state/` byte-for-byte, site OK)* **and run the bulk download there**: `download.py --all`, 3 connections (`config.BACKFILL_WORKERS`), ~7–8 h, detached so it survives logout (`nohup … < /dev/null &`). Start it by ~5 pm so it finishes before the old `factory.sh` opens its own FTP session at 02:00 (an extra connection could hit TrackMan's per-account limit); if a login is refused anyway, the run retries, then stops cleanly and resumes on re-run. The Mac's 49 test files and test ledger are throwaway: the Mac later works from copies pulled from the server.
+- [ ] **1b. Discord notifications (before the bulk download):** `notify.py` + hook it into `download.py` (start / progress / stopped / finished). Design and open choices in §17. This builds phase 9's foundation early.
 - [ ] **2. Load and build (Mac):** `load.py` + `build.py` → new `games/` + `serving/`. Compare row counts per level/year with the server's `wbaserunners/`. Check CSV PitchUIDs across unverified/verified pairs. Compare RE288 with the current matrix.
 - [ ] **3. Models + local app test (Mac):** RE288, retrain cq + eye for every level + P4, re-score caches, built from the new `serving/`. Make App edit 7 (run value from columns) and compare RV against today's `rvstate` results. Run the app locally against `serving/`.
+- [ ] **3b. Orchestrator, heights service, basic status (Mac):** `run.py` (nightly + 1st-of-month sequence, lock, failure rules from §6, warm caches + graceful reload, worker-log cleanup), `heights.py` (always-on loop) + its systemd unit file in `deploy/`, and a basic `python -m pipeline_v2 status`. Phase 4 runs these on the server; phase 7 finishes `status`.
 - [ ] **4. Merge + parallel run (server):** merge to `main` (config still on old paths) and pull; install `lightgbm` and the other new pins from `requirements.txt`, then click through the live app (§10.7); run load/build/models into the new folders; run the v2 nightly by hand a few nights without reloading the app.
 - [ ] **5. Cutover (one commit):** copy `heights.csv` from `data_pipeline/` into `pipeline_v2/`; flip `config.py` (`PITCHES_DIR`, `RE288_PATH`, `HEIGHTS_CSV`), App edit 4, App edit 7 (run value from columns), App edit 1 (remove the button); pull + graceful reload; swap the crontab to the one v2 line; then install the heights service (admin step). Rollback = revert the commit + restore the old crontab.
 - [ ] **6. Cleanup (a week later):** `git rm` replaced scripts; delete old data folders, `factory.sh`, the untracked requirements file on the server; update `deploy/DEPLOY.md` (new cron line, heights service, `status`, graceful reload for code deploys instead of `sudo systemctl restart`).
 - [ ] **7. Polish:** finish `status`; pipeline page (behind the shortlist login) and unverified badge in the app (§11, items 5–6); check games by month per level for fall/exhibition games mixed into season data.
 - [ ] **8. Tests (bottom priority, once everything is in place):** a handful of real files covering the edge cases (unverified/verified pairs, a re-sent game, the double-dated Riddle Pace game, `David F. Couch`), run on both machines.
-- [ ] **9. Alerts to Discord:** post to a Discord channel via webhook when there's a problem: failed run or failed files, zero new files two nights in a row in season, disk projection or 80% full, heights scraper blocked, **new category values** from load + warn (with the affected games), and **new columns** TrackMan added. It reads the same checks `status` already computes, so it's a small add-on at the end. The webhook URL lives in an uncommitted file (anyone with it can post to the channel).
+- [ ] **9. Alerts to Discord** *(`notify.py` already exists from phase 1b; this phase wires the `status` checks into it)*: post to a Discord channel via webhook when there's a problem: failed run or failed files, zero new files two nights in a row in season, disk projection or 80% full, heights scraper blocked, **new category values** from load + warn (with the affected games), and **new columns** TrackMan added. It reads the same checks `status` already computes, so it's a small add-on at the end. The webhook URL lives in an uncommitted file (anyone with it can post to the channel).
 - [ ] **10. Backups (last item):** nightly copy of the irreplaceable files: `delispice_app/.data/scouting.db` (contributors' reports), `retags.json` / `autocluster.json`, `heights.csv`, `pipeline.db`. SQLite files via its backup command, not a plain copy. Destination to decide then. `raw/` (re-downloadable) and everything derived don't need backing up.
 
 ---
@@ -601,4 +605,62 @@ Decided:
 - Folder + branch: **`pipeline_v2/` (separate from `data_pipeline/`), built on the `pipeline-v2` branch**; code, `plan.md` and `docs/` tracked, all data ignored
 - Rollout: **build + validate on the Mac, run in parallel on the server, cut over with one commit, clean up a week later** (§14)
 
-Open: none.
+Open: the Discord choices in §17.
+
+Deferred:
+- `SpinAxis3dSeamOrientationBall…Amb1–4` column order: decide after the bulk download (§2).
+
+---
+
+## 17. Discord notifications (next up, before the bulk download)
+
+Goal: get updates on the bulk download (and later every nightly run) in a Discord channel, so nothing fails silently.
+
+### How a webhook works
+
+A webhook is a special URL tied to one Discord channel. Sending a small HTTP request (JSON) to it makes a message appear in that channel under a chosen name and avatar. No bot account, nothing to install, and it's one-way: it can only post into that channel, never read messages or touch the rest of the server.
+
+```
+pipeline on the server  ──HTTP POST──▶  https://discord.com/api/webhooks/…  ──▶  #pipeline  ──▶  your phone
+```
+
+- A message is plain text or an **embed**: a card with a title, a colored side bar (blue / green / yellow / red) and labeled fields (Files, GB, ETA).
+- Limits: 2,000 characters per message; about 5 messages per 2 seconds per webhook. Progress updates are nowhere near that.
+- **Security:** the URL is a secret. Anyone with it can post to that channel, nothing more. It lives in `pipeline_v2/.env` (gitignored) as `DISCORD_WEBHOOK_URL`, next to the FTP login. If it leaks: delete the webhook in Discord and make a new one.
+
+### Design
+
+- **`notify.py`**, one function: `send(title, message, level, fields=None)` → posts an embed. Uses the standard library (`urllib`) with an explicit User-Agent (Discord rejects Python's default one), so the downloader stays dependency-free.
+- **A notification can never break the pipeline:** if Discord is down or the URL is missing or wrong, it logs a warning and the work carries on.
+- **Reused later:** phase 9 sends the nightly alerts (failed runs, zero new files in season, disk, heights blocked, new category values, new columns) through the same function.
+
+### Bulk download messages (proposed)
+
+| When | Example | Color |
+|---|---|---|
+| Start | **Bulk download started** · 91,469 files (38.9 GB) in 949 folders · 3 connections | blue |
+| Progress | **Bulk download 40%** · 36,600 / 91,469 files · 15.2 GB · ~4 h 10 m left | blue |
+| Stopped | **Bulk download STOPPED** · connection lost after 3 retries · 52,310 files done · re-run resumes | red |
+| Finished | **Bulk download finished** · 88,273 new · 3,009 duplicates · 0 failed · 38.9 GB in 6 h 12 m | green |
+
+Files the server refuses (`failed`) are listed in the finished message.
+
+### Setup steps (Matt, ~1 minute, once the choices below are settled)
+
+1. Pick or create a channel (e.g. `#pipeline`) in a Discord server you manage.
+2. Channel settings (gear icon) → **Integrations** → **Webhooks** → **New Webhook**.
+3. Name it (e.g. "delispice pipeline"), optionally set an avatar, click **Copy Webhook URL**.
+4. Add one line to `pipeline_v2/.env` on **both** the server and the Mac (the Mac's copy is for testing):
+   ```
+   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+   ```
+
+Then Claude writes `notify.py`, sends a test message, wires it into `download.py`, and runs a small real download to show the messages before the bulk run.
+
+### Open choices
+
+1. **Progress cadence for the bulk download:** every 10% (~10 messages over 7–8 h), once an hour, or only start / finish / problems?
+2. **@-mention on problems:** should "stopped" / "failed" messages @-mention you, so you get a push notification even if the channel is muted? Needs your Discord user ID (Settings → Advanced → Developer Mode on, then right-click your name → Copy User ID); it would go in `.env` too.
+3. **Channels:** one channel for everything (recommended), or separate channels for progress and problems (two webhooks)?
+4. **Webhook name and avatar:** e.g. "delispice pipeline"; any avatar, or Discord's default.
+5. **Nightly runs later (phase 9):** post only when something's wrong, or also a short daily summary ("downloaded 214 files, loaded 27 games, all OK")? Can be decided in phase 9.

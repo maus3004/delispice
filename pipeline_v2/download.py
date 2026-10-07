@@ -14,8 +14,9 @@ renamed into raw/YYYY/MM/DD/ (its upload-date folder), so raw/ never holds a par
 identical to one already stored (same name and sha256) isn't stored twice: its ledger row points at
 the first copy, status 'duplicate'.
 
-Failures (plan.md §6): connection problems are retried; a file that still can't be fetched stops the
-run (exit 1), and the next run picks up from there. A file the server refuses (a 5xx reply) is recorded
+Failures (plan.md §6): connection problems (a dropped connection, a refused login, a lapsed session)
+are retried, logging in again each time; a file that still can't be fetched stops the run (exit 1), and
+the next run picks up from there. A file the server refuses (any other 5xx reply, e.g. 550) is recorded
 as 'failed' and skipped.
 
 TrackMan's FTP quirks (plan.md §2): self-signed certificate (verification off, as factory.sh did),
@@ -56,15 +57,23 @@ class Remote:
 
 # ── FTP ───────────────────────────────────────────────────────────────────────────────────────────
 def connect() -> ftplib.FTP_TLS:
+    """Log in. A refused login (e.g. 530 too many connections) is raised as a ConnectionError, so
+    fetch() retries it like a dropped connection instead of blaming the file it was about to fetch."""
     s = config.secrets()
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE                  # TrackMan's certificate is self-signed
     ftp = ftplib.FTP_TLS(context=ctx, timeout=60)
-    ftp.connect(config.FTP_HOST, 21)
-    ftp.auth()
-    ftp.login(s["FTP_USER"], s["FTP_PASS"])
-    ftp.prot_p()                                     # encrypt the file transfers too
+    try:
+        ftp.connect(config.FTP_HOST, 21)
+        ftp.auth()
+        ftp.login(s["FTP_USER"], s["FTP_PASS"])
+        ftp.prot_p()                                 # encrypt the file transfers too
+    except Exception as e:
+        ftp.close()                                  # don't hold a half-open session while retrying
+        if isinstance(e, ftplib.error_perm):
+            raise ConnectionError(f"login refused: {e}") from e
+        raise
     return ftp
 
 
@@ -156,10 +165,14 @@ def fetch(r: Remote) -> dict:
             if size != r.size:
                 raise OSError(f"got {size:,} bytes, the listing said {r.size:,}")
             return {"remote": r, "part": part, "dest": dest, "sha256": h.hexdigest()}
-        except ftplib.error_perm as e:               # 5xx: the server refuses this file; retrying won't help
-            part.unlink(missing_ok=True)
-            return {"remote": r, "error": str(e)}
-        except (OSError, EOFError, ftplib.Error) as e:   # dropped connection, timeout, short read
+        except ftplib.error_perm as e:
+            if not str(e).startswith("530"):         # 5xx: the server refuses this file; retrying won't help
+                part.unlink(missing_ok=True)
+                return {"remote": r, "error": str(e)}
+            last = e                                 # 530 "not logged in": the session lapsed; log in again
+            _drop()
+            time.sleep(2 ** attempt)
+        except (OSError, EOFError, ftplib.Error) as e:   # dropped connection, refused login, timeout, short read
             last = e
             _drop()
             time.sleep(2 ** attempt)

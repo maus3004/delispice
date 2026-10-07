@@ -40,7 +40,7 @@ APP_STATE_DIR = REPO / "delispice_app" / "state"              # retags.json, aut
 FTP_HOST          = "ftp.trackmanbaseball.com"
 FTP_ROOT          = "/v3"   # practice/ is skipped for now (plan.md §16)
 RECHECK_DAYS      = 7       # nightly: re-list upload-date folders from the last N days; full recheck on the 1st
-BACKFILL_WORKERS  = 4       # FTP connections for --all; nightly uses 1 (~0.7 s fixed cost per file)
+BACKFILL_WORKERS  = 3       # FTP connections for --all (3 tested); nightly uses 1 (~0.7 s fixed cost per file)
 
 # ── Schedule and tracking ─────────────────────────────────────────────────────────────────────────
 SEASON_START    = (2, 1)  # (month, day): the zero-new-files check only runs inside this window

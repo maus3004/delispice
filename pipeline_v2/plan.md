@@ -1,8 +1,8 @@
 # pipeline_v2: the data_pipeline rewrite
 
-Status (2026-10-06): **phase 0 done; phase 1 code done and deployed to the server (`main` @ `1996c65`). The bulk download has NOT started:** first we set up Discord notifications (§17) so the download can report progress there. The server's `pipeline_v2/.env` already holds the FTP login. The live app is unchanged: it still reads `data_pipeline/`.
+Status (2026-10-08): **phases 0, 1 and 1b done.** The bulk download finished on the server (2026-10-08 00:13): every TrackMan file is in `pipeline_v2/raw/` and the ledger (`pipeline.db`), Discord notifications work, and the code is on the server (`main` @ `d516e5e`). The live app is unchanged: it still reads `data_pipeline/`.
 
-**Next session, start here:** §17 choices are settled and `notify.py` + `download.py --notify` are written and tested against a fake Discord (2026-10-07, on `pipeline-v2`, not yet on the server). Remaining: you create the webhook and add `DISCORD_WEBHOOK_URL` + `DISCORD_USER_ID` to both `.env` files → real test message from the Mac → merge to `main` + pull on the server → test message + dry run there → start the bulk download with `--notify` (phase 1).
+**Next session, start here:** phase 2. First the deferred SpinAxis3d column-order check on `raw/` (§2), then `load.py` with the baserunner fixes (§18) and `build.py`.
 
 The new pipeline lives in its own folder, **`pipeline_v2/`** (code, this plan, `docs/`), built on the **`pipeline-v2`** git branch. The old `data_pipeline/` keeps running untouched until cutover and is deleted in the cleanup.
 
@@ -164,7 +164,7 @@ pipeline_v2/
 | `ledger.py` | SQLite schema and helpers |
 | `names.py` | Filename parser (checked against every real name from the logs) |
 | `download.py` | FTP → `raw/` + ledger. **Only reads the `v3/` tree**; `practice/` is skipped for now. FTP password read from `.env`. A file is fetched when its (remote path, size, modified time) isn't in the ledger. Writes `<name>.part`, checks the size, hashes while streaming, renames into `raw/YYYY/MM/DD/`. Identical re-delivery (same name + sha256) → `duplicate` row pointing at the first copy, no second copy stored; same name re-uploaded into the same folder with new contents → kept as `<stem>__<modified><ext>`. Nightly window = folders from the last 7 days, reaching further back if the last successful run was longer ago. Flags: `--all`, `--since/--until`, `--workers`, `--limit`, `--dry-run`. |
-| `load.py` | Pitch CSVs in `raw/` → `games/`: the existing cast → fix → validate path plus baserunner state, **including `next_re288_state` and `half_complete`** (§8, run value) |
+| `load.py` | Pitch CSVs in `raw/` → `games/`: the existing cast → fix → validate path plus baserunner state, **including `next_re288_state` and `half_complete`** (§8, run value), with the baserunner fixes in §18 |
 | `build.py` | `games/` → `serving/` (changed years only), `PitchUID` uniqueness check, RE288 matrix |
 | `heights.py` | The current scraper wrapped in a loop for the always-on service |
 | `run.py` | `python -m pipeline_v2 run \| status \| backfill \| rebuild` |
@@ -256,7 +256,7 @@ flowchart TD
 | New column TrackMan added (not in the 201-column schema) | Load the game without it (the raw file keeps it), record the column in the ledger, and **ping it in `status` and Discord** so it can be added to the schema. |
 | Impossible count (Outs 3, Balls 4…) | Drop the row (as today) and **count it** in `rows_dropped`. |
 
-No more quarantine copies: the raw file stays in `raw/`. After updating the allowed lists or fix map, one command reruns the affected games from `raw/`: `run --retry-failed` for failed files, `run --reload-warned` for games that loaded with warnings (or `run --reload <GameID>` for specific games). New values also go out in the Discord alert (phase 9).
+No more quarantine copies: the raw file stays in `raw/`. After updating the allowed lists or fix map, one command reruns the affected games from `raw/`: `run --retry-failed` for failed files, `run --reload-warned` for games that loaded with warnings (or `run --reload <GameID>` for specific games). New values also go out in a Discord alert (phase 2).
 
 ### Why load + warn
 
@@ -444,7 +444,7 @@ The "Change run environment" picker keeps working: run values still aren't store
 
 **Alert:** during the season, two nights in a row with zero new files fails the run, instead of reporting success. "Season" is a calendar window in `config.py`, default **Feb 1 – Aug 31**.
 
-The same report appears on the app's pipeline page (§11) and feeds the Discord alerts (phase 9).
+The same report appears on the app's pipeline page (§11) and feeds the Discord alerts (wired in phases 2, 3b and 7).
 
 ---
 
@@ -533,7 +533,8 @@ Build and test locally first, but **don't delete the old files first**. Add the 
    - name-parser tests against every real filename in the logs
    - replacement-rule tests: verified after unverified, unverified after verified, a re-sent file with new contents, the double-dated Riddle Pace game
    - row counts per level/year vs the server's current `wbaserunners/` (should match through Jul 3, plus newer games)
-   - new RE288 vs the current matrix (2022–2025 nearly identical)
+   - new RE288 vs the current matrix: **expect real differences** from the §18 baserunner fixes (most in extra-inning states); explain each larger change rather than expecting a match
+   - the §18 accuracy checks (home-run probe, runs reconciliation) before vs after the fixes
    - model retraining
    - run the app locally pointed at `serving/` and click through it
 3. **Merge to main with no live change.** `config.py` still points at the old `wbaserunners/`, so `git pull` on the server leaves the app exactly as it is; the new modules sit unused.
@@ -551,18 +552,17 @@ Build and test locally first, but **don't delete the old files first**. Add the 
 **Every server change gets explicit approval first.**
 
 - [x] **0. Prep (Mac, branch, no behavior change):** *done 2026-10-03, verified on the Mac: paths unchanged, retags/autocluster moved byte-for-byte, a real CSV validates with the pins, the app loads. On the server, installing the pins adds only `lightgbm` (pandera 0.32.0 and pandas 3.0.3 are already there).* `config.py` pointing at today's paths; App edits 2–3 from §11 (move user data out of `.cache`, switch to `config.py`); pin dependencies in `requirements.txt` and test that exact install on the Mac (§10.7); stop tracking the RE288 matrix in git (§10.5).
-- [ ] **1. Ledger, names, download (Mac):** first, **check that TrackMan's FTP server supports what `download.py` needs** *(done 2026-10-06, see §2: works with plain `ftplib`; handle the MLSD quirks; the bulk download is 91,469 files / 38.9 GB, ~15–20 h on one connection because of the per-file cost, so use 3 connections for the backfill only)*: FTPS login with Python's `ftplib` and the self-signed certificate, MLSD listings (or a fallback to per-file SIZE/MDTM), the folder layout (confirm `v3/YYYY/MM/DD/CSV/` and that `practice/` is skipped), and download speed. Then `ledger.py`, `names.py` with tests on every real name in the logs, and `download.py`. *(Written and tested 2026-10-06: `names.py` parses all 88,273 FTP names and 34,100 server names with correct splits. `download.py`: a dry run changes nothing, re-runs skip known files, identical re-deliveries become `duplicate` rows without a second copy, changed re-deliveries are kept as separate versions, 3 parallel connections work, and downloads match the server's own SHA-256. 2026-10-07: a refused login (e.g. `530` too many connections) or a lapsed session is now a connection error: retried with a fresh login, then the run stops; before, it marked every remaining file `failed` for good.)* Then **merge to `main`, pull on the server** (with the four-step RE288 order, §10.5) *(done 2026-10-06: server at `1996c65`, graceful reload with no downtime, retags/autocluster moved to `state/` byte-for-byte, site OK)* **and run the bulk download there**: `download.py --all`, 3 connections (`config.BACKFILL_WORKERS`), ~7–8 h, detached so it survives logout (`nohup … < /dev/null &`). Start it by ~5 pm so it finishes before the old `factory.sh` opens its own FTP session at 02:00 (an extra connection could hit TrackMan's per-account limit); if a login is refused anyway, the run retries, then stops cleanly and resumes on re-run. The Mac's 49 test files and test ledger are throwaway: the Mac later works from copies pulled from the server.
-- [ ] **1b. Discord notifications (before the bulk download):** `notify.py` + hook it into `download.py` (start / progress / stopped / finished). Design and choices in §17. This builds phase 9's foundation early. *(Written 2026-10-07 and tested against a fake Discord + fake FTP: message colors and mentions, size trimming, Discord down/rejecting/missing URL never stops a download, refused logins and `kill` send STOPPED. Waiting on the webhook for a real test message.)*
-- [ ] **2. Load and build (Mac):** `load.py` + `build.py` → new `games/` + `serving/`. Compare row counts per level/year with the server's `wbaserunners/`. Check CSV PitchUIDs across unverified/verified pairs. Compare RE288 with the current matrix.
+- [x] **1. Ledger, names, download (Mac):** first, **check that TrackMan's FTP server supports what `download.py` needs** *(done 2026-10-06, see §2: works with plain `ftplib`; handle the MLSD quirks; the bulk download is 91,469 files / 38.9 GB, ~15–20 h on one connection because of the per-file cost, so use 3 connections for the backfill only)*: FTPS login with Python's `ftplib` and the self-signed certificate, MLSD listings (or a fallback to per-file SIZE/MDTM), the folder layout (confirm `v3/YYYY/MM/DD/CSV/` and that `practice/` is skipped), and download speed. Then `ledger.py`, `names.py` with tests on every real name in the logs, and `download.py`. *(Written and tested 2026-10-06: `names.py` parses all 88,273 FTP names and 34,100 server names with correct splits. `download.py`: a dry run changes nothing, re-runs skip known files, identical re-deliveries become `duplicate` rows without a second copy, changed re-deliveries are kept as separate versions, 3 parallel connections work, and downloads match the server's own SHA-256. 2026-10-07: a refused login (e.g. `530` too many connections) or a lapsed session is now a connection error: retried with a fresh login, then the run stops; before, it marked every remaining file `failed` for good.)* Then **merge to `main`, pull on the server** (with the four-step RE288 order, §10.5) *(done 2026-10-06: server at `1996c65`, graceful reload with no downtime, retags/autocluster moved to `state/` byte-for-byte, site OK)* **and run the bulk download there**: `download.py --all`, 3 connections (`config.BACKFILL_WORKERS`), ~7–8 h, detached so it survives logout (`nohup … < /dev/null &`). Start it by ~5 pm so it finishes before the old `factory.sh` opens its own FTP session at 02:00 (an extra connection could hit TrackMan's per-account limit); if a login is refused anyway, the run retries, then stops cleanly and resumes on re-run. *(Done 2026-10-08: run 1, 2026-10-07 14:19:49 → 2026-10-08 00:13:29, **9 h 54 m** with 3 connections (~28 min of it listing), longer than the 7–8 h estimate. 91,469 files = **90,844 new + 625 duplicates, 0 failed, 0 unknown names**; 38.73 GB in `raw/`. Checked: every stored file present with the listed size, no `.part` leftovers or unledgered files, 300 random files re-hashed to their ledger SHA-256, no warnings in the log; 285 GB disk free.)* The Mac's 49 test files and test ledger are throwaway: the Mac later works from copies pulled from the server.
+- [x] **1b. Discord notifications (before the bulk download):** `notify.py` + hook it into `download.py` (start / progress / stopped / finished). Design and choices in §17. Each later alert is wired into the phase that builds its source (2, 3b, 7); there is no separate alerts phase. *(Written 2026-10-07 and tested against a fake Discord + fake FTP: message colors and mentions, size trimming, Discord down/rejecting/missing URL never stops a download, refused logins and `kill` send STOPPED. Real test messages sent from the Mac and the server; deployed with `main` @ `d516e5e`.)*
+- [ ] **2. Load and build (Mac):** copy `baserunner_state.py` and `fix_dictionary.py` into `pipeline_v2/`, then fix the baserunner model there (§18; the old copy stays untouched). `load.py` + `build.py` → new `games/` + `serving/`. Compare row counts per level/year with the server's `wbaserunners/`. Check CSV PitchUIDs across unverified/verified pairs. Run the §18 accuracy checks before and after the fixes. Compare RE288 with the current matrix (differences expected, §18). **Alerts** (through `notify.py`): new category values from load + warn (with the affected games) and new columns TrackMan added.
 - [ ] **3. Models + local app test (Mac):** RE288, retrain cq + eye for every level + P4, re-score caches, built from the new `serving/`. Make App edit 7 (run value from columns) and compare RV against today's `rvstate` results. Run the app locally against `serving/`.
-- [ ] **3b. Orchestrator, heights service, basic status (Mac):** `run.py` (nightly + 1st-of-month sequence, lock, failure rules from §6, warm caches + graceful reload, worker-log cleanup), `heights.py` (always-on loop) + its systemd unit file in `deploy/`, and a basic `python -m pipeline_v2 status`. Phase 4 runs these on the server; phase 7 finishes `status`.
+- [ ] **3b. Orchestrator, heights service, basic status (Mac):** `run.py` (nightly + 1st-of-month sequence, lock, failure rules from §6, warm caches + graceful reload, worker-log cleanup), `heights.py` (always-on loop) + its systemd unit file in `deploy/`, and a basic `python -m pipeline_v2 status`. **Alerts:** a failed run or failed files, and the heights scraper blocked; decide whether the nightly run also posts a short daily summary (§17, choice 5). Phase 4 runs these on the server; phase 7 finishes `status`.
 - [ ] **4. Merge + parallel run (server):** merge to `main` (config still on old paths) and pull; install `lightgbm` and the other new pins from `requirements.txt`, then click through the live app (§10.7); run load/build/models into the new folders; run the v2 nightly by hand a few nights without reloading the app.
 - [ ] **5. Cutover (one commit):** copy `heights.csv` from `data_pipeline/` into `pipeline_v2/`; flip `config.py` (`PITCHES_DIR`, `RE288_PATH`, `HEIGHTS_CSV`), App edit 4, App edit 7 (run value from columns), App edit 1 (remove the button); pull + graceful reload; swap the crontab to the one v2 line; then install the heights service (admin step). Rollback = revert the commit + restore the old crontab.
 - [ ] **6. Cleanup (a week later):** `git rm` replaced scripts; delete old data folders, `factory.sh`, the untracked requirements file on the server; update `deploy/DEPLOY.md` (new cron line, heights service, `status`, graceful reload for code deploys instead of `sudo systemctl restart`).
-- [ ] **7. Polish:** finish `status`; pipeline page (behind the shortlist login) and unverified badge in the app (§11, items 5–6); check games by month per level for fall/exhibition games mixed into season data.
+- [ ] **7. Polish:** finish `status`; pipeline page (behind the shortlist login) and unverified badge in the app (§11, items 5–6); check games by month per level for fall/exhibition games mixed into season data. **Alerts:** zero new files two nights in a row in season, and the disk projection / 80% full.
 - [ ] **8. Tests (bottom priority, once everything is in place):** a handful of real files covering the edge cases (unverified/verified pairs, a re-sent game, the double-dated Riddle Pace game, `David F. Couch`), run on both machines.
-- [ ] **9. Alerts to Discord** *(`notify.py` already exists from phase 1b; this phase wires the `status` checks into it)*: post to a Discord channel via webhook when there's a problem: failed run or failed files, zero new files two nights in a row in season, disk projection or 80% full, heights scraper blocked, **new category values** from load + warn (with the affected games), and **new columns** TrackMan added. It reads the same checks `status` already computes, so it's a small add-on at the end. The webhook URL lives in an uncommitted file (anyone with it can post to the channel).
-- [ ] **10. Backups (last item):** nightly copy of the irreplaceable files: `delispice_app/.data/scouting.db` (contributors' reports), `retags.json` / `autocluster.json`, `heights.csv`, `pipeline.db`. SQLite files via its backup command, not a plain copy. Destination to decide then. `raw/` (re-downloadable) and everything derived don't need backing up.
+- [ ] **9. Backups (last item):** nightly copy of the irreplaceable files: `delispice_app/.data/scouting.db` (contributors' reports), `retags.json` / `autocluster.json`, `heights.csv`, `pipeline.db`. SQLite files via its backup command, not a plain copy. Destination to decide then. `raw/` (re-downloadable) and everything derived don't need backing up.
 
 ---
 
@@ -588,9 +588,9 @@ Decided:
 - Heights storage: **keep `heights.csv`** (appending is safe); revisit only if a garbled row ever appears
 - Season window for the zero-file check: **calendar window in `config.py`, Feb 1 – Aug 31**
 - Logs: **keep run logs; delete worker logs after 1 year**
-- Alerts: **Discord webhook, phase 9**, including new-column pings
+- Alerts: **Discord webhook**, including new-column pings; each alert is wired in the phase that builds its source (2: new values + new columns; 3b: failed runs/files, heights blocked; 7: zero new files, disk)
 - Bulk download notifications (§17): **hourly progress + start / stopped / finished; one channel; @-mention on problems only; opt-in with `download.py --notify`**
-- Backups: **phase 10, the very last item**, once everything is running
+- Backups: **phase 9, the very last item**, once everything is running
 - Tests: **phase 8, bottom priority** once everything is in place
 - Failure handling: **a failed step stops the run and publishes nothing; the app keeps yesterday's data; the 7-day window retries.** A single file that fails validation is **skipped and flagged** (ledger `failed`, `status`, Discord), and the rest publish (§6).
 - Schedule: **one run at 03:00 importing the previous day's uploads**; no second daily run
@@ -609,6 +609,7 @@ Decided:
 Open: none.
 
 Deferred:
+- Ghost runner for D2 and WCL (§18): mixed evidence; decide while writing `load.py`.
 - `SpinAxis3dSeamOrientationBall…Amb1–4` column order: decide after the bulk download (§2).
 
 ---
@@ -635,15 +636,15 @@ pipeline on the server  ──HTTP POST──▶  https://discord.com/api/webhoo
 - **A notification can never break the pipeline:** if Discord is down or the URL is missing or wrong, it logs a warning and the work carries on. The webhook URL never appears in logs.
 - **Size limits:** an embed holds at most 6,000 characters (4,096 in the description, 1,024 per field, 25 fields); `send()` trims to fit, because Discord rejects an oversized message outright. The finished message lists at most 15 failed files ("…and N more").
 - **@-mentions:** `warn` and `error` messages mention `DISCORD_USER_ID` (from `.env`) in the message text, since a mention inside an embed doesn't send a push notification.
-- **Opt-in:** `download.py` posts only with `--notify`. The nightly run (phase 3b) won't pass it; its single summary comes from the orchestrator in phase 9.
+- **Opt-in:** `download.py` posts only with `--notify`. The nightly run (phase 3b) won't pass it; its alerts come from the orchestrator (phase 3b).
 - **`kill` is reported:** SIGTERM is turned into a normal stop, so the run is recorded as failed and the STOPPED message goes out. A power cut or `kill -9` can't send anything; the missing hourly message is the signal.
-- **Reused later:** phase 9 sends the nightly alerts (failed runs, zero new files in season, disk, heights blocked, new category values, new columns) through the same function.
+- **Reused later:** the nightly alerts go through the same function, each wired in the phase that builds its source: new category values and new columns (phase 2), failed runs/files and heights blocked (phase 3b), zero new files in season and disk (phase 7).
 
 ### Bulk download messages (proposed)
 
 | When | Example | Color |
 |---|---|---|
-| Start (after the ~15 min folder listing) | **Bulk download started** · 91,469 files (38.9 GB) in 949 upload folders · 3 connections | blue |
+| Start (after the ~30 min folder listing) | **Bulk download started** · 91,469 files (38.9 GB) in 949 upload folders · 3 connections | blue |
 | Progress, hourly | **Bulk download: 40% of files** · 36,600 / 91,469 files · 15.2 / 38.9 GB · ~4 h 10 m left | blue |
 | Stopped (connection lost after 3 retries, refused login, Ctrl-C, `kill`) | **Bulk download STOPPED** · the error · stopped after 52,310 / 91,469 files · re-run the same command to resume | red + @-mention |
 | Finished | **Bulk download finished** · new / duplicates / failed / unknown names · 38.9 GB in 7 h 12 m | green, or yellow + @-mention if any file failed (listed) |
@@ -670,5 +671,62 @@ Then Claude sends a test message from each machine, and the bulk download runs w
 2. **@-mention on problems:** yes, on `warn` and `error` messages only (`DISCORD_USER_ID` in `.env`).
 3. **Channels:** one channel for everything.
 4. **Webhook name and avatar:** "delispice pipeline", Discord's default avatar.
-5. **Nightly runs:** decided in phase 9.
+5. **Nightly runs:** whether to also post a short daily summary is decided in phase 3b.
 6. **When `download.py` posts:** only with `--notify`.
+
+---
+
+## 18. Baserunner model fixes (phase 2)
+
+Checked 2026-10-07 against the Mac's copy of `wbaserunners/` (9.3M pitches, 30,405 games, 2022 – Jul 3 2026) by running every play through the real functions in `data_pipeline/baserunner_state.py`, starting from the stored base state, and comparing the model's runs with TrackMan's `RunsScored`. The model agrees on 99.3% of plays, but it has the errors below. Fix them in the `pipeline_v2/` copy while writing `load.py`; the old copy stays as is (it is retired at cleanup).
+
+**Why it matters:** `base_state` feeds `re288_state`, so every error flows into the RE288 matrix, run value, xRV and eye. Outs are always right (they come from TrackMan's `Outs` column); only the runners can be wrong.
+
+### How accurate the bases are today
+
+A home run clears the bases, so on a home run `RunsScored − 1` is exactly the number of runners on. The model's runner count matched on **96.4%** of home runs (60,521 of 62,805): 1,529 times it had extra runners, 755 times it was missing some. Roughly **1 base state in 28 is off by a runner.**
+
+### Bugs
+
+| # | Problem | How many | Evidence | Fix |
+|---|---|---|---|---|
+| 1 | **Ghost runner placed in D1 extra innings; D1 doesn't use the rule** | 76,763 D1 pitches (1.1%) start from a runner on 2nd who isn't there | D1 extra innings: 0 of 104 leadoff home runs scored 2 runs; 0 of 870 leadoff singles/doubles drove in a run | Ghost runner per level: a list in `config.py` (below). The D1 postseason date logic (`d1_playoff_start`) goes away. |
+| 2 | **Dropped third strike: the batter reached but isn't put on 1st** | 4,072 strikeouts | The next pitch in the half shows no new out | If no out follows a strikeout, put the batter on 1st (forced advance, like a walk). The same check fixes `half_complete`, which counts every strikeout as an out. |
+| 3 | **Outs during an at-bat are ignored** (pitcher pickoffs, a runner thrown out on a wild pitch, unlabeled caught stealing without throw data) | 8,988 pitches | Mid-at-bat `OutsOnPlay > 0` with no label and the steal guess not firing | Remove one runner per out (the trailing runner unless a throw says which base) |
+| 4 | **A fielder's choice with no out still removes a runner** (`max(1, outs_on_play)`) | 2,923 plays (6.8% of fielder's choices) | 2,876 of 2,884 show no new out on the next pitch | Remove exactly `OutsOnPlay` runners |
+
+### The steal guess (used in 86% of games)
+
+Only ~14% of games carry `StolenBase` / `CaughtStealing` labels, even in 2025–2026 (the code's docstring calls the unlabeled ones "older files"; they aren't). In the other 86% (26,104 games), a mid-at-bat pitch with a measured catcher throw and runners on is guessed as caught stealing (if there was an out) or a stolen base (if not). It fires 63,386 times.
+
+- **Measured in labeled games:** 71% of those throws really were a steal or caught stealing; the rest were mostly catcher back-picks. Half of real stolen bases have no measured throw, so the guess can't see them at all.
+- **Fix: use the throw's target base** (`BasePositionX/Y/Z`, filled on 80% of throws). Throws to 1st are almost all back-picks: 1,316 of 1,423 weren't steals. Ignore a throw to 1st unless there was an out (then it's a pickoff: remove the runner on 1st). Treat a throw to 2nd or 3rd as a steal of that base by the runner coming from the base before. This raises accuracy from **71% to 81%** in labeled games and also picks the right runner. Throws with no target (20%) keep today's rule.
+
+### Simplifications worth improving
+
+| Problem | How many | Fix |
+|---|---|---|
+| **Sacrifice flies are treated like bunts:** every runner advances a base | 24,574 fly-ball, line-drive and popup sacrifices; 22,789 with a runner on 1st or 2nd (who usually holds) | Use `TaggedHitType`: a bunt (or ground-ball sacrifice) advances every runner as today; a fly/line/popup sacrifice is handled like an out (the run scores, the others hold). Can't be checked against run counts. |
+| **Hits ignore outs on the play** (a runner thrown out on the bases) | 9,591 hits | Remove one runner per out on the play |
+| **Hits score runners who held** (a runner on 3rd always scores on a single, a runner on 2nd always on a double) | ~4,400 (singles 1,965, doubles 1,801, errors 401, triples 245) | Score exactly `RunsScored` runners, lead runners first; the rest take the highest open bases |
+| **Walks ignore extra runs** (e.g. a wild pitch on ball four) | 2,028 | After the forced advance, score extra runners when `RunsScored` says so |
+| Runs on a steal with no runner on 3rd (e.g. a throwing error) | 547 | Same `RunsScored` top-off after a steal |
+
+### Ghost runner by level
+
+| Level | Evidence in extra innings | Ghost runner |
+|---|---|---|
+| D1, D3, JUCO, NAIA | No leadoff sacrifices, no leadoff hit that drives in a run, leadoff home runs score 1 | **off** |
+| NWL, CPL, Cape Cod, Cali Collegiate, NECBL | Leadoff sacrifices in 5–22% of extra half-innings (impossible with empty bases); some 2-run leadoff home runs | **on** |
+| D2, WCL | Mixed: a few leadoff sacrifices, but leadoff home runs score 1 | **decide while writing `load.py`** |
+| Others (USA Baseball, Area Code Games, East Coast Pro, TeamExclusive) | Too few extra innings to tell | off |
+
+### Accuracy checks (before vs after the fixes)
+
+1. **Home-run probe:** share of home runs where the model's runners = `RunsScored − 1` (today 96.4%).
+2. **Runs reconciliation:** plays where the model's runs ≠ `RunsScored`, by play type (today 9,918 over, 7,304 under, out of 2.5M plays).
+3. **Ghost probe:** leadoff home runs and leadoff sacrifices in extra innings, per level.
+4. **Steal guess:** accuracy on labeled games, scored as if they were unlabeled (today 71%; target ~81%).
+
+The script that produced these numbers was a one-off; rebuild it as a small check next to `load.py` so it can be rerun after any change to the model.
+

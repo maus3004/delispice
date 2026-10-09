@@ -6,9 +6,20 @@ those point at today's locations, so importing this module changes nothing for t
 
     from pipeline_v2 import config
     config.PITCHES_DIR      # what the app reads today: data_pipeline/wbaserunners
+
+**Trying v2 before cutover.** Start a program with ``DELISPICE_DATA=v2`` and it reads v2's data,
+RE288 matrix and model artifacts instead, with its own app cache. The setting belongs to each
+running program, so the live app (started without it) and a v2 training run can share one checkout:
+
+    DELISPICE_DATA=v2 .venv/bin/python -m backend.models.cq_store --level D1 --years 2025
+    DELISPICE_DATA=v2 .venv/bin/python delispice_app/app.py
+
+Anything other than exactly "v2", or no setting at all, means today's paths. Cutover makes v2 the
+default. The pipeline's own scripts (download, load, build) always use the v2 folders above.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -26,15 +37,24 @@ WORKER_LOG_DIR  = HERE / "logs" / "workers"        # per-worker logs, deleted af
 SECRETS_ENV     = HERE / ".env"                    # FTP login + Discord webhook; never committed
 
 # ── What the app and models read ──────────────────────────────────────────────────────────────────
-# Phase 0: today's locations (no behavior change). Cutover flips the first three to the v2 values
-# noted on the right.
+# Today's locations unless the program was started with DELISPICE_DATA=v2 (see above). Heights move
+# to HERE / "heights.csv" at cutover, not with the switch; user data is the same in both modes.
+V2 = os.environ.get("DELISPICE_DATA") == "v2"
 _OLD = REPO / "data_pipeline"
-PITCHES_DIR   = _OLD / "wbaserunners"                         # -> SERVING_PITCHES
-RE288_PATH    = _OLD / "re_matrices" / "re288_matrix.parquet" # -> SERVING_RE288
-HEIGHTS_CSV   = _OLD / "heights.csv"                          # -> HERE / "heights.csv"
+PITCHES_DIR   = SERVING_PITCHES      if V2 else _OLD / "wbaserunners"
+RE288_PATH    = SERVING_RE288        if V2 else _OLD / "re_matrices" / "re288_matrix.parquet"
+ARTIFACTS_DIR = HERE / "artifacts"   if V2 else REPO / "backend" / "models" / "artifacts"
+APP_CACHE_DIR = REPO / "delispice_app" / (".cache_v2" if V2 else ".cache")   # derived, safe to delete
+HEIGHTS_CSV   = _OLD / "heights.csv"
 TEAM_ACRONYMS = REPO / "backend" / "models" / "team_acronyms.csv"
-ARTIFACTS_DIR = REPO / "backend" / "models" / "artifacts"
 APP_STATE_DIR = REPO / "delispice_app" / "state"              # retags.json, autocluster.json (user data)
+
+
+def data_mode() -> str:
+    """One line saying which data this program reads, for start-up messages."""
+    return (f"data: {'v2 (DELISPICE_DATA=v2)' if V2 else 'current (data_pipeline/)'}; "
+            f"pitches {PITCHES_DIR.relative_to(REPO)}, RE288 {RE288_PATH.relative_to(REPO)}, "
+            f"models {ARTIFACTS_DIR.relative_to(REPO)}")
 
 # ── FTP ───────────────────────────────────────────────────────────────────────────────────────────
 FTP_HOST          = "ftp.trackmanbaseball.com"

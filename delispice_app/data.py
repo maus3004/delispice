@@ -35,7 +35,8 @@ WBASE = config.PITCHES_DIR
 _ACR_CANDIDATES = (REPO / "backend" / "models" / "team_acronyms.csv",
                    REPO / "backend" / "research" / "team_acronyms.csv")
 ACR_CSV = next((p for p in _ACR_CANDIDATES if p.exists()), _ACR_CANDIDATES[0])
-CACHE_DIR = Path(__file__).resolve().parent / ".cache"
+CACHE_DIR = config.APP_CACHE_DIR            # .cache, or .cache_v2 with DELISPICE_DATA=v2 (never mixed)
+print(f"[delispice] {config.data_mode()}", flush=True)
 
 GLOB_ALL = str(WBASE / "**" / "*.parquet")
 

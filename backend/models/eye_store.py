@@ -33,9 +33,10 @@ from pathlib import Path
 
 import polars as pl
 
+from pipeline_v2 import config
 
-ROOT = Path(__file__).resolve().parents[2]
-ARTIFACT_DIR = ROOT / "backend" / "models" / "artifacts"
+
+ARTIFACT_DIR = config.ARTIFACTS_DIR       # backend/models/artifacts, or pipeline_v2/artifacts with DELISPICE_DATA=v2
 
 
 def _base(level: str, year: str) -> Path:
@@ -129,6 +130,7 @@ def available(level: str) -> list[str]:
 
 
 def main(argv=None):
+    print(config.data_mode(), flush=True)
     p = argparse.ArgumentParser(description="Train batter eye (swing-decision) artifacts.")
     p.add_argument("--level", default="D1", help="Level to train (default: D1)")
     p.add_argument("--years", nargs="*", default=None,

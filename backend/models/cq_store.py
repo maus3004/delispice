@@ -19,8 +19,9 @@ from pathlib import Path
 
 import polars as pl
 
-ROOT = Path(__file__).resolve().parents[2]
-ARTIFACT_DIR = ROOT / "backend" / "models" / "artifacts"
+from pipeline_v2 import config
+
+ARTIFACT_DIR = config.ARTIFACTS_DIR       # backend/models/artifacts, or pipeline_v2/artifacts with DELISPICE_DATA=v2
 _EVENT_COLS = ["GameID", "Inning", "Top/Bottom", "PlayResult", "RunsScored",
                "Direction", "ExitSpeed", "Angle", "re288_state"]
 
@@ -167,6 +168,7 @@ def available(level: str) -> list[str]:
 
 
 def main(argv=None):
+    print(config.data_mode(), flush=True)
     p = argparse.ArgumentParser(description="Train contact-quality (xRV) artifacts.")
     p.add_argument("--level", default="D1", help="Level to train (default: D1)")
     p.add_argument("--years", nargs="*", default=None,

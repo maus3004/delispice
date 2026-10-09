@@ -36,6 +36,7 @@
 
 # ── App: derived caches (always safe to delete; rebuilt on first run) ───
 /delispice_app/.cache/
+/delispice_app/.cache_v2/
 
 # ── App: user data (retags.json, autocluster.json) — your edits, machine-
 #    local, can't be regenerated. To carry them to a new box, copy by hand. ─

@@ -107,8 +107,8 @@ def load_pitches(level: str, year: str) -> pl.DataFrame:
     scope_col = "League" if level == cq.P4_LEVEL else "Level"
     scope = (pl.col("League").is_in(cq.P4_LEAGUES) if level == cq.P4_LEVEL
              else pl.col("Level") == level)
-    return (pl.scan_parquet([str(f) for f in files])
-              .select([*_PITCH_COLS, scope_col]).filter(scope).select(_PITCH_COLS).collect())
+    lf = pl.scan_parquet([str(f) for f in files])
+    return lf.select(cq.with_verified(lf, [*_PITCH_COLS, scope_col])).filter(scope).drop(scope_col).collect()
 
 
 def load_re_matrix(level: str, year: str) -> pl.DataFrame:
@@ -151,15 +151,18 @@ def attach_run_value(df: pl.DataFrame, level: str, year: str) -> pl.DataFrame:
     return df.with_columns(rv.alias("run_value"))
 
 
-def load_training_frame(level: str, year: str) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """``(prepared pitches with run_value, re288 matrix)`` for one (level, year)."""
+def load_training_frame(level: str, year: str) -> tuple[pl.DataFrame, pl.DataFrame, int | None]:
+    """``(prepared pitches with run_value, re288 matrix, unverified pitches skipped)`` for one
+    (level, year). Verified games only (plan.md §8); scoring (``eye_store.scorable_pitches``) still
+    covers every pitch."""
+    from backend.models import contact_quality as cq
     rem = load_re_matrix(level, year)
     if rem.height == 0:
         raise ValueError(f"re288_matrix has no rows for level={level} year={year}")
-    d = prepare(load_pitches(level, year))
+    d, skipped = cq.keep_verified(prepare(load_pitches(level, year)))
     if d.height == 0:
         raise ValueError(f"no scorable pitches for level={level} year={year}")
-    return attach_run_value(d, level, year), rem
+    return attach_run_value(d, level, year), rem, skipped
 
 
 # ── Count run values ─────────────────────────────────────────────────────────────────────────────
@@ -317,15 +320,17 @@ class _BoosterShim:
 
 def train(level: str, year: str) -> EyeModel:
     """Fit an EyeModel for one (level, year) from the pipeline parquets."""
-    d, rem = load_training_frame(level, year)
+    d, rem, skipped = load_training_frame(level, year)
     model = EyeModel().fit(d, count_run_values(rem))
     model.meta = {"level": level, "year": year, "n_rows": d.height,
-                  "n_swings": int(d["swung"].sum()), "feats": MODEL_FEATS}
+                  "n_swings": int(d["swung"].sum()), "feats": MODEL_FEATS,
+                  "verified_only": skipped is not None, "unverified_rows_skipped": skipped or 0}
     return model
 
 
 def eye_scores(level: str, year: str) -> pl.DataFrame:
-    """``PitchUID -> eye`` for a whole season — train and score in one pass."""
-    d, rem = load_training_frame(level, year)
+    """``PitchUID -> eye`` for a whole season — train (verified games) and score (every pitch) in one pass."""
+    d, rem, _ = load_training_frame(level, year)
     model = EyeModel().fit(d, count_run_values(rem))
-    return d.select("PitchUID").with_columns(model.predict_eye(d))
+    every = prepare(load_pitches(level, year))
+    return every.select("PitchUID").with_columns(model.predict_eye(every))

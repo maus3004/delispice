@@ -40,6 +40,21 @@ def compute_run_delta(df: pl.DataFrame, rem: pl.DataFrame) -> pl.DataFrame:
         .with_columns(pl.col("re_after").fill_null(0))
         .with_columns((pl.col("RunsScored") + pl.col("re_after") - pl.col("re_before")).alias("run_delta")))
 
+def with_verified(lf: pl.LazyFrame, cols: list[str]) -> list[str]:
+    """``cols``, plus ``is_verified`` when the data has it (v2 data does; today's data doesn't)."""
+    return cols + (["is_verified"] if "is_verified" in lf.collect_schema().names() else [])
+
+
+def keep_verified(df: pl.DataFrame) -> tuple[pl.DataFrame, int | None]:
+    """Training rows from verified games only (plan.md §8): ``(rows to train on, unverified rows
+    skipped)``. ``is_verified`` is per game, so whole games drop out and half-innings stay intact.
+    Today's data has no such column (it only ever held verified files): it passes through unchanged
+    and the count is None."""
+    if "is_verified" not in df.columns:
+        return df, None
+    return df.filter(pl.col("is_verified")).drop("is_verified"), int((~df["is_verified"]).sum())
+
+
 def load_events(level: str, year: str) -> pl.DataFrame:
     """Scan one (level, year)'s wbaserunners parquets -> the columns we need (incl. Direction).
     P4 has no partition dir of its own: read the D1 partition and keep only Power-4 League rows."""
@@ -50,16 +65,15 @@ def load_events(level: str, year: str) -> pl.DataFrame:
         files = sorted(PIPELINE.glob(f"*/{year}/**/*.parquet"))
         if not files:
             raise FileNotFoundError(f"no parquets for P4 year={year} under {PIPELINE}")
-        return (pl.scan_parquet([str(f) for f in files])
-                  .select([*_EVENT_COLS, "League"])
+        lf = pl.scan_parquet([str(f) for f in files])
+        return (lf.select(with_verified(lf, [*_EVENT_COLS, "League"]))
                   .filter(pl.col("League").is_in(P4_LEAGUES))
                   .drop("League").collect())
     files = sorted((PIPELINE / level / year).glob("**/*.parquet"))
     if not files:
         raise FileNotFoundError(f"no parquets for level={level} year={year} under {PIPELINE}")
-    return (pl.scan_parquet([str(f) for f in files])
-              .select(_EVENT_COLS)
-              .collect())
+    lf = pl.scan_parquet([str(f) for f in files])
+    return lf.select(with_verified(lf, _EVENT_COLS)).collect()
 
 def load_re_matrix(level: str, year: str) -> pl.DataFrame:
     return (pl.read_parquet(REM_PATH)
@@ -79,7 +93,7 @@ def linear_weights(df: pl.DataFrame) -> np.ndarray:                 # cell-0 lin
 def load_training_frame(level: str, year: str) -> tuple[pl.DataFrame, np.ndarray]:
     """One call: (cleaned df with run_delta, linear weights) for a (level, year)."""
     rem = load_re_matrix(level, year)
-    df  = filter_batted_balls(compute_run_delta(load_events(level, year), rem))
+    df, _ = keep_verified(filter_batted_balls(compute_run_delta(load_events(level, year), rem)))
     return df, linear_weights(df)
 
 # model

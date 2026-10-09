@@ -53,8 +53,8 @@ def _events(level: str, year: str) -> pl.DataFrame:
     files = sorted((cq.PIPELINE / "Others" / year).glob("**/*.parquet"))
     if not files:
         raise FileNotFoundError(f"no parquets for level={level} year={year} (checked Others/{year})")
-    return (pl.scan_parquet([str(f) for f in files])
-              .select([*_EVENT_COLS, "Level"])
+    lf = pl.scan_parquet([str(f) for f in files])
+    return (lf.select(cq.with_verified(lf, [*_EVENT_COLS, "Level"]))
               .filter(pl.col("Level") == level).drop("Level").collect())
 
 
@@ -65,12 +65,14 @@ def train(level: str, year: str, k: int = 800, alpha: float = 0.1):
     rem = cq.load_re_matrix(level, year)
     if rem.height == 0:
         raise ValueError(f"re288_matrix has no rows for level={level} year={year}")
-    df = cq.filter_batted_balls(cq.compute_run_delta(_events(level, year), rem))
+    # Whole games drop out, so the state after each ball is computed on complete half-innings first.
+    df, skipped = cq.keep_verified(cq.filter_batted_balls(cq.compute_run_delta(_events(level, year), rem)))
     weights = cq.linear_weights(df)
     X = df.select(cq.FEATS).to_numpy().astype(float)
     y = df["PlayResult"].replace_strict(cq.LABEL_MAP, return_dtype=pl.Int64).to_numpy()
     model = cq.ContactQualityModel().fit(X, y, weights, k, alpha)
-    model.meta = {"level": level, "year": year, "n_rows": df.height, "feats": cq.FEATS}
+    model.meta = {"level": level, "year": year, "n_rows": df.height, "feats": cq.FEATS,
+                  "verified_only": skipped is not None, "unverified_rows_skipped": skipped or 0}
     model.save(_base(level, year))
     # Every cached xRV came out of the OLD model, so it is stale the instant the model changes.
     _xrv_path(level, year).unlink(missing_ok=True)

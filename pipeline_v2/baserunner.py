@@ -166,7 +166,9 @@ def apply_steal(bases: set[int], target: int | None) -> set[int]:
 def apply_pitch(bases: set[int], r: dict, use_heuristic: bool) -> tuple[set[int], int]:
     """The bases after one pitch, and the runs the model scored on it. ``r`` holds the pitch's columns
     plus ``_k_reached`` (the batter reached on a strikeout, worked out from the next pitch's outs)."""
-    pc, kb, pr = r["PitchCall"], r["KorBB"], r["PlayResult"]
+    pc = r["PitchCall"]
+    kb = r["KorBB"] or "Undefined"                 # an empty cell reads as "no batter result"
+    pr = r["PlayResult"] or "Undefined"
     oop = r["OutsOnPlay"] or 0
     rs = r["RunsScored"] or 0
     target = throw_target(r["BasePositionX"], r["BasePositionZ"])

@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS files (
     game_id      TEXT,               -- NULL when the name doesn't parse
     kind         TEXT NOT NULL,      -- pitches | positioning | battracking | unknown
     verified     INTEGER,            -- 1 / 0; NULL for unknown
-    status       TEXT NOT NULL,      -- new | duplicate | loaded | superseded | tracked | failed | unknown
+    status       TEXT NOT NULL,      -- new | duplicate | loaded | superseded | tracked | failed | unknown | empty | held
     error        TEXT,
     rows         INTEGER,
     rows_dropped INTEGER,

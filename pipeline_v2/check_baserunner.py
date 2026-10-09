@@ -13,7 +13,7 @@ TrackMan's ``RunsScored`` is the yardstick (outs always come from TrackMan's ``O
 
 The old model's numbers come from the base states already stored in the data (what
 ``data_pipeline/baserunner_state.py`` wrote); they're skipped when that module or those columns
-are missing.
+are missing, or when the data is v2 output (games/, serving/).
 """
 from __future__ import annotations
 
@@ -138,8 +138,8 @@ def check_game(args: tuple[pl.DataFrame, bool | None, bool]) -> Counter:
 def load(data: str) -> list[pl.DataFrame]:
     lf = pl.scan_parquet(data, include_file_paths="_file")
     cols = lf.collect_schema().names()
-    keep = br.COLUMNS + ["GameID", "Level", "_file"] + [c for c in OLD_STATE if c in cols]
-    df = lf.select(keep).collect().rename({c: f"old_{c}" for c in OLD_STATE if c in cols})
+    old = [c for c in OLD_STATE if c in cols and "source_file" not in cols]   # v2 output holds the NEW model's states
+    df = lf.select(br.COLUMNS + ["GameID", "Level", "_file"] + old).collect().rename({c: f"old_{c}" for c in old})
     return df.partition_by(["GameID", "_file"])
 
 

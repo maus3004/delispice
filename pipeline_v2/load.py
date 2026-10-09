@@ -105,8 +105,8 @@ def transform(path: Path, game_id: str, verified: bool, source_file: str) -> tup
     df = fix_dictionary.apply_fixes(df)             # typos -> canonical values; impossible counts dropped
     rows_dropped = rows_in - df.height
     if rows_dropped * 2 > rows_in:                  # e.g. a bullpen session: one "at-bat" of 900+ pitches
-        raise Reject("failed", f"{rows_dropped} of {rows_in} rows have impossible counts "
-                               f"(PitchofPA, Outs, Balls or Strikes out of range): not a game")
+        raise Reject("failed", f"not a game: {rows_dropped} of {rows_in} rows have impossible counts "
+                               f"(PitchofPA, Outs, Balls or Strikes)")
 
     for c in KEY_COLUMNS:
         n = df[c].null_count()
@@ -272,6 +272,9 @@ def record(con, res: dict, counts: Counter, problems: dict) -> None:
                     problems["values"][(c, v)][1].add(res["game_id"])
             for c in (f.get("warnings") or {}).get("new_columns", []):
                 problems["columns"][c].add(res["game_id"])
+            for c, n in (f.get("warnings") or {}).get("uncastable", {}).items():
+                problems["uncastable"][c][0] += n
+                problems["uncastable"][c][1].add(res["game_id"])
         if not res["changed"]:
             counts["game kept" if res["chosen"] else "game not loaded"] += 1
             return
@@ -318,38 +321,42 @@ def track_other_kinds(con, redo: bool, counts: Counter) -> None:
             counts[f"tracked {kind}"] += 1
 
 
+def _short(text: str, limit: int = 120) -> str:
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def alert(problems: dict, counts: Counter) -> None:
-    """One Discord message when something needs a look: failed files, new values, new columns."""
+    """One Discord message when something needs a look: failed files, new values, values that don't
+    fit their column's type, new columns. Only this run's files, so nothing is reported twice."""
     lines = []
     if problems["values"]:
         lines.append("**New values** (loaded and kept; add them to the allowed lists or the fix map, then `--reload-warned`):")
         for (c, v), (n, games) in sorted(problems["values"].items(), key=lambda kv: -kv[1][0])[:12]:
             lines.append(f"`{c}` = `{v}` ×{n:,} in {len(games)} game(s), e.g. {min(games)}")
+    if problems["uncastable"]:
+        lines.append("**Values that don't fit the column's type** (set to empty; check the schema in trackman_schema.py):")
+        for c, (n, games) in sorted(problems["uncastable"].items(), key=lambda kv: -kv[1][0])[:10]:
+            lines.append(f"`{c}` ×{n:,} in {len(games)} game(s), e.g. {min(games)}")
     if problems["columns"]:
         lines.append("**New columns** (dropped from games/, kept in raw/):")
         lines += [f"`{c}` in {len(g)} game(s), e.g. {min(g)}" for c, g in sorted(problems["columns"].items())[:10]]
     if problems["failed"]:
         lines.append(f"**Failed files** ({len(problems['failed'])}):")
-        lines += [f"{g}: {e[:90]}" for g, e in problems["failed"][:10]]
+        lines += [_short(f"{g}: {e}") for g, e in problems["failed"][:10]]
+        if len(problems["failed"]) > 10:
+            lines.append(f"…and {len(problems['failed']) - 10:,} more (ledger rows with status 'failed')")
     if lines:
         notify.send("Load: needs a look", "\n".join(lines), "warn",
                     {k: f"{v:,}" for k, v in counts.items() if k.startswith(("game", "file"))})
 
 
-def _setup_logging() -> Path:
-    config.RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = config.RUN_LOG_DIR / f"{date.today()}.log"
-    logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
-                        format="%(asctime)s %(levelname)s %(name)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    return log_path
-
-
 def run(args: argparse.Namespace) -> int:
-    log_path = _setup_logging()
+    log_path = ledger.setup_logging()
     con = ledger.connect()
     run_id = ledger.start_run(con, "load", vars(args), log_path)
     counts: Counter = Counter()
-    problems = {"failed": [], "values": defaultdict(lambda: [0, set()]), "columns": defaultdict(set)}
+    problems = {"failed": [], "values": defaultdict(lambda: [0, set()]), "columns": defaultdict(set),
+                "uncastable": defaultdict(lambda: [0, set()])}
     try:
         tasks = plan_tasks(con, args)
         log.info("%d games to load (%s)", len(tasks), "redo" if tasks and tasks[0]["redo"] else "new files only")
@@ -370,6 +377,8 @@ def run(args: argparse.Namespace) -> int:
             log.warning("new value: %s = %r x%d in %d game(s), e.g. %s", c, v, n, len(games), min(games))
         for c, games in sorted(problems["columns"].items()):
             log.warning("new column: %s in %d game(s), e.g. %s", c, len(games), min(games))
+        for c, (n, games) in sorted(problems["uncastable"].items()):
+            log.warning("uncastable: %s x%d in %d game(s), e.g. %s", c, n, len(games), min(games))
         if args.notify:
             alert(problems, counts)
         return 0

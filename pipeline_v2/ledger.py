@@ -5,6 +5,8 @@
             sha256, parsed name and status
     games   one row per (GameID, kind): which file is current, verified or not (filled from phase 2)
     runs    one row per job run: when, how it ended, counts
+    clashes games held out of serving/ because they share PitchUIDs with a game that stays (build.py)
+    serving one row per serving/ year file: what it was built from, so unchanged years are skipped
 
 Paths are stored relative to pipeline_v2/ (``config.HERE``), so raw/ + pipeline.db can be copied
 between machines as-is. WAL mode lets ``status`` and the app read while a run writes.
@@ -12,8 +14,9 @@ between machines as-is. WAL mode lets ``status`` and the app read while a run wr
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from pipeline_v2 import config
@@ -72,6 +75,27 @@ CREATE TABLE IF NOT EXISTS games (
     note         TEXT,
     PRIMARY KEY (game_id, kind)
 );
+
+CREATE TABLE IF NOT EXISTS clashes (                -- rewritten by every build
+    held_game  TEXT NOT NULL,                       -- left out of serving/
+    kept_game  TEXT NOT NULL,                       -- the served game it shares PitchUIDs with
+    shared     INTEGER NOT NULL,                    -- PitchUIDs in common
+    rule       TEXT NOT NULL,                       -- why kept_game won
+    run_id     INTEGER REFERENCES runs(run_id),
+    PRIMARY KEY (held_game, kept_game)
+);
+
+CREATE TABLE IF NOT EXISTS serving (
+    part        TEXT NOT NULL,                      -- D1 | Others
+    year        INTEGER NOT NULL,
+    path        TEXT NOT NULL,                      -- relative to pipeline_v2/
+    fingerprint TEXT NOT NULL,                      -- hash of its games, their files and when each was written
+    games       INTEGER NOT NULL,
+    rows        INTEGER NOT NULL,
+    built_at    TEXT NOT NULL,
+    run_id      INTEGER REFERENCES runs(run_id),
+    PRIMARY KEY (part, year)
+);
 """
 
 
@@ -105,6 +129,16 @@ def absolute(stored: str) -> Path:
 
 
 # ── runs ──────────────────────────────────────────────────────────────────────────────────────────
+def setup_logging() -> Path:
+    """Log to the console and to tonight's run log, logs/runs/YYYY-MM-DD.log (every job of a night
+    appends to the same file). Returns its path, for ``start_run``."""
+    config.RUN_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = config.RUN_LOG_DIR / f"{date.today()}.log"
+    logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(), logging.FileHandler(log_path)],
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    return log_path
+
+
 def start_run(con: sqlite3.Connection, job: str, args: dict | None = None,
               log_path: Path | None = None) -> int:
     with con:

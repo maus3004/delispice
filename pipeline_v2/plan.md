@@ -2,7 +2,7 @@
 
 Status (2026-10-08): **phases 0, 1 and 1b done.** The bulk download finished on the server (2026-10-08 00:13): every TrackMan file is in `pipeline_v2/raw/` and the ledger (`pipeline.db`), Discord notifications work, and the code is on the server (`main` @ `d516e5e`). The live app is unchanged: it still reads `data_pipeline/`.
 
-**Next session, start here:** phase 2. First the deferred SpinAxis3d column-order check on `raw/` (§2), then `load.py` with the baserunner fixes (§18) and `build.py`.
+**Next session, start here:** phase 2. The `raw/` scans are done (2026-10-08, §2) and the unverified-file decisions are made (§5, §6, §8, §16). Next: the baserunner fixes (§18), then `load.py` and `build.py`.
 
 The new pipeline lives in its own folder, **`pipeline_v2/`** (code, this plan, `docs/`), built on the **`pipeline-v2`** git branch. The old `data_pipeline/` keeps running untouched until cutover and is deleted in the cleanup.
 
@@ -51,16 +51,19 @@ Readers: `delispice_app` (`data.py`, `leaderboard.py`) and `backend/models` read
 | What's in the JSON? | Header plus `Plays[]`. BatSpeed/HAA/VAA are copies of CSV columns (58 / 58 identical). The new data is the swing path `BatPath.PreImpactSwing {Time, Barrel, UpperGrip}` (40–51 samples per swing) and raw camera tracks (`BatUnsmoothedXYZ`). Summer files are nearly empty (353 files, 0.08 MB average). Spring files (1,606, Feb–Jun 2026) average **9.4 MB**, with raw tracks on most plays and swing paths on ~15–30% of plays. All are Version 1.0.1. About 8% of 2026 games have a full-size JSON. |
 | Name suffixes seen | `_unverified`, `_unverified_playerpositioning_FHC`, `_battracking`, `_unverified_battracking`. Stadium names can contain spaces and dots (`David F. Couch`). **All 91,469 names on the FTP match the §5 pattern** (FTP inventory, 2026-10-06). |
 | Positioning files | `factory.sh` only ever saw 5, but the FTP holds **25,105** (1,640 verified, 23,465 unverified, 3.9 GB). We've never kept one, so the schema is unknown. |
-| Can a pitch appear in two games? | Yes, once: `20260221-` and `20260222-RiddlePaceField-1` share the same 178 `PitchUID`s (one game delivered under two dates; their `GameUID`s differ too). |
+| Can a pitch appear in two games? | Yes. Today's app data has 178 such `PitchUID`s (`20260221-` / `20260222-RiddlePaceField-1`, one game delivered under two dates). Serving every v2 game as is would give **56,411 in 381 game groups**: almost all pair a verified game with an unverified-only fragment or copy filed under another game number or date (e.g. `20240310-PioneerPark-6` is 23 pitches of `PioneerPark-2`; `20260704-Macon-1` is `20260629-Macon-1` with the wrong date). The §5 clash rule handles it. |
 | Missing dates | 1,827 pitch rows have a null `Date`. |
 | Quarantine history | 0 files quarantined in all 13 logged runs (the fix dictionary was built from a full scan). |
 | Server model setup | Only `cq_D1` artifacts exist (Jul 11). `lightgbm` isn't installed, so eye can't train there. The Mac has cq/eye/eyescore/rvstate/xrv for D1 + P4. |
 | FTP | TrackMan's FTP uses a **self-signed certificate** (why `factory.sh` disables verification). The password was never committed to git. The root has two folders, `v3/` (game files, by upload date) and `practice/` (contents not explored yet). |
-| Column-count variants | All 32,017 server CSVs are 167 or 170 columns, with no `SpinAxis3d*` block at all. Only 191 Mac CSVs (Jun 13 – Aug 2 2026) have the block: 199 columns, including `SpinAxis3dConfidence` (always empty so far), which today's pipeline drops. **Added to the v2 schemas** as a nullable string at TrackMan's position (after `SpinAxis3dVectorZ`), so the canonical schema is now 202 columns. TrackMan orders the `SpinAxis3dSeamOrientationBall…Amb1–4` block differently from the schema (one consistent order in all 191 files); output is reordered to the schema, so this is cosmetic. **Decide after the bulk download:** if every file uses TrackMan's order, match it; if it varies, keep the schema's tidy order. |
+| Column-count variants | Every FTP pitch CSV (63,790 stored, scanned 2026-10-08) has one of two layouts: **167 columns** (2022–2025) or **170** (2025–2026, adding `BatSpeed`, `VerticalAttackAngle`, `HorizontalAttackAngle`), both in exactly the schema's order, with no unknown columns. **No FTP file has the `SpinAxis3d*` block.** The 191 Mac CSVs that do (Cape Cod, Jun 13 – Aug 2 2026, 199 columns) came from another export; their FTP versions have the same pitches and identical values in every shared column. Nothing in the app or models uses the block. The v2 schema keeps the 32 `SpinAxis3d*` columns (202 total, incl. `SpinAxis3dConfidence`) in its own order; they stay empty unless TrackMan starts sending them. Those 191 games' SpinAxis3d values exist only in the Mac's old data. |
 | Game counts per year | 3,047 (2022), 3,939 (2023), 5,317 (2024), 9,282 (2025), 10,432 (2026 so far) |
 | Disk | 457 GB total, 302 GB free; the current data takes ~33 GB. |
 | FTP inventory (2026-10-06) | `/v3`: 949 day folders (2022 – 2026-09-28), each with one `CSV/` subfolder holding every file type. **91,469 files, 38.9 GB**: pitch CSVs 34,512 verified (11.0 GB) + 29,874 unverified (8.9 GB); bat-tracking JSON 983 + 995 (15.1 GB); positioning 1,640 + 23,465 (3.9 GB). 88,273 unique names; 3,009 names delivered more than once (2,187 with a different size; max 6 copies). Upload lag (folder date − game date): median 1 day, p90 3, p99 256, max 1,640 days, so TrackMan re-sends old games into new folders. |
 | FTP behavior | Login + encrypted transfers work with plain `ftplib` (self-signed cert, verification off; cert SHA-256 `5b940f17…6c6a`). MLSD returns size + modify time per file in one call (493 files in 0.5 s). Quirks: `OPTS MLST` is rejected (use the default facts), and MLSD lists `.`/`..` as `type=dir`. Supports `REST` (resume) and `XSHA256`. Speed: ~0.7 s fixed cost per file, ~5 MB/s on large files. |
+| Raw file scan (2026-10-08, 63,790 pitch CSVs) | No missing or duplicate `PitchUID` inside any file, and `GameID` = the file name key in every file. **1,193 files are empty** (header only), all unverified; 1,175 games have nothing but empty files. 35,511 games: 26,086 with both versions, 6,174 verified only, 3,251 unverified only (2,076 of them with pitches). |
+| `PitchUID` across versions (CSV) | Unverified → verified (26,086 games): identical in 71%, the verified version only adds pitches in 18%, and in **12% (3,069 games) some unverified `PitchUID`s disappear** (41,864 pitches; in 1,662 of those games every one has a same-position pitch in the verified file, i.e. a new ID). Re-sent versions: 74% identical, 14 games share none. So the JSON finding (170 / 170 identical) does not hold for CSVs. `Batter` / `Pitcher` change on 2.1% of pitches whose `PitchUID` stays the same (verification fixes names). The app's user data is unaffected: all 10 retags, 26,902 cluster assignments and 18,715 hand-confirmed pitches are in the versions v2 serves. |
+| Repeated pitch positions | Pitches sharing (`Inning`, `Top/Bottom`, `PAofInning`, `PitchofPA`) with another pitch in the same file: verified 0.1% of files, unverified later verified 1.6%, **unverified never verified 11%** (229 of 2,076 games; 34,760 pitches). They are not copies (≈0% share pitcher, batter, call and speed): different pitches with broken numbering, likely extra tracking sessions. |
 
 ### Storage estimates
 
@@ -172,7 +175,7 @@ pipeline_v2/
 
 ### Ledger sketch (`pipeline.db`)
 
-- **files** (one row per downloaded copy): `file_id, remote_path, ftp_size, ftp_modify, folder_date, name, path, sha256, game_id, kind (pitches/positioning/battracking/unknown), verified, status (new/duplicate/loaded/superseded/tracked/failed/unknown), error, rows, rows_dropped, warnings (json), first_seen, run_id`; unique on (remote_path, ftp_size, ftp_modify). Schema lives in `ledger.py`.
+- **files** (one row per downloaded copy): `file_id, remote_path, ftp_size, ftp_modify, folder_date, name, path, sha256, game_id, kind (pitches/positioning/battracking/unknown), verified, status (new/duplicate/loaded/superseded/tracked/failed/unknown, plus `empty` and `held` from phase 2, §6), error, rows, rows_dropped, warnings (json), first_seen, run_id`; unique on (remote_path, ftp_size, ftp_modify). Schema lives in `ledger.py`.
 - **games**: `game_id, kind, current_file, verified, level, year, game_uid, rows, updated_at, excluded, note`. One row per (game_id, kind). For positioning/battracking, `current_file` points into `raw/`.
 - **runs**: `run_id, job, args (json), started, finished, status (running/ok/failed), counts (json), error, log_path`
 - All paths are stored **relative to the data folder**, so `raw/` + `pipeline.db` can be copied between machines as-is.
@@ -209,11 +212,13 @@ flowchart TD
 - Name pattern: `YYYYMMDD-<stadium>-N[_unverified][_playerpositioning|_battracking][_variant].csv|json`
 - The key is the **filename key = `GameID`**, never `GameUID`.
 - A verified file always wins. An unverified file never replaces a verified one. A re-sent file with a new sha256 replaces the current version.
+- **Empty files** (header only) are never loaded and never replace a game: ledger `status = empty`.
+- **Unverified games are served only when clean:** they have pitches, no repeated pitch positions, and no `PitchUID` shared with another served game (§6). Otherwise they are held back until a verified version replaces them.
 - The losing file is marked `superseded` in the ledger; its raw file is kept.
 - The same rule tracks the current positioning/battracking file per game (ledger only, no conversion).
 - Every serving row carries `is_verified` and `source_file`.
-- Safety net: `build.py` checks that each `PitchUID` is unique across games. On a conflict it **keeps the most recently delivered game and flags both** in `status`. Override by setting `excluded` on either game in the ledger.
-- Retags are keyed by `PitchUID`, so they survive an unverified → verified swap (PitchUIDs matched in all 170 JSON pairs; confirm for CSVs after the redownload).
+- **Safety net: one pitch, one served game.** `build.py` checks that each `PitchUID` appears in only one served game. On a clash: (1) a verified game beats an unverified one, and the unverified game is held back entirely (in the 2026-10-08 data these are fragments or copies of the verified game under another number or date); (2) between two unverified games, keep the one that contains the other; (3) between two verified games, keep the most recently delivered. Every clash is shown in `status` and recorded in the ledger (the held-back game and the game it clashes with). Override by setting `excluded` in the ledger.
+- **`PitchUID` stays exactly as TrackMan sends it.** No composite or altered key: names change on verification (2.1% of pitches), so adding `Batter` / `Pitcher` would match worse than `PitchUID` alone. One version of each game is served, so an ID that changes between versions can't double-count. When a game's file is replaced, `load.py` records in the ledger how many `PitchUID`s carried over, appeared and disappeared (shown in `status`). Score caches (xRV, eye) refill through the nightly re-score. Retags and cluster confirmation are allowed only on verified pitches (App edit 8), so verification can't orphan them; both features are being retired.
 
 ### Why GameID, not GameUID
 
@@ -253,8 +258,11 @@ flowchart TD
 | Unreadable file; a missing or null key column (`PitchUID`, `GameID`, `Inning`, `Outs`, `Balls`, `Strikes`, `Top/Bottom`); duplicate `PitchUID` inside a file | **Fail the file.** Ledger `status=failed` + error. Not loaded; shown in `status`. |
 | Value not in an allowed list (new pitch type, typo, new `PitcherSet`) | **Load it** (load + warn), keep the value, record `column → value → count` in the ledger `warnings`. `status` and the Discord alert list new values so they can be added to the allowed lists or the fix map. |
 | Uncastable number | Set to null (as today) and count it in `warnings`. |
-| New column TrackMan added (not in the 201-column schema) | Load the game without it (the raw file keeps it), record the column in the ledger, and **ping it in `status` and Discord** so it can be added to the schema. |
+| New column TrackMan added (not in the 202-column schema) | Load the game without it (the raw file keeps it), record the column in the ledger, and **ping it in `status` and Discord** so it can be added to the schema. |
 | Impossible count (Outs 3, Balls 4…) | Drop the row (as today) and **count it** in `rows_dropped`. |
+| Empty file (header only) | **Don't load.** Ledger `status=empty`; never replaces a game; not counted as a failure. |
+| Unverified file with repeated pitch positions | **Hold back** (`status=held`, with the count): not loaded until a verified version replaces it. Shown in `status`. |
+| Unverified game sharing a `PitchUID` with another served game | Held back by `build.py` (§5 clash rule). |
 
 No more quarantine copies: the raw file stays in `raw/`. After updating the allowed lists or fix map, one command reruns the affected games from `raw/`: `run --retry-failed` for failed files, `run --reload-warned` for games that loaded with warnings (or `run --reload <GameID>` for specific games). New values also go out in a Discord alert (phase 2).
 
@@ -405,6 +413,7 @@ The "Change run environment" picker keeps working: run values still aren't store
   - **RV:** no artifact in v2. The two states live in `serving/`. (Today: `rvstate_<year>.parquet`.)
 - The app loads the model (`_cq_model` / `_eye_model`) and the score table (`_xrv_cache` / `_eye_cache`), joins scores by PitchUID, and live-scores only pitches missing from the table. With no model trained, the column is blank. That's the case for eye on the live site today (no eye artifacts and no `lightgbm` on the server).
 - The training CLIs default to `--level D1`; run them for every level.
+- **RE288 and model training use verified games only** (decided 2026-10-08). Unverified games are served for display (with the badge) but never feed the matrix or the models.
 - Train for **every Level × year with data, plus P4**. Levels as of 2026-10-03:
 
   | Level | Pitches | Games | Years |
@@ -437,6 +446,7 @@ The "Change run environment" picker keeps working: run values still aren't store
 - Newest game per level; how many games are still unverified
 - Failed files with errors; new category values; dropped-row counts
 - Duplicate `PitchUID`s; unknown file types
+- Held-back unverified files and games (with the reason and the clashing game); empty-file count; `PitchUID` carry-over on replaced games
 - Heights queue size, request rate, last block
 - Age of each model artifact vs the RE288 matrix
 - New columns TrackMan added (not in the schema)
@@ -501,6 +511,7 @@ New `serving/` columns (`is_verified`, `source_file`) don't break anything: the 
 5. **Show an "unverified" badge** on games whose rows have `is_verified = false`.
 6. **Pipeline page, behind the shortlist login.** A small page showing the `status` report (last runs, newest game per level, failures, new values, new columns, heights queue, disk), read from `pipeline.db`, so you can check without SSH. Only signed-in contributors (the existing initials + password login) can see it, because the site is public and `status` shows file names, errors and paths.
 7. **Run value from the row's own columns** (phase 5, cutover). Change `rv_store.attach_rv` to look up RE for the rows' `re288_state` and `next_re288_state` (blank when `half_complete` is false; RE after = 0 when the half-inning ended), instead of joining `rvstate_<year>.parquet` via `state_lookup`. Update its call site in `data.py` and the leaderboard's RV query (`leaderboard.py` joins the `rvstate` files by PitchUID). Remove `state_lookup`, `build_state_cache` and the `rvstate` CLI.
+8. **Retags and cluster confirmation on verified pitches only** (phase 5, cutover). The retag and AutoCluster actions skip rows with `is_verified = false`, and the app says why. Both features are slated for retirement, so this is a small guard, not new work.
 
 ---
 
@@ -554,11 +565,11 @@ Build and test locally first, but **don't delete the old files first**. Add the 
 - [x] **0. Prep (Mac, branch, no behavior change):** *done 2026-10-03, verified on the Mac: paths unchanged, retags/autocluster moved byte-for-byte, a real CSV validates with the pins, the app loads. On the server, installing the pins adds only `lightgbm` (pandera 0.32.0 and pandas 3.0.3 are already there).* `config.py` pointing at today's paths; App edits 2–3 from §11 (move user data out of `.cache`, switch to `config.py`); pin dependencies in `requirements.txt` and test that exact install on the Mac (§10.7); stop tracking the RE288 matrix in git (§10.5).
 - [x] **1. Ledger, names, download (Mac):** first, **check that TrackMan's FTP server supports what `download.py` needs** *(done 2026-10-06, see §2: works with plain `ftplib`; handle the MLSD quirks; the bulk download is 91,469 files / 38.9 GB, ~15–20 h on one connection because of the per-file cost, so use 3 connections for the backfill only)*: FTPS login with Python's `ftplib` and the self-signed certificate, MLSD listings (or a fallback to per-file SIZE/MDTM), the folder layout (confirm `v3/YYYY/MM/DD/CSV/` and that `practice/` is skipped), and download speed. Then `ledger.py`, `names.py` with tests on every real name in the logs, and `download.py`. *(Written and tested 2026-10-06: `names.py` parses all 88,273 FTP names and 34,100 server names with correct splits. `download.py`: a dry run changes nothing, re-runs skip known files, identical re-deliveries become `duplicate` rows without a second copy, changed re-deliveries are kept as separate versions, 3 parallel connections work, and downloads match the server's own SHA-256. 2026-10-07: a refused login (e.g. `530` too many connections) or a lapsed session is now a connection error: retried with a fresh login, then the run stops; before, it marked every remaining file `failed` for good.)* Then **merge to `main`, pull on the server** (with the four-step RE288 order, §10.5) *(done 2026-10-06: server at `1996c65`, graceful reload with no downtime, retags/autocluster moved to `state/` byte-for-byte, site OK)* **and run the bulk download there**: `download.py --all`, 3 connections (`config.BACKFILL_WORKERS`), ~7–8 h, detached so it survives logout (`nohup … < /dev/null &`). Start it by ~5 pm so it finishes before the old `factory.sh` opens its own FTP session at 02:00 (an extra connection could hit TrackMan's per-account limit); if a login is refused anyway, the run retries, then stops cleanly and resumes on re-run. *(Done 2026-10-08: run 1, 2026-10-07 14:19:49 → 2026-10-08 00:13:29, **9 h 54 m** with 3 connections (~28 min of it listing), longer than the 7–8 h estimate. 91,469 files = **90,844 new + 625 duplicates, 0 failed, 0 unknown names**; 38.73 GB in `raw/`. Checked: every stored file present with the listed size, no `.part` leftovers or unledgered files, 300 random files re-hashed to their ledger SHA-256, no warnings in the log; 285 GB disk free.)* The Mac's 49 test files and test ledger are throwaway: the Mac later works from copies pulled from the server.
 - [x] **1b. Discord notifications (before the bulk download):** `notify.py` + hook it into `download.py` (start / progress / stopped / finished). Design and choices in §17. Each later alert is wired into the phase that builds its source (2, 3b, 7); there is no separate alerts phase. *(Written 2026-10-07 and tested against a fake Discord + fake FTP: message colors and mentions, size trimming, Discord down/rejecting/missing URL never stops a download, refused logins and `kill` send STOPPED. Real test messages sent from the Mac and the server; deployed with `main` @ `d516e5e`.)*
-- [ ] **2. Load and build (Mac):** copy `baserunner_state.py` and `fix_dictionary.py` into `pipeline_v2/`, then fix the baserunner model there (§18; the old copy stays untouched). `load.py` + `build.py` → new `games/` + `serving/`. Compare row counts per level/year with the server's `wbaserunners/`. Check CSV PitchUIDs across unverified/verified pairs. Run the §18 accuracy checks before and after the fixes. Compare RE288 with the current matrix (differences expected, §18). **Alerts** (through `notify.py`): new category values from load + warn (with the affected games) and new columns TrackMan added.
+- [ ] **2. Load and build (Mac):** copy `baserunner_state.py` and `fix_dictionary.py` into `pipeline_v2/`, then fix the baserunner model there (§18; the old copy stays untouched). `load.py` + `build.py` → new `games/` + `serving/`. Compare row counts per level/year with the server's `wbaserunners/`. *(Scans of `raw/` done 2026-10-08, §2.)* Unverified handling per §5–§6: `empty` and `held` statuses, the one-pitch-one-game clash rule in `build.py`, `PitchUID` carry-over counts in the ledger; RE288 from verified games only (§8). Run the §18 accuracy checks before and after the fixes. Compare RE288 with the current matrix (differences expected, §18). **Alerts** (through `notify.py`): new category values from load + warn (with the affected games) and new columns TrackMan added.
 - [ ] **3. Models + local app test (Mac):** RE288, retrain cq + eye for every level + P4, re-score caches, built from the new `serving/`. Make App edit 7 (run value from columns) and compare RV against today's `rvstate` results. Run the app locally against `serving/`.
 - [ ] **3b. Orchestrator, heights service, basic status (Mac):** `run.py` (nightly + 1st-of-month sequence, lock, failure rules from §6, warm caches + graceful reload, worker-log cleanup), `heights.py` (always-on loop) + its systemd unit file in `deploy/`, and a basic `python -m pipeline_v2 status`. **Alerts:** a failed run or failed files, and the heights scraper blocked; decide whether the nightly run also posts a short daily summary (§17, choice 5). Phase 4 runs these on the server; phase 7 finishes `status`.
 - [ ] **4. Merge + parallel run (server):** merge to `main` (config still on old paths) and pull; install `lightgbm` and the other new pins from `requirements.txt`, then click through the live app (§10.7); run load/build/models into the new folders; run the v2 nightly by hand a few nights without reloading the app.
-- [ ] **5. Cutover (one commit):** copy `heights.csv` from `data_pipeline/` into `pipeline_v2/`; flip `config.py` (`PITCHES_DIR`, `RE288_PATH`, `HEIGHTS_CSV`), App edit 4, App edit 7 (run value from columns), App edit 1 (remove the button); pull + graceful reload; swap the crontab to the one v2 line; then install the heights service (admin step). Rollback = revert the commit + restore the old crontab.
+- [ ] **5. Cutover (one commit):** copy `heights.csv` from `data_pipeline/` into `pipeline_v2/`; flip `config.py` (`PITCHES_DIR`, `RE288_PATH`, `HEIGHTS_CSV`), App edit 4, App edit 7 (run value from columns), App edit 1 (remove the button), App edit 8 (retags/clusters on verified pitches only); pull + graceful reload; swap the crontab to the one v2 line; then install the heights service (admin step). Rollback = revert the commit + restore the old crontab.
 - [ ] **6. Cleanup (a week later):** `git rm` replaced scripts; delete old data folders, `factory.sh`, the untracked requirements file on the server; update `deploy/DEPLOY.md` (new cron line, heights service, `status`, graceful reload for code deploys instead of `sudo systemctl restart`).
 - [ ] **7. Polish:** finish `status`; pipeline page (behind the shortlist login) and unverified badge in the app (§11, items 5–6); check games by month per level for fall/exhibition games mixed into season data. **Alerts:** zero new files two nights in a row in season, and the disk projection / 80% full.
 - [ ] **8. Tests (bottom priority, once everything is in place):** a handful of real files covering the edge cases (unverified/verified pairs, a re-sent game, the double-dated Riddle Pace game, `David F. Couch`), run on both machines.
@@ -580,7 +591,13 @@ Decided:
 - App refresh: **warm caches + graceful HUP reload** (no sudo)
 - Rebuild index button: **removed; the refresh is the pipeline's job** (§11)
 - App extras: **unverified badge + pipeline page** (§11, items 5–6); no ExecReload change
-- Duplicate PitchUIDs across games: **keep the most recently delivered game, flag both in `status`**
+- Duplicate PitchUIDs across games: **verified beats unverified (the unverified game is held back); two unverified: keep the one that contains the other; two verified: keep the most recently delivered; flag every clash** (§5)
+- `PitchUID`: **kept exactly as TrackMan sends it, no composite key**; a replacement records carry-over counts in the ledger (§5)
+- Empty files: **never loaded, never replace a game** (`status = empty`)
+- Unverified games: **served only when clean** (pitches, no repeated positions, no shared `PitchUID`s); otherwise held back until verified (§6)
+- RE288 and model training: **verified games only** (§8)
+- Retags and cluster confirmation: **verified pitches only** (App edit 8); both to be retired
+- SpinAxis3d block: **keep the schema's order**; the FTP never sends the block (§2)
 - Unknown category values: **load + warn**. Record column → value → count in the ledger, list it in `status` and the Discord alert, and fix with `run --reload-warned` after updating the fix map.
 - Identical re-deliveries: **store one copy**; the ledger records every delivery (`duplicate` rows point at the stored copy)
 - Bulk download: **on the server, straight into its final `raw/`** (not the Mac)
@@ -610,7 +627,6 @@ Open: none.
 
 Deferred:
 - Ghost runner for D2 and WCL (§18): mixed evidence; decide while writing `load.py`.
-- `SpinAxis3dSeamOrientationBall…Amb1–4` column order: decide after the bulk download (§2).
 
 ---
 

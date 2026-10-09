@@ -24,6 +24,7 @@ Each file (plan.md §6):
                    PAofInning, PitchofPA): extra tracking sessions mixed in; waits for the verified file
     load + warn    values outside the allowed lists, columns not in the schema (dropped here, kept in
                    raw/), and repeated positions in a verified file are recorded in the ledger
+    fill           an empty Date gets the GameID's date (counted in the ledger warnings)
   and the loaded game gets the base-state columns (baserunner.py), is_verified and source_file.
 
 When a game's file is replaced, the ledger records how many PitchUIDs carried over (plan.md §5).
@@ -121,6 +122,10 @@ def transform(path: Path, game_id: str, verified: bool, source_file: str) -> tup
     ids = df["GameID"].unique().to_list()
     if ids != [game_id]:
         raise Reject("failed", f"GameID column {ids[:3]} doesn't match the file name ({game_id})")
+    no_date = df["Date"].null_count()
+    if no_date:                                     # the app picks years by Date, so these rows would be hidden
+        df = df.with_columns(pl.col("Date").fill_null(f"{game_id[:4]}-{game_id[4:6]}-{game_id[6:8]}"))
+        warnings["date_from_gameid"] = no_date
 
     repeated = df.height - df.unique(POSITION).height
     if repeated:

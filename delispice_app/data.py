@@ -249,16 +249,19 @@ def _build_index_parquet(role: str) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     r = ROLES[role]
     path = CACHE_DIR / r["cache"]
-    con = _con()
-    con.execute(f"""
-        COPY (
+    rows = f"""
           SELECT DISTINCT
             regexp_extract(filename, '{WBASE.name}/([^/]+)/', 1) AS Part,   -- D1 | Others
             Level, League, {r['team']} AS Team, {r['player']} AS Player, substr(Date, 1, 4) AS Year
           FROM read_parquet('{GLOB_ALL}', filename = true)
-          WHERE {r['player']} IS NOT NULL AND Date IS NOT NULL AND length(Date) >= 4
-        ) TO '{path}' (FORMAT PARQUET)
-    """)
+          WHERE {r['player']} IS NOT NULL AND Date IS NOT NULL AND length(Date) >= 4"""
+    if has_row_states():
+        # A level-year with only unverified games has no RE288 table or models (plan.md §8), so every
+        # RV / xRV / eye column would be blank: leave it out of the picker (plan.md §16, D5).
+        rows = (f"WITH r AS ({rows}), v AS (SELECT DISTINCT Level, substr(Date, 1, 4) AS Year "
+                f"FROM read_parquet('{GLOB_ALL}') WHERE is_verified) SELECT r.* FROM r SEMI JOIN v USING (Level, Year)")
+    con = _con()
+    con.execute(f"COPY ({rows}) TO '{path}' (FORMAT PARQUET)")
     con.close()
 
 

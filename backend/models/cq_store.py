@@ -67,6 +67,8 @@ def train(level: str, year: str, k: int = 800, alpha: float = 0.1):
         raise ValueError(f"re288_matrix has no rows for level={level} year={year}")
     # Whole games drop out, so the state after each ball is computed on complete half-innings first.
     df, skipped = cq.keep_verified(cq.filter_batted_balls(cq.compute_run_delta(_events(level, year), rem)))
+    if df.height <= k:     # the k-NN needs more reference balls than neighbours, or it can't score anything
+        raise ValueError(f"only {df.height:,} verified batted balls for {level} {year}; need more than k={k}")
     weights = cq.linear_weights(df)
     X = df.select(cq.FEATS).to_numpy().astype(float)
     y = df["PlayResult"].replace_strict(cq.LABEL_MAP, return_dtype=pl.Int64).to_numpy()
@@ -186,15 +188,22 @@ def main(argv=None):
     years = args.years or available(args.level)
     if not years:
         raise SystemExit(f"nothing trainable for level={args.level}")
-    for yr in years:
-        if not args.xrv_only:
-            print(f"training cq {args.level} {yr} …", flush=True)
-            m = train(args.level, yr, k=args.k, alpha=args.alpha)
-            print(f"  saved {_base(args.level, yr).name} ({m.meta['n_rows']:,} batted balls)")
-        if args.xrv or args.xrv_only:
-            print(f"caching xRV {args.level} {yr} …", flush=True)
-            path, n = build_xrv_cache(args.level, yr)
-            print(f"  saved {path.name} ({n:,} balls scored)")
+    failed = []
+    for yr in years:                  # one year failing doesn't stop the others
+        try:
+            if not args.xrv_only:
+                print(f"training cq {args.level} {yr} …", flush=True)
+                m = train(args.level, yr, k=args.k, alpha=args.alpha)
+                print(f"  saved {_base(args.level, yr).name} ({m.meta['n_rows']:,} batted balls)")
+            if args.xrv or args.xrv_only:
+                print(f"caching xRV {args.level} {yr} …", flush=True)
+                path, n = build_xrv_cache(args.level, yr)
+                print(f"  saved {path.name} ({n:,} balls scored)")
+        except Exception as e:
+            print(f"  FAILED {args.level} {yr}: {type(e).__name__}: {e}", flush=True)
+            failed.append(yr)
+    if failed:
+        raise SystemExit(f"cq {args.level}: failed for {failed}")
 
 
 if __name__ == "__main__":

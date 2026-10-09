@@ -1884,7 +1884,12 @@ def cb_refresh(_n, role):
 @app.callback(Output("retag-lasso-status", "children"), Input("move-graph", "selectedData"))
 def cb_lasso_status(sel):
     n = len(sel["points"]) if sel and sel.get("points") else 0
-    return f"{n:,} selected" if n else "(none selected)"
+    if not n:
+        return "(none selected)"
+    uids = [p["customdata"][6] for p in sel["points"] if p.get("customdata")]
+    skipped = len(uids) - len(data.verified_only(uids))
+    return f"{n:,} selected" + (f" ({skipped:,} from unverified games: retags and cluster edits apply to "
+                                f"verified pitches only)" if skipped else "")
 
 
 # The lasso retargets clusters while AutoCluster is active (cluster labels replace tags on the chart),

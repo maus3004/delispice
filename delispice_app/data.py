@@ -56,6 +56,11 @@ BATTER_COLS = [
     "Balls", "Strikes",              # count — the eye model's decision context
 ]
 
+# v2 data (plan.md §8) carries each pitch's own state transition and its game's verification flag;
+# today's data has neither (run value comes from the rvstate artifacts, and every game is verified).
+# Reports read these too whenever the data has them.
+ROW_STATE_COLS = ["re288_state", "next_re288_state", "half_complete", "RunsScored", "is_verified"]
+
 ROLES = {
     "pitcher": {"player": "Pitcher", "team": "PitcherTeam", "cache": "pitcher_index.parquet", "cols": PITCHER_COLS},
     "batter":  {"player": "Batter",  "team": "BatterTeam",  "cache": "batter_index.parquet",  "cols": BATTER_COLS},
@@ -66,13 +71,31 @@ ROLES = {
 _STR_COLS = {"Date", "Pitcher", "PitcherId", "PitcherThrows", "PitcherTeam", "Batter", "BatterId",
              "BatterSide", "BatterTeam", "Level", "PitchUID", "TaggedPitchType", "PitchCall",
              "KorBB", "PlayResult", "TaggedHitType"}
-_INT_COLS = {"Balls", "Strikes", "PitchofPA", "OutsOnPlay"}
+_INT_COLS = {"Balls", "Strikes", "PitchofPA", "OutsOnPlay", "RunsScored"}
+_BOOL_COLS = {"half_complete", "is_verified"}
+_STR_COLS |= {"re288_state", "next_re288_state"}
 
 
 def _schema_for(cols) -> dict:
-    s = {c: (pl.Utf8 if c in _STR_COLS else pl.Int64 if c in _INT_COLS else pl.Float64) for c in cols}
+    s = {c: (pl.Utf8 if c in _STR_COLS else pl.Int64 if c in _INT_COLS else pl.Boolean if c in _BOOL_COLS
+             else pl.Float64) for c in cols}
     s["Year"] = pl.Utf8
     return s
+
+
+@functools.lru_cache(maxsize=1)
+def has_row_states() -> bool:
+    """True for v2 data: every row carries ``next_re288_state``, ``half_complete`` and ``is_verified``."""
+    try:
+        return "next_re288_state" in pl.scan_parquet(GLOB_ALL).collect_schema().names()
+    except Exception:                          # no data yet
+        return False
+
+
+def _cols(role: str) -> list[str]:
+    """The role's report columns, plus the v2 per-row columns when the data has them."""
+    cols = ROLES[role]["cols"]
+    return cols + [c for c in ROW_STATE_COLS if c not in cols] if has_row_states() else cols
 
 
 ALL = "All"
@@ -230,7 +253,7 @@ def _build_index_parquet(role: str) -> None:
     con.execute(f"""
         COPY (
           SELECT DISTINCT
-            regexp_extract(filename, 'wbaserunners/([^/]+)/', 1) AS Part,
+            regexp_extract(filename, '{WBASE.name}/([^/]+)/', 1) AS Part,   -- D1 | Others
             Level, League, {r['team']} AS Team, {r['player']} AS Player, substr(Date, 1, 4) AS Year
           FROM read_parquet('{GLOB_ALL}', filename = true)
           WHERE {r['player']} IS NOT NULL AND Date IS NOT NULL AND length(Date) >= 4
@@ -350,7 +373,7 @@ def _rows_cached(role: str, player: str, level: str, team: str, years_key: tuple
     years_sel = list(years_key) if years_key else None
     parts = _partitions(role, player, level, team, years_sel)
     if not parts:
-        return pl.DataFrame(schema=_schema_for(r["cols"]))
+        return pl.DataFrame(schema=_schema_for(_cols(role)))
     globs = [str(WBASE / pt / yr / "**" / "*.parquet") for pt, yr in parts]
     glob_list = "[" + ", ".join("'" + g + "'" for g in globs) + "]"
     where, params = [f"{r['player']} = ?"], [player]
@@ -362,7 +385,7 @@ def _rows_cached(role: str, player: str, level: str, team: str, years_key: tuple
         where.append("substr(Date, 1, 4) IN (" + ", ".join("?" * len(years_sel)) + ")")
         params += years_sel
     con = _con()
-    df = con.execute(f"SELECT {', '.join(r['cols'])} FROM read_parquet({glob_list}) "
+    df = con.execute(f"SELECT {', '.join(_cols(role))} FROM read_parquet({glob_list}) "
                      f"WHERE {' AND '.join(where)}", params).pl()
     con.close()
     # Fetch + retags only. xRV is scored downstream in _scored_cached so the (RE level, year) the user
@@ -635,7 +658,25 @@ def _save_retags() -> None:
     _scored_cached.cache_clear()        # and the xRV-scored layer built on top of it
 
 
+def verified_only(uids) -> list[str]:
+    """``uids`` without the pitches from unverified games (plan.md §11, App edit 8). Retags and
+    cluster confirmations are keyed by PitchUID, and verification can give a pitch a new PitchUID
+    (12% of games, plan.md §2), so an edit made on an unverified pitch could silently vanish.
+    Today's data has only verified games: everything passes."""
+    uids = list(uids)
+    if not uids or not has_row_states():
+        return uids
+    con = _con()
+    bad = {r[0] for r in con.execute(
+        f"SELECT PitchUID FROM read_parquet('{GLOB_ALL}') WHERE NOT is_verified "
+        f"AND PitchUID IN (SELECT unnest(?::VARCHAR[]))", [uids]).fetchall()}
+    con.close()
+    return [u for u in uids if u not in bad]
+
+
 def set_pitch_overrides(uids, new: str | None, pitcher: str) -> None:
+    if new:
+        uids = verified_only(uids)
     d = load_retags()
     for u in uids:
         if new:
@@ -716,7 +757,10 @@ def cluster_state(pitcher: str) -> dict | None:
 def run_autocluster(pitcher: str, df: pl.DataFrame, use_release: bool = False,
                     k: int | None = None) -> dict:
     """Run the GMM on this pitcher's (current selection of) pitches and store the assignment.
-    ``k`` pins the cluster count; left ``None``, ICL picks it."""
+    ``k`` pins the cluster count; left ``None``, ICL picks it. Verified pitches only (App edit 8):
+    unverified ones keep their TaggedPitchType (see ``cluster_view``)."""
+    if "is_verified" in df.columns:
+        df = df.filter(pl.col("is_verified"))
     res = _cluster_mod().run_gmm(df, use_release=use_release, k=k)
     res["names"] = {str(i): None for i in range(res["k"])}
     _load_autocluster()[pitcher] = res
@@ -754,9 +798,11 @@ def cluster_view(df: pl.DataFrame, pitcher: str) -> pl.DataFrame:
     if not ent or df.height == 0 or "PitchUID" not in df.columns:
         return df
     m = {u: cluster_label(ent, c) for u, c in ent["assign"].items()}
+    unclustered = (pl.when(~pl.col("is_verified")).then(pl.col("TaggedPitchType")).otherwise(pl.lit(UNCLUSTERED))
+                   if "is_verified" in df.columns else pl.lit(UNCLUSTERED))   # unverified: never clustered
     cols = [(pl.when(pl.col("PitchUID").is_in(list(m)))
                .then(pl.col("PitchUID").replace(m))
-               .otherwise(pl.lit(UNCLUSTERED))).alias("TaggedPitchType")]
+               .otherwise(unclustered)).alias("TaggedPitchType")]
     if ent.get("conf"):
         cols.append(pl.col("PitchUID").replace_strict(ent["conf"], default=None,
                                                       return_dtype=pl.Float64).alias("ClusterConf"))
@@ -792,6 +838,7 @@ def set_cluster_assignments(pitcher: str, uids, cluster_idx: int) -> None:
     ent = cluster_state(pitcher)
     if ent is None:
         return
+    uids = verified_only(uids)
     conf = ent.setdefault("conf", {})
     reviewed = ent.setdefault("reviewed", [])
     for uid in uids:

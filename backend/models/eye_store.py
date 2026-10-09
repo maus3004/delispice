@@ -143,16 +143,23 @@ def main(argv=None):
     years = args.years or available(args.level)
     if not years:
         raise SystemExit(f"nothing trainable for level={args.level}")
-    for yr in years:
-        if not args.eye_only:
-            print(f"training eye {args.level} {yr} …", flush=True)
-            m = train(args.level, yr)
-            print(f"  saved {_base(args.level, yr).name} "
-                  f"({m.meta['n_rows']:,} decisions, {m.meta['n_swings']:,} swings)")
-        if args.eye or args.eye_only:
-            print(f"caching eye {args.level} {yr} …", flush=True)
-            path, n = build_eye_cache(args.level, yr)
-            print(f"  saved {path.name} ({n:,} pitches scored)")
+    failed = []
+    for yr in years:                  # one year failing doesn't stop the others
+        try:
+            if not args.eye_only:
+                print(f"training eye {args.level} {yr} …", flush=True)
+                m = train(args.level, yr)
+                print(f"  saved {_base(args.level, yr).name} "
+                      f"({m.meta['n_rows']:,} decisions, {m.meta['n_swings']:,} swings)")
+            if args.eye or args.eye_only:
+                print(f"caching eye {args.level} {yr} …", flush=True)
+                path, n = build_eye_cache(args.level, yr)
+                print(f"  saved {path.name} ({n:,} pitches scored)")
+        except Exception as e:
+            print(f"  FAILED {args.level} {yr}: {type(e).__name__}: {e}", flush=True)
+            failed.append(yr)
+    if failed:
+        raise SystemExit(f"eye {args.level}: failed for {failed}")
 
 
 if __name__ == "__main__":

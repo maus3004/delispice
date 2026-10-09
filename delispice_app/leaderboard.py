@@ -182,8 +182,13 @@ def _flags_sql(role: str) -> str:
 """
 
 
-def _rv_join_sql(level: str, years_key: tuple[str, ...]) -> tuple[str, str]:
-    """(JOIN clauses, aggregate exprs) computing REALIZED run value inside the aggregate pass.
+def _rv_join_sql(level: str, years_key: tuple[str, ...]) -> tuple[str, str, str]:
+    """(extra pool columns, JOIN clauses, aggregate exprs) computing REALIZED run value inside the
+    aggregate pass.
+
+    v2 data (App edit 7): every pitch row carries its own state before / after, so only the matrix
+    joins are needed, guarded by ``half_complete``. Today's data, described below, joins the
+    rvstate artifacts instead (that path goes at cleanup).
 
     Three joins: the season state-transition artifacts (unioned — PitchUID is globally unique), then
     the 288-row RE matrix twice, for the state before and the state after. The matrix is joined on
@@ -191,13 +196,25 @@ def _rv_join_sql(level: str, years_key: tuple[str, ...]) -> tuple[str, str]:
     reports' Auto behaviour. Doing it in DuckDB keeps ~2M transition rows out of Python entirely.
     Emits null columns when no artifact is built yet."""
     from backend.models import rv_store
+    lvl = (level or "").replace("'", "''")
+    rem = str(rv_store.REM_PATH).replace("'", "''")
+    none = ("", "", "NULL::DOUBLE AS sum_rv, 0::BIGINT AS n_rv")
+    if not lvl or lvl == ALL:
+        return none
+    if data.has_row_states():
+        joins = (f"LEFT JOIN read_parquet('{rem}') AS reb "
+                 f"  ON reb.re288_state = p.re288_state AND reb.Level = '{lvl}' AND reb.year = p.Year "
+                 f"LEFT JOIN read_parquet('{rem}') AS rea "
+                 f"  ON rea.re288_state = p.next_re288_state AND rea.Level = '{lvl}' AND rea.year = p.Year")
+        agg = ("sum(CASE WHEN p.half_complete THEN p.RunsScored + COALESCE(rea.run_expectancy, 0) "
+               "- reb.run_expectancy END) AS sum_rv, "
+               "count(CASE WHEN p.half_complete THEN reb.run_expectancy END)::BIGINT AS n_rv")
+        return ", re288_state, next_re288_state, half_complete, RunsScored", joins, agg
     yrs = years_key or tuple(data.years("pitcher"))
     paths = [str(rv_store._state_path(y)) for y in yrs if rv_store.state_exists(y)]
-    lvl = (level or "").replace("'", "''")
-    if not paths or not lvl or lvl == ALL:
-        return "", "NULL::DOUBLE AS sum_rv, 0::BIGINT AS n_rv"
+    if not paths:
+        return none
     lst = "[" + ", ".join(f"'{p}'" for p in paths) + "]"
-    rem = str(rv_store.REM_PATH).replace("'", "''")
     joins = (
         f"LEFT JOIN read_parquet({lst}) AS st ON st.PitchUID = p.PitchUID "
         f"LEFT JOIN read_parquet('{rem}') AS reb "
@@ -209,7 +226,7 @@ def _rv_join_sql(level: str, years_key: tuple[str, ...]) -> tuple[str, str]:
     # unknown — count(reb...) then leaves n_rv at 0 instead of inventing a value.
     agg = ("sum(st.RunsScored + COALESCE(rea.run_expectancy, 0) - reb.run_expectancy) AS sum_rv, "
            "count(reb.run_expectancy)::BIGINT AS n_rv")
-    return joins, agg
+    return "", joins, agg
 
 
 def _eye_join_sql(level: str, years_key: tuple[str, ...]) -> tuple[str, str]:
@@ -319,11 +336,11 @@ def pool(role: str, level: str, years_key: tuple[str, ...] = ()) -> pl.DataFrame
         return pl.DataFrame()
     r = data.ROLES[role]
     full_where = [f"{r['player']} IS NOT NULL", *where]
-    rv_join, rv_agg = _rv_join_sql(level, years_key)
+    rv_cols, rv_join, rv_agg = _rv_join_sql(level, years_key)
     eye_join, eye_agg = _eye_join_sql(level, years_key)
     con = data._con()
     df = con.execute(f"""
-        WITH p AS (SELECT {_flags_sql(role)}, PitchUID, substr(Date, 1, 4) AS Year
+        WITH p AS (SELECT {_flags_sql(role)}, PitchUID, substr(Date, 1, 4) AS Year{rv_cols}
                    FROM read_parquet({glob_list})
                    WHERE {' AND '.join(full_where)})
         SELECT Player, Team, PitchType, {_AGG_SQL}, {rv_agg}, {eye_agg}

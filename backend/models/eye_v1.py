@@ -107,8 +107,12 @@ def load_pitches(level: str, year: str) -> pl.DataFrame:
     scope_col = "League" if level == cq.P4_LEVEL else "Level"
     scope = (pl.col("League").is_in(cq.P4_LEAGUES) if level == cq.P4_LEVEL
              else pl.col("Level") == level)
+    from backend.models import rv_store
     lf = pl.scan_parquet([str(f) for f in files])
-    return lf.select(cq.with_verified(lf, [*_PITCH_COLS, scope_col])).filter(scope).drop(scope_col).collect()
+    names = lf.collect_schema().names()
+    state = [c for c in rv_store.ROW_STATE if c in names and c not in _PITCH_COLS]   # v2: run value from the row
+    return (lf.select(cq.with_verified(lf, [*_PITCH_COLS, scope_col]) + state)
+              .filter(scope).drop(scope_col).collect())
 
 
 def load_re_matrix(level: str, year: str) -> pl.DataFrame:

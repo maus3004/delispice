@@ -120,27 +120,41 @@ def re_lookup(level: str, year: str) -> pl.DataFrame | None:
     return r.select("re288_state", "run_expectancy") if r.height else None
 
 
-def attach_rv(df: pl.DataFrame, data_year: str, re_level: str, re_year: str) -> pl.Series | None:
-    """Run value for ``df`` (needs a PitchUID column), aligned to ``df``'s rows.
+# v2 rows carry their own transition (plan.md §8, App edit 7): no rvstate artifact needed.
+ROW_STATE = ["re288_state", "next_re288_state", "half_complete", "RunsScored"]
 
-    ``data_year`` selects the TRANSITION table (a fact about when the pitch was thrown);
-    ``re_level``/``re_year`` select the RUN ENVIRONMENT it is valued in. Those are deliberately
-    independent, which is what lets the app re-value a 2026 pitch against the 2022 D1 matrix.
-    Returns None when either artifact is missing."""
-    states = state_lookup(data_year)
+
+def attach_rv(df: pl.DataFrame, data_year: str, re_level: str, re_year: str) -> pl.Series | None:
+    """Run value for ``df``, aligned to ``df``'s rows.
+
+    The TRANSITION (state before, state after, runs) comes from the rows themselves when they carry
+    ``ROW_STATE`` (v2 data); otherwise from the ``rvstate_<data_year>`` artifact, joined on PitchUID
+    (today's data; this fallback goes at cleanup). ``re_level``/``re_year`` select the RUN
+    ENVIRONMENT it is valued in, independently, which is what lets the app re-value a 2026 pitch
+    against the 2022 D1 matrix. Null where the half-inning never recorded three outs. Returns None
+    when the matrix (or, for today's data, the rvstate artifact) is missing."""
     rem = re_lookup(re_level, re_year)
-    if states is None or rem is None or df.height == 0 or "PitchUID" not in df.columns:
+    if rem is None or df.height == 0:
         return None
-    j = (df.select("PitchUID")
-           .join(states, on="PitchUID", how="left")
+    if all(c in df.columns for c in ROW_STATE):
+        src = df.select(ROW_STATE)
+    else:
+        states = state_lookup(data_year)
+        if states is None or "PitchUID" not in df.columns:
+            return None
+        # rvstate holds complete half-innings only: a pitch it lacks gets no state, hence no RV.
+        src = df.select("PitchUID").join(states, on="PitchUID", how="left").with_columns(pl.lit(True).alias("half_complete"))
+    j = (src
            .join(rem.rename({"re288_state": "_b", "run_expectancy": "_re_b"}),
                  left_on="re288_state", right_on="_b", how="left")
            .join(rem.rename({"re288_state": "_a", "run_expectancy": "_re_a"}),
                  left_on="next_re288_state", right_on="_a", how="left")
            # No next state = the half-inning ended, and a completed inning is worth 0 going forward.
-           # Sound only because incomplete half-innings were dropped at build time.
+           # Sound only for complete half-innings, hence the half_complete guard.
            .with_columns(pl.col("_re_a").fill_null(0.0))
-           .with_columns((pl.col("RunsScored") + pl.col("_re_a") - pl.col("_re_b")).alias("rv")))
+           .with_columns(pl.when(pl.col("half_complete"))
+                           .then(pl.col("RunsScored").fill_null(0) + pl.col("_re_a") - pl.col("_re_b"))
+                           .alias("rv")))
     return j["rv"]
 
 

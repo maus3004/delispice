@@ -56,7 +56,7 @@ Readers: `delispice_app` (`data.py`, `leaderboard.py`) and `backend/models` read
 | Quarantine history | 0 files quarantined in all 13 logged runs (the fix dictionary was built from a full scan). |
 | Server model setup | Only `cq_D1` artifacts exist (Jul 11). `lightgbm` isn't installed, so eye can't train there. The Mac has cq/eye/eyescore/rvstate/xrv for D1 + P4. |
 | FTP | TrackMan's FTP uses a **self-signed certificate** (why `factory.sh` disables verification). The password was never committed to git. The root has two folders, `v3/` (game files, by upload date) and `practice/` (contents not explored yet). |
-| Column-count variants | Every FTP pitch CSV (63,790 stored, scanned 2026-10-08) has one of two layouts: **167 columns** (2022–2025) or **170** (2025–2026, adding `BatSpeed`, `VerticalAttackAngle`, `HorizontalAttackAngle`), both in exactly the schema's order, with no unknown columns. **No FTP file has the `SpinAxis3d*` block.** The 191 Mac CSVs that do (Cape Cod, Jun 13 – Aug 2 2026, 199 columns) came from another export; their FTP versions have the same pitches and identical values in every shared column. Nothing in the app or models uses the block. The v2 schema keeps the 32 `SpinAxis3d*` columns (202 total, incl. `SpinAxis3dConfidence`) in its own order; they stay empty unless TrackMan starts sending them. Those 191 games' SpinAxis3d values exist only in the Mac's old data. |
+| Column-count variants | Every FTP pitch CSV (63,790 stored, scanned 2026-10-08) has one of two layouts: **167 columns** (2022–2025) or **170** (2025–2026, adding `BatSpeed`, `VerticalAttackAngle`, `HorizontalAttackAngle`), both in exactly the schema's order, with no unknown columns. **No FTP file has the `SpinAxis3d*` block.** The 191 Mac CSVs that do (Cape Cod, Jun 13 – Aug 2 2026, 199 columns) came from another export; their FTP versions have the same pitches and identical values in every shared column. Nothing in the app or models uses the block. **The 32 `SpinAxis3d*` columns are dropped from the v2 schemas** (2026-10-08), which now hold exactly the 170 columns TrackMan sends, in its order; a 167-column file gets the 3 bat-tracking columns as nulls. If TrackMan ever sends the block, `load.py` reports it as new columns (§6). Those 191 games' SpinAxis3d values exist only in the Mac's old data. |
 | Game counts per year | 3,047 (2022), 3,939 (2023), 5,317 (2024), 9,282 (2025), 10,432 (2026 so far) |
 | Disk | 457 GB total, 302 GB free; the current data takes ~33 GB. |
 | FTP inventory (2026-10-06) | `/v3`: 949 day folders (2022 – 2026-09-28), each with one `CSV/` subfolder holding every file type. **91,469 files, 38.9 GB**: pitch CSVs 34,512 verified (11.0 GB) + 29,874 unverified (8.9 GB); bat-tracking JSON 983 + 995 (15.1 GB); positioning 1,640 + 23,465 (3.9 GB). 88,273 unique names; 3,009 names delivered more than once (2,187 with a different size; max 6 copies). Upload lag (folder date − game date): median 1 day, p90 3, p99 256, max 1,640 days, so TrackMan re-sends old games into new folders. |
@@ -258,7 +258,7 @@ flowchart TD
 | Unreadable file; a missing or null key column (`PitchUID`, `GameID`, `Inning`, `Outs`, `Balls`, `Strikes`, `Top/Bottom`); duplicate `PitchUID` inside a file | **Fail the file.** Ledger `status=failed` + error. Not loaded; shown in `status`. |
 | Value not in an allowed list (new pitch type, typo, new `PitcherSet`) | **Load it** (load + warn), keep the value, record `column → value → count` in the ledger `warnings`. `status` and the Discord alert list new values so they can be added to the allowed lists or the fix map. |
 | Uncastable number | Set to null (as today) and count it in `warnings`. |
-| New column TrackMan added (not in the 202-column schema) | Load the game without it (the raw file keeps it), record the column in the ledger, and **ping it in `status` and Discord** so it can be added to the schema. |
+| New column TrackMan added (not in the 170-column schema) | Load the game without it (the raw file keeps it), record the column in the ledger, and **ping it in `status` and Discord** so it can be added to the schema. |
 | Impossible count (Outs 3, Balls 4…) | Drop the row (as today) and **count it** in `rows_dropped`. |
 | Empty file (header only) | **Don't load.** Ledger `status=empty`; never replaces a game; not counted as a failure. |
 | Unverified file with repeated pitch positions | **Hold back** (`status=held`, with the count): not loaded until a verified version replaces it. Shown in `status`. |
@@ -597,7 +597,7 @@ Decided:
 - Unverified games: **served only when clean** (pitches, no repeated positions, no shared `PitchUID`s); otherwise held back until verified (§6)
 - RE288 and model training: **verified games only** (§8)
 - Retags and cluster confirmation: **verified pitches only** (App edit 8); both to be retired
-- SpinAxis3d block: **keep the schema's order**; the FTP never sends the block (§2)
+- SpinAxis3d block: **dropped from the v2 schemas** (170 columns, exactly what the FTP sends, §2)
 - Unknown category values: **load + warn**. Record column → value → count in the ledger, list it in `status` and the Discord alert, and fix with `run --reload-warned` after updating the fix map.
 - Identical re-deliveries: **store one copy**; the ledger records every delivery (`duplicate` rows point at the stored copy)
 - Bulk download: **on the server, straight into its final `raw/`** (not the Mac)
@@ -621,12 +621,12 @@ Decided:
 - Secrets: **uncommitted files only** (FTP password, Discord webhook URL)
 - Admin steps: **Matt runs them** from commands Claude provides
 - Folder + branch: **`pipeline_v2/` (separate from `data_pipeline/`), built on the `pipeline-v2` branch**; code, `plan.md` and `docs/` tracked, all data ignored
+- Ghost runner: **on for NWL, CPL, Cape Cod, Cali Collegiate, NECBL; off everywhere else, including D1, D2 and WCL** (`config.GHOST_RUNNER_LEVELS`, measured with `check_baserunner --ghost`, §18)
 - Rollout: **build + validate on the Mac, run in parallel on the server, cut over with one commit, clean up a week later** (§14)
 
 Open: none.
 
 Deferred:
-- Ghost runner for D2 and WCL (§18): mixed evidence; decide while writing `load.py`.
 
 ---
 
@@ -734,8 +734,20 @@ Only ~14% of games carry `StolenBase` / `CaughtStealing` labels, even in 2025–
 |---|---|---|
 | D1, D3, JUCO, NAIA | No leadoff sacrifices, no leadoff hit that drives in a run, leadoff home runs score 1 | **off** |
 | NWL, CPL, Cape Cod, Cali Collegiate, NECBL | Leadoff sacrifices in 5–22% of extra half-innings (impossible with empty bases); some 2-run leadoff home runs | **on** |
-| D2, WCL | Mixed: a few leadoff sacrifices, but leadoff home runs score 1 | **decide while writing `load.py`** |
+| D2, WCL | Mixed: a few leadoff sacrifices, but leadoff home runs score 1. Settled by accuracy: in extra innings the model mismatches `RunsScored` on 0.5% (D2) / 1.7% (WCL) of plays with the ghost off vs 5.1% / 2.6% with it on | **off** |
 | Others (USA Baseball, Area Code Games, East Coast Pro, TeamExclusive) | Too few extra innings to tell | off |
+
+### Done (2026-10-08): `pipeline_v2/baserunner.py` + `check_baserunner.py`
+
+All the fixes above are in `pipeline_v2/baserunner.py` (the old copy is untouched), plus `next_re288_state` and `half_complete`. On the same 30,536 game files (the app's current data):
+
+| Check | Old model | New model |
+|---|---|---|
+| Home-run probe | 96.3% | **97.8%** |
+| Runs reconciliation: over / under | 9,918 / 7,301 | **4,128 / 1,563** (−67% mismatches) |
+| Steal guess on labeled throws | 69.6% | **83.1%** |
+
+`half_complete` marks 99.0% of half-innings complete (the old RE288 rule's ~99%). The largest remaining mismatches are bases-loaded walks with no run (2,185) and home runs (952 over, 421 under): states already wrong from earlier, untracked events (wild pitches, passed balls and balks without a run aren't recorded in TrackMan's data).
 
 ### Accuracy checks (before vs after the fixes)
 
@@ -744,5 +756,5 @@ Only ~14% of games carry `StolenBase` / `CaughtStealing` labels, even in 2025–
 3. **Ghost probe:** leadoff home runs and leadoff sacrifices in extra innings, per level.
 4. **Steal guess:** accuracy on labeled games, scored as if they were unlabeled (today 71%; target ~81%).
 
-The script that produced these numbers was a one-off; rebuild it as a small check next to `load.py` so it can be rerun after any change to the model.
+`python -m pipeline_v2.check_baserunner` runs checks 1, 2 and 4 for the new and old models side by side; `--ghost` runs check 3 (extra innings per level, ghost runner on vs off); `--data` points it at other parquet files (e.g. `serving/` after phase 2).
 

@@ -2,10 +2,12 @@
 Pandera schema for Trackman college-baseball pitch-level CSVs.
 
 Column-count variants handled by `required=False`:
-  167 cols  = common core           (no SpinAxis3d*, no bat-tracking)
+  167 cols  = common core           (no bat-tracking)
   170 cols  = core + BatSpeed/VerticalAttackAngle/HorizontalAttackAngle
-  201 cols  = full (adds 31 SpinAxis3d* columns)
-  202 cols  = full + SpinAxis3dConfidence (summer 2026+)
+
+These are the only two layouts TrackMan's FTP sends (all 63,790 pitch CSVs, 2026-10-08). The 32
+SpinAxis3d* columns some other exports carry are left out of the v2 schema (plan.md §2); a file
+that ever sends them gets them reported as new columns, like any other column not listed here.
 
 STRICT mode: allowed-value sets contain only canonical values. Typos, casing
 variants, trailing spaces, stray ','/'.' and cross-column leakage FAIL validation
@@ -238,41 +240,8 @@ TRACKMAN_SCHEMA = DataFrameSchema(
     "VerticalAttackAngle":               Column(pl.Float64, nullable=True, required=False),
     "HorizontalAttackAngle":             Column(pl.Float64, nullable=True, required=False),
 
-    # --- Optional: SpinAxis3d block (201-col files only) ---
-    "SpinAxis3dTransverseAngle":         Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dLongitudinalAngle":       Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dActiveSpinRate":          Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSpinEfficiency":          Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dTilt":                    Column(pl.Utf8, nullable=True, required=False),   # clock-face string, not float
-    "SpinAxis3dVectorX":                 Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dVectorY":                 Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dVectorZ":                 Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dConfidence":              Column(pl.Utf8, nullable=True, required=False),   # free string (like the other *Confidence flags), summer 2026+
-    "SpinAxis3dSeamOrientationRotationX": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationRotationY": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationRotationZ": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallAngleHorizontalAmb1": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallAngleVerticalAmb1": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallXAmb1": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallYAmb1": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallZAmb1": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallAngleHorizontalAmb2": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallAngleVerticalAmb2": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallXAmb2": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallYAmb2": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallZAmb2": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallAngleHorizontalAmb3": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallAngleVerticalAmb3": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallXAmb3": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallYAmb3": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallZAmb3": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallAngleHorizontalAmb4": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallAngleVerticalAmb4": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallXAmb4": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallYAmb4": Column(pl.Float64, nullable=True, required=False),
-    "SpinAxis3dSeamOrientationBallZAmb4": Column(pl.Float64, nullable=True, required=False),
 
     },
-    strict=False,   # tolerate the 167/170/201 column-count differences
+    strict=False,   # tolerate the 167/170 column-count difference
     name="trackman_csv",
 )

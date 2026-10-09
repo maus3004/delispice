@@ -50,6 +50,11 @@ DISK_ALERT_PCT  = 80
 APP_SERVICE     = "delispice"   # systemd unit the pipeline gracefully reloads (HUP to its MainPID)
 NOTIFY_PROGRESS_S = 3600        # download --notify: a Discord progress message this often (plan.md §17)
 
+# ── Baserunner model ──────────────────────────────────────────────────────────────────────────────
+# Levels that start each extra half-inning (10th+) with a runner on 2nd (plan.md §18). Checked against
+# the data with `python -m pipeline_v2.check_baserunner --ghost`; every other level plays it straight.
+GHOST_RUNNER_LEVELS = {"NWL", "CPL", "Cape Cod Baseball League", "Cali Collegiate", "NECBL"}
+
 # ── Heights ───────────────────────────────────────────────────────────────────────────────────────
 HEIGHTS_RATE_S = 6.5      # seconds between Baseball Reference requests; never below ~4 (IP bans)
 

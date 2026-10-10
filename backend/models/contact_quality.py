@@ -45,6 +45,11 @@ def with_verified(lf: pl.LazyFrame, cols: list[str]) -> list[str]:
     return cols + (["is_verified"] if "is_verified" in lf.collect_schema().names() else [])
 
 
+class Refused(ValueError):
+    """A (level, year) a model won't train on by design: too few batted balls for cq, an incomplete
+    RE288 table for eye (plan.md §16). The training CLIs report it as skipped, not failed."""
+
+
 def keep_verified(df: pl.DataFrame) -> tuple[pl.DataFrame, int | None]:
     """Training rows from verified games only (plan.md §8): ``(rows to train on, unverified rows
     skipped)``. ``is_verified`` is per game, so whole games drop out and half-innings stay intact.

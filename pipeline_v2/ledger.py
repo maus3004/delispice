@@ -13,9 +13,12 @@ between machines as-is. WAL mode lets ``status`` and the app read while a run wr
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -126,6 +129,38 @@ def rel(path: Path) -> str:
 
 def absolute(stored: str) -> Path:
     return config.HERE / stored
+
+
+# ── one job at a time ─────────────────────────────────────────────────────────────────────────────
+LOCK_HELD_ENV = "PIPELINE_V2_LOCK_HELD"   # set by run.py for the steps it starts: they share its lock
+
+
+class Busy(Exception):
+    """Another pipeline job holds the lock."""
+
+
+@contextmanager
+def pipeline_lock(job: str):
+    """Hold the pipeline lock for a whole job, or raise Busy at once if another job has it (plan.md
+    §3: one schedule, one lock). The OS releases it when the process exits, even after a crash."""
+    if os.environ.get(LOCK_HELD_ENV) == "1":
+        yield
+        return
+    f = open(config.RUN_LOCK, "a+")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        f.seek(0)
+        holder = f.read().strip()
+        f.close()
+        raise Busy(f"another pipeline job is running ({holder or 'unknown'})") from None
+    try:
+        f.truncate(0)
+        f.write(f"{job}, pid {os.getpid()}, since {now()}\n")
+        f.flush()
+        yield
+    finally:
+        f.close()
 
 
 # ── runs ──────────────────────────────────────────────────────────────────────────────────────────

@@ -220,7 +220,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="games/ -> serving/")
     ap.add_argument("--all", action="store_true", help="rebuild every year file")
     ap.add_argument("--re288", action="store_true", help="also rebuild the RE288 matrix (verified games)")
-    return run(ap.parse_args(argv))
+    args = ap.parse_args(argv)
+    try:
+        with ledger.pipeline_lock("build"):
+            return run(args)
+    except ledger.Busy as e:
+        print(f"build: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -377,7 +377,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, help="download at most N files (testing)")
     ap.add_argument("--dry-run", action="store_true", help="list what would download; change nothing")
     ap.add_argument("--notify", action="store_true", help="post start / hourly progress / stopped / finished to Discord")
-    return run(ap.parse_args(argv))
+    args = ap.parse_args(argv)
+    if args.dry_run:                     # changes nothing, so it doesn't need the lock
+        return run(args)
+    try:
+        with ledger.pipeline_lock("download"):
+            return run(args)
+    except ledger.Busy as e:
+        print(f"download: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

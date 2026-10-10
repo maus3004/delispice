@@ -1,0 +1,30 @@
+# systemd unit for the always-on heights scraper (pipeline_v2/heights.py, plan.md §8).
+#
+# Baseball Reference heights + birthdays -> pipeline_v2/heights.csv, one request every 6.5 s,
+# sleeping when the queue is empty and for a day when BR blocks us. Install it only after the old
+# crontab (data_pipeline's nightly height_scraper) is gone: two scrapers would double the request
+# rate toward BR's ban threshold.
+#
+# Install (replace <LINUX_USER>, as for delispice.service):
+#   sudo cp deploy/delispice-heights.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now delispice-heights
+# Watch:  journalctl -u delispice-heights -f      Status:  .venv/bin/python -m pipeline_v2 status
+
+[Unit]
+Description=delispice heights scraper (Baseball Reference -> pipeline_v2/heights.csv)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<LINUX_USER>
+Group=<LINUX_USER>
+WorkingDirectory=/home/<LINUX_USER>/delispice
+ExecStart=/home/<LINUX_USER>/delispice/.venv/bin/python -m pipeline_v2.heights
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=60
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

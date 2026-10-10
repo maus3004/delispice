@@ -148,11 +148,11 @@ def team_label(acr: str) -> str:
     return team_maps()[0].get(acr, acr)
 
 
-# ── Player bio: height + birthday from data_pipeline/heights.csv (scraped by height_scraper.py) ────
+# ── Player bio: height + birthday from pipeline_v2/heights.csv (scraped by pipeline_v2/heights.py) ──
 # The table is keyed (Name, TrackManId). The app's manual edits are appended as Status='manual' rows
-# that win on read (last row for a key wins); height_scraper skips them (status isn't a retry status).
+# that win on read (last row for a key wins); heights.py never re-scrapes them.
 HEIGHTS_CSV = config.HEIGHTS_CSV
-# Column order for a NEW file only — must match height_scraper.FIELDS. An existing file is appended
+# Column order for a NEW file only — must match heights.FIELDS. An existing file is appended
 # using its own header (read below), so reads/writes stay aligned even if the schema drifts.
 _HEIGHTS_FIELDS = ["Name", "TrackManId", "HeightIn", "Height", "WeightLb", "BirthDate",
                    "Status", "BRUrl", "ScrapedAt"]
@@ -1025,7 +1025,7 @@ def percentile_pool(level: str, years_key: tuple[str, ...] = ()) -> pl.DataFrame
 
 
 def clear_percentile_pools() -> None:
-    """Drop the cached pools (used by ⟳ Rebuild index, so new games flow into the percentiles)."""
+    """Drop the cached pools so new games flow into the percentiles (the nightly run's warm step)."""
     percentile_pool.cache_clear()
     for f in CACHE_DIR.glob("pctpool_*.parquet"):
         f.unlink(missing_ok=True)

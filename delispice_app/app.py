@@ -488,9 +488,7 @@ selection = html.Div([
               dcc.Dropdown(id="player-dd", options=[], value=None, placeholder="Type a name to search…",
                            style={"width": "460px", "fontSize": "13px"})],
              style={"marginTop": "10px", "display": "flex", "alignItems": "center"}),
-    html.Div([html.Button("⟳ Rebuild index", id="refresh-btn", n_clicks=0,
-                          style={"fontSize": "12px", "cursor": "pointer"}),
-              html.Span(id="pick-status", style={"marginLeft": "12px", "color": "#666", "fontSize": "12px"})],
+    html.Div([html.Span(id="pick-status", style={"color": "#666", "fontSize": "12px"})],
              style={"marginTop": "10px"}),
     ]),
 ], style={"padding": "14px 16px", "background": "#faf7f7", "borderBottom": f"2px solid {MAROON}"})
@@ -1865,19 +1863,6 @@ def cb_splits(batter, count, role, pitcher, years_sel, level, team, re_lvl, re_y
         pitches = data.cluster_view(pitches, pitcher)     # keep the arsenal in cluster labels too
     dff = pitches.filter(report.hand_mask(batter) & report.count_mask(count))
     return _arsenal_block(dff, batter, count), _heat_patch(dff)
-
-
-# ── Rebuild the active role's cached picker index (e.g. after new games land) ─────────────────────
-@app.callback(
-    Output("pick-status", "children", allow_duplicate=True),
-    Input("refresh-btn", "n_clicks"), State("role-tabs", "value"), prevent_initial_call=True,
-)
-def cb_refresh(_n, role):
-    data.get_index(role, force_rebuild=True)
-    data.clear_percentile_pools()          # new games must flow into the percentile pools too
-    leaderboard.clear_pools()              # …and into the Lookup tab's leaderboard pools
-    s = data.index_stats(role)
-    return f"{role.title()} index rebuilt — {s['players']:,} {role}s · {s['teams']:,} teams · {s['combos']:,} combos."
 
 
 # ── Retag tool ───────────────────────────────────────────────────────────────────────────────────

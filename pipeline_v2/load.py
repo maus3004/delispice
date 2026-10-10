@@ -405,7 +405,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, help="worker processes (default: one per CPU)")
     ap.add_argument("--limit", type=int, help="load at most N games (testing)")
     ap.add_argument("--notify", action="store_true", help="post failed files / new values / new columns to Discord")
-    return run(ap.parse_args(argv))
+    args = ap.parse_args(argv)
+    try:
+        with ledger.pipeline_lock("load"):
+            return run(args)
+    except ledger.Busy as e:
+        print(f"load: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

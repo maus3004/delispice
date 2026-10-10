@@ -68,7 +68,7 @@ def train(level: str, year: str, k: int = 800, alpha: float = 0.1):
     # Whole games drop out, so the state after each ball is computed on complete half-innings first.
     df, skipped = cq.keep_verified(cq.filter_batted_balls(cq.compute_run_delta(_events(level, year), rem)))
     if df.height <= k:     # the k-NN needs more reference balls than neighbours, or it can't score anything
-        raise ValueError(f"only {df.height:,} verified batted balls for {level} {year}; need more than k={k}")
+        raise cq.Refused(f"only {df.height:,} verified batted balls for {level} {year}; need more than k={k}")
     weights = cq.linear_weights(df)
     X = df.select(cq.FEATS).to_numpy().astype(float)
     y = df["PlayResult"].replace_strict(cq.LABEL_MAP, return_dtype=pl.Int64).to_numpy()
@@ -173,6 +173,7 @@ def available(level: str) -> list[str]:
 
 def main(argv=None):
     print(config.data_mode(), flush=True)
+    from backend.models.contact_quality import Refused
     p = argparse.ArgumentParser(description="Train contact-quality (xRV) artifacts.")
     p.add_argument("--level", default="D1", help="Level to train (default: D1)")
     p.add_argument("--years", nargs="*", default=None,
@@ -199,6 +200,8 @@ def main(argv=None):
                 print(f"caching xRV {args.level} {yr} …", flush=True)
                 path, n = build_xrv_cache(args.level, yr)
                 print(f"  saved {path.name} ({n:,} balls scored)")
+        except Refused as e:          # by design (thin level / incomplete RE288): not a failure
+            print(f"  SKIPPED {args.level} {yr}: {e}", flush=True)
         except Exception as e:
             print(f"  FAILED {args.level} {yr}: {type(e).__name__}: {e}", flush=True)
             failed.append(yr)

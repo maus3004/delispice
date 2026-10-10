@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import logging
 import socket
 import urllib.error
@@ -38,6 +39,9 @@ def _cut(text: str, limit: int) -> str:
 
 def send(title: str, message: str = "", level: str = "info", fields: dict | None = None) -> bool:
     """Post one embed to the webhook. True if Discord accepted it; never raises."""
+    if os.environ.get("PIPELINE_V2_NOTIFY") == "0":      # tests: PIPELINE_V2_NOTIFY=0 mutes Discord
+        log.info("notifications off (PIPELINE_V2_NOTIFY=0); not sent: %s", title)
+        return False
     url = None
     try:
         s = config.secrets() if config.SECRETS_ENV.exists() else {}

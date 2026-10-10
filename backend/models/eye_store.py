@@ -131,6 +131,7 @@ def available(level: str) -> list[str]:
 
 def main(argv=None):
     print(config.data_mode(), flush=True)
+    from backend.models.contact_quality import Refused
     p = argparse.ArgumentParser(description="Train batter eye (swing-decision) artifacts.")
     p.add_argument("--level", default="D1", help="Level to train (default: D1)")
     p.add_argument("--years", nargs="*", default=None,
@@ -155,6 +156,8 @@ def main(argv=None):
                 print(f"caching eye {args.level} {yr} …", flush=True)
                 path, n = build_eye_cache(args.level, yr)
                 print(f"  saved {path.name} ({n:,} pitches scored)")
+        except Refused as e:          # by design (thin level / incomplete RE288): not a failure
+            print(f"  SKIPPED {args.level} {yr}: {e}", flush=True)
         except Exception as e:
             print(f"  FAILED {args.level} {yr}: {type(e).__name__}: {e}", flush=True)
             failed.append(yr)

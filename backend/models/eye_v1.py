@@ -167,7 +167,7 @@ def load_training_frame(level: str, year: str) -> tuple[pl.DataFrame, pl.DataFra
     # state can't price the counts. No eye for that (level, year) rather than a borrowed value (plan.md §16).
     missing = 288 - rem["re288_state"].n_unique()
     if missing:
-        raise ValueError(f"re288_matrix for {level} {year} lacks {missing} of 288 states; eye needs all of them")
+        raise cq.Refused(f"re288_matrix for {level} {year} lacks {missing} of 288 states; eye needs all of them")
     d, skipped = cq.keep_verified(prepare(load_pitches(level, year)))
     if d.height == 0:
         raise ValueError(f"no scorable pitches for level={level} year={year}")

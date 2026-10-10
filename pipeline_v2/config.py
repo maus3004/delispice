@@ -30,20 +30,21 @@ SERVING_DIR     = HERE / "serving"
 SERVING_PITCHES = SERVING_DIR / "pitches"          # pitches/{D1,Others}/YYYY/<level>_YYYY.parquet
 SERVING_RE288   = SERVING_DIR / "re288_matrix.parquet"
 LEDGER_DB       = HERE / "pipeline.db"             # the ledger (SQLite): files, games, runs
+RUN_LOCK        = HERE / "pipeline.lock"           # held by every pipeline job, so two never overlap
 RUN_LOG_DIR     = HERE / "logs" / "runs"           # one log per run, kept
 WORKER_LOG_DIR  = HERE / "logs" / "workers"        # per-worker logs, deleted after WORKER_LOG_DAYS
 SECRETS_ENV     = HERE / ".env"                    # FTP login + Discord webhook; never committed
 
 # ── What the app and models read ──────────────────────────────────────────────────────────────────
-# v2 unless the program was started with DELISPICE_DATA=old (see above). Heights move to
-# HERE / "heights.csv" in phase 3b, not with the switch; user data is the same in both modes.
+# v2 unless the program was started with DELISPICE_DATA=old (see above). Heights and user data are
+# the same in both modes.
 V2 = os.environ.get("DELISPICE_DATA") != "old"
 _OLD = REPO / "data_pipeline"
 PITCHES_DIR   = SERVING_PITCHES      if V2 else _OLD / "wbaserunners"
 RE288_PATH    = SERVING_RE288        if V2 else _OLD / "re_matrices" / "re288_matrix.parquet"
 ARTIFACTS_DIR = HERE / "artifacts"   if V2 else REPO / "backend" / "models" / "artifacts"
 APP_CACHE_DIR = REPO / "delispice_app" / (".cache_v2" if V2 else ".cache")   # derived, safe to delete
-HEIGHTS_CSV   = _OLD / "heights.csv"
+HEIGHTS_CSV   = HERE / "heights.csv"                          # heights.py appends; the app adds manual rows
 TEAM_ACRONYMS = REPO / "backend" / "models" / "team_acronyms.csv"
 APP_STATE_DIR = REPO / "delispice_app" / "state"              # retags.json, autocluster.json (user data)
 
@@ -75,6 +76,10 @@ GHOST_RUNNER_LEVELS = {"NWL", "CPL", "Cape Cod Baseball League", "Cali Collegiat
 
 # ── Heights ───────────────────────────────────────────────────────────────────────────────────────
 HEIGHTS_RATE_S = 6.5      # seconds between Baseball Reference requests; never below ~4 (IP bans)
+HEIGHTS_RETRY_DAYS = 30   # re-try a player BR didn't match (not_found / ambiguous / no_height) after this long
+HEIGHTS_IDLE_S = 6 * 3600                 # queue empty: look again after this long
+HEIGHTS_BLOCK_S = 24 * 3600               # BR refusing us (403/429): wait this long before trying again
+HEIGHTS_STATE = HERE / "logs" / "heights_state.json"   # what the service is doing, for `status`
 
 
 def secrets() -> dict[str, str]:

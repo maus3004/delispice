@@ -363,7 +363,7 @@ def pool(role: str, level: str, years_key: tuple[str, ...] = ()) -> pl.DataFrame
 
 
 def clear_pools() -> None:
-    """Drop cached leaderboard pools (⟳ Rebuild index, so new games flow into the lookup)."""
+    """Drop cached leaderboard pools so new games flow into the lookup (the nightly run's warm step)."""
     pool.cache_clear()
     for f in CACHE_DIR.glob("lb_*.parquet"):
         f.unlink(missing_ok=True)

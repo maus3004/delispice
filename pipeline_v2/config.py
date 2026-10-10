@@ -1,21 +1,19 @@
 """Every path and setting shared by pipeline_v2 and the app, in one place (plan.md §3).
 
-The app and backend/models import the "read side" paths below instead of hardcoding
-``data_pipeline/...``, so moving the data is a one-file change. Until cutover (plan.md phase 5)
-those point at today's locations, so importing this module changes nothing for the live app.
+The app and backend/models import the "read side" paths below instead of hardcoding them, so
+moving the data is a one-file change. Since cutover (plan.md phase 5) they point at v2:
 
     from pipeline_v2 import config
-    config.PITCHES_DIR      # what the app reads today: data_pipeline/wbaserunners
+    config.PITCHES_DIR      # what the app reads: pipeline_v2/serving/pitches
 
-**Trying v2 before cutover.** Start a program with ``DELISPICE_DATA=v2`` and it reads v2's data,
-RE288 matrix and model artifacts instead, with its own app cache. The setting belongs to each
-running program, so the live app (started without it) and a v2 training run can share one checkout:
+**The old data, until cleanup.** Start a program with ``DELISPICE_DATA=old`` and it reads the
+pre-v2 ``data_pipeline/`` data, RE288 matrix and model artifacts instead, with its own app cache,
+e.g. to compare a report with what the site showed before cutover. The setting belongs to each
+running program; anything other than exactly "old", or no setting at all, means v2. The switch and
+the old paths go at cleanup (plan.md phase 6). The pipeline's own scripts (download, load, build)
+always use the v2 folders above.
 
-    DELISPICE_DATA=v2 .venv/bin/python -m backend.models.cq_store --level D1 --years 2025
-    DELISPICE_DATA=v2 .venv/bin/python delispice_app/app.py
-
-Anything other than exactly "v2", or no setting at all, means today's paths. Cutover makes v2 the
-default. The pipeline's own scripts (download, load, build) always use the v2 folders above.
+    DELISPICE_DATA=old .venv/bin/python -m delispice_app.app
 """
 from __future__ import annotations
 
@@ -37,9 +35,9 @@ WORKER_LOG_DIR  = HERE / "logs" / "workers"        # per-worker logs, deleted af
 SECRETS_ENV     = HERE / ".env"                    # FTP login + Discord webhook; never committed
 
 # ── What the app and models read ──────────────────────────────────────────────────────────────────
-# Today's locations unless the program was started with DELISPICE_DATA=v2 (see above). Heights move
-# to HERE / "heights.csv" at cutover, not with the switch; user data is the same in both modes.
-V2 = os.environ.get("DELISPICE_DATA") == "v2"
+# v2 unless the program was started with DELISPICE_DATA=old (see above). Heights move to
+# HERE / "heights.csv" in phase 3b, not with the switch; user data is the same in both modes.
+V2 = os.environ.get("DELISPICE_DATA") != "old"
 _OLD = REPO / "data_pipeline"
 PITCHES_DIR   = SERVING_PITCHES      if V2 else _OLD / "wbaserunners"
 RE288_PATH    = SERVING_RE288        if V2 else _OLD / "re_matrices" / "re288_matrix.parquet"
@@ -52,7 +50,7 @@ APP_STATE_DIR = REPO / "delispice_app" / "state"              # retags.json, aut
 
 def data_mode() -> str:
     """One line saying which data this program reads, for start-up messages."""
-    return (f"data: {'v2 (DELISPICE_DATA=v2)' if V2 else 'current (data_pipeline/)'}; "
+    return (f"data: {'v2' if V2 else 'old (DELISPICE_DATA=old, data_pipeline/)'}; "
             f"pitches {PITCHES_DIR.relative_to(REPO)}, RE288 {RE288_PATH.relative_to(REPO)}, "
             f"models {ARTIFACTS_DIR.relative_to(REPO)}")
 

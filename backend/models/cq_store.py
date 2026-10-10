@@ -21,7 +21,7 @@ import polars as pl
 
 from pipeline_v2 import config
 
-ARTIFACT_DIR = config.ARTIFACTS_DIR       # backend/models/artifacts, or pipeline_v2/artifacts with DELISPICE_DATA=v2
+ARTIFACT_DIR = config.ARTIFACTS_DIR       # pipeline_v2/artifacts, or backend/models/artifacts with DELISPICE_DATA=old
 _EVENT_COLS = ["GameID", "Inning", "Top/Bottom", "PlayResult", "RunsScored",
                "Direction", "ExitSpeed", "Angle", "re288_state"]
 

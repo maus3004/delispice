@@ -83,14 +83,18 @@ def report(heights_queue: bool = True) -> str:
         f"{n:,} {s}" for s, n in Counter(s for s, _ in table.values()).most_common()) + ")")
     st = heights.load_state()
     if st:
-        out.append(f"  service: {st.get('state', '?')} (updated {_age(st.get('updated'))})"
-                   + (f"; last block {_age(st.get('last_block'))}" if st.get("last_block") else "")
-                   + (f"; last error: {str(st.get('last_error'))[:100]}" if st.get("last_error") else ""))
+        until = heights.cooldown_until(st)
+        out.append(f"  last batch: {st.get('state', '?')}, {_age(st.get('batch_done') or st.get('batch_started') or st.get('updated'))}"
+                   + (f", {st['last_batch']}" if st.get("last_batch") else "")
+                   + (f"; BR blocked us {_age(st['last_block'])}" if st.get("last_block") else "")
+                   + (f", no requests until {until:%Y-%m-%d %H:%M} UTC" if until else ""))
     else:
-        out.append("  service: no state yet (not started on this machine)")
+        out.append("  last batch: none on this machine yet")
     if heights_queue:
-        _, n_new, n_retry = heights.queue()
-        out.append(f"  queue: {n_new:,} new players, {n_retry:,} retries due")
+        _, n_new, _ = heights.queue()
+        misses = sum(1 for s, _ in table.values() if s in heights.RETRY_STATUSES)
+        out.append(f"  queue: {n_new:,} players without a row (~{n_new / config.HEIGHTS_PER_NIGHT:.0f} nights at "
+                   f"{config.HEIGHTS_PER_NIGHT} a night); {misses:,} misses, re-tried only with --retry-misses")
 
     du = shutil.disk_usage(config.HERE)
     raw = q("SELECT COALESCE(SUM(ftp_size), 0) FROM files WHERE path IS NOT NULL AND status != 'duplicate'")[0][0] / 1e9

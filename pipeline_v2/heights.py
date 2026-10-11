@@ -1,31 +1,31 @@
-"""Baseball Reference heights + birthdays -> heights.csv, as an always-on service (plan.md §8).
+"""Baseball Reference heights + birthdays -> heights.csv: a small batch each night (plan.md §8).
 
-    python -m pipeline_v2.heights              # run forever (the systemd service: deploy/delispice-heights.service)
-    python -m pipeline_v2.heights --once       # one pass over the queue, then exit
-    python -m pipeline_v2.heights --dry-run    # queue size + ETA, no requests
-    python -m pipeline_v2.heights --once --limit 3   # a quick live test
+    python -m pipeline_v2.heights                    # one batch of HEIGHTS_PER_NIGHT players (run.py does this nightly)
+    python -m pipeline_v2.heights --retry-misses     # also re-try players BR didn't match before
+    python -m pipeline_v2.heights --dry-run          # queue size + ETA, no requests
+    python -m pipeline_v2.heights --max-players 3    # a quick live test
 
-Ported from data_pipeline/height_scraper.py: matching, parsing and the file format are unchanged.
-What's new: players come from serving/ (verified games only, so names that verification later
-corrects aren't scraped), and instead of 250 players a night it works through the whole queue at one
-request every HEIGHTS_RATE_S, then sleeps HEIGHTS_IDLE_S and looks again.
+The old data_pipeline/height_scraper.py, reading serving/ (verified games only, so names that
+verification later corrects aren't scraped) and writing pipeline_v2/heights.csv. It keeps the old
+pace on purpose: HEIGHTS_PER_NIGHT players (~1.4 requests each, one request every HEIGHTS_RATE_S),
+once a night. An always-on version was blocked by BR after ~1,000 requests in 2 hours (2026-10-10),
+while 250 players a night ran for three months without a block: BR limits total volume, not just
+requests per minute.
 
-Queue: players not in heights.csv yet (latest season first, D1 first within a season, then most
-recently seen), then players BR didn't match (not_found / ambiguous / no_height) whose last try is
-older than HEIGHTS_RETRY_DAYS. Rows typed into the app (Status 'manual') are never re-scraped.
-heights.csv is append-only, one flushed row per player; the last row for a (Name, TrackManId)
-wins, here and in the app.
+Queue: players not in heights.csv yet, D1 first, then most recently seen. Players BR didn't match
+(not_found / ambiguous / no_height) are re-tried only with --retry-misses. Rows typed into the app
+(Status 'manual') are never re-scraped. heights.csv is append-only, one flushed row per player; the
+last row for a (Name, TrackManId) wins, here and in the app.
 
 Matching: search.fcgi for "First Last". A unique hit 302s straight to the player page. A results page
 is filtered to exact name matches whose BR active years overlap the seasons we saw the player (+/- 1
 year); if several survive, up to 3 candidate pages are checked for the player's school (TrackMan
 team acronym -> school via team_acronyms.csv). Every player page also yields the birthday.
 
-It never crashes: a server error or timeout skips the player for this pass and backs off (1 min,
-doubling up to 30); three straight 403/429s mean BR is refusing us (it bans IPs above ~20
-requests/min), so it posts to Discord and waits HEIGHTS_BLOCK_S; anything unexpected is logged and
-retried after 10 minutes. systemd restarts the process if it dies anyway. What it's doing is kept
-in HEIGHTS_STATE for `python -m pipeline_v2 status`.
+Failures: a server error or timeout skips that player (he stays queued) after a 60 s pause, and
+MAX_ERRORS in a row end the batch. Three straight 403/429s mean BR is refusing us: the batch stops,
+and no request goes out for HEIGHTS_BLOCK_COOLDOWN_DAYS. Exit code 1 for both, so run.py reports
+it. State for `python -m pipeline_v2 status` is in HEIGHTS_STATE.
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ from urllib.parse import quote_plus, urljoin
 import polars as pl
 import requests
 
-from pipeline_v2 import config, notify
+from pipeline_v2 import config
 
 log = logging.getLogger("heights")
 
@@ -61,7 +61,7 @@ FIELDS = ["Name", "TrackManId", "HeightIn", "Height", "WeightLb", "BirthDate",
 RETRY_STATUSES = {"not_found", "ambiguous", "no_height"}
 YEAR_TOLERANCE = 1          # BR active years may lag/lead our sightings by a season
 MAX_CANDIDATE_FETCHES = 3   # page fetches spent disambiguating one shared name
-ERROR_ALERT_AFTER = 10      # straight server errors / timeouts before a Discord message
+MAX_ERRORS = 5              # server errors / timeouts in a row that end the batch
 
 # names worth scraping: "Last, First" with letters on both sides (drops "1, Batter" test rows etc.)
 _NAME_OK = re.compile(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' .\-]*,\s*[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' .\-]*")
@@ -264,7 +264,7 @@ def gather_players() -> pl.DataFrame:
                    pl.col("Team").drop_nulls().unique().alias("teams"),
                    (pl.col("Level") == "D1").any().alias("is_d1"), pl.col("LastSeen").max().alias("last_seen"))
               .filter(pl.col("Name").str.contains(_NAME_OK.pattern))
-              .sort(["last_year", "is_d1", "last_seen"], descending=True)
+              .sort(["is_d1", "last_seen"], descending=True)
               .collect())
 
 
@@ -277,18 +277,16 @@ def load_table() -> dict[tuple[str, str], tuple[str, str]]:
                 for r in csv.DictReader(f)}
 
 
-def queue() -> tuple[list[dict], int, int]:
-    """(players to scrape, how many are new, how many are retries), new players first."""
+def queue(retry_misses: bool = False) -> tuple[list[dict], int, int]:
+    """(players to scrape, how many are new, how many misses are re-tried), new players first."""
     table = load_table()
-    retry_before = (date.today() - timedelta(days=config.HEIGHTS_RETRY_DAYS)).isoformat()
     new, retry = [], []
     for p in gather_players().iter_rows(named=True):
         done = table.get((p["Name"], p["TrackManId"]))
         if done is None:
             new.append(p)
-        elif done[0] in RETRY_STATUSES and done[1] < retry_before:
-            retry.append((done[1], p))
-    retry = [p for _, p in sorted(retry, key=lambda t: t[0])]       # longest-waiting first
+        elif retry_misses and done[0] in RETRY_STATUSES:
+            retry.append(p)
     return new + retry, len(new), len(retry)
 
 
@@ -312,99 +310,100 @@ def save_state(state: dict) -> None:
     os.replace(tmp, config.HEIGHTS_STATE)
 
 
-# ── The service ──────────────────────────────────────────────────────────────────────────────────
-def scrape(pending: list[dict], state: dict) -> Counter:
-    """One pass: resolve each player and append his row. Raises Blocked."""
+# ── The nightly batch ───────────────────────────────────────────────────────────────────────────
+def cooldown_until(state: dict) -> datetime | None:
+    """When BR may be asked again after a block, or None if it may be asked now."""
+    if not state.get("last_block"):
+        return None
+    until = datetime.fromisoformat(state["last_block"]) + timedelta(days=config.HEIGHTS_BLOCK_COOLDOWN_DAYS)
+    return until if until > datetime.now(timezone.utc) else None
+
+
+def scrape(batch: list[dict], state: dict) -> Counter:
+    """Resolve each player and append his row. Raises Blocked, or Transient after MAX_ERRORS in a row."""
     schools = load_school_map()
     client = BRClient(config.HEIGHTS_RATE_S)
     counts: Counter = Counter()
     errors = 0
     new_file = not config.HEIGHTS_CSV.exists()
     t0 = time.time()
-    with open(config.HEIGHTS_CSV, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDS)
-        if new_file:
-            w.writeheader()
-        for i, p in enumerate(pending, 1):
-            try:
-                row = resolve(client, p, schools)
-            except Transient as e:
-                errors += 1
-                counts["error (stays queued)"] += 1
-                wait = min(60 * 2 ** (errors - 1), 1800)
-                log.warning("%s: %s; backing off %d s", p["Name"], e, wait)
-                state["last_error"] = f"{_now()} {e}"
-                if errors == ERROR_ALERT_AFTER:
-                    notify.send("Heights: Baseball Reference keeps failing",
-                                f"{errors} errors in a row, the last: {e}. Still retrying, with longer waits.", "warn")
-                time.sleep(wait)
-                continue
-            errors = 0
-            w.writerow(row)
-            f.flush()                                    # every row is saved the moment it's scraped
-            counts[row["Status"]] += 1
-            if i % 25 == 0 or i == len(pending):
-                per = (time.time() - t0) / i
-                log.info("heights: %d/%d %s, ~%.1f h left", i, len(pending), dict(counts), per * (len(pending) - i) / 3600)
-                state.update(state="scraping", done_this_pass=dict(counts), requests=client.requests_made)
-                save_state(state)
+    try:
+        with open(config.HEIGHTS_CSV, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDS)
+            if new_file:
+                w.writeheader()
+            for i, p in enumerate(batch, 1):
+                try:
+                    row = resolve(client, p, schools)
+                except Transient as e:
+                    errors += 1
+                    counts["error (stays queued)"] += 1
+                    state["last_error"] = f"{_now()} {e}"
+                    if errors >= MAX_ERRORS:
+                        raise Transient(f"{errors} errors in a row, the last: {e}") from None
+                    log.warning("%s: %s; skipped, pausing 60 s", p["Name"], e)
+                    time.sleep(60)
+                    continue
+                errors = 0
+                w.writerow(row)
+                f.flush()                                # every row is saved the moment it's scraped
+                counts[row["Status"]] += 1
+                if i % 25 == 0 or i == len(batch):
+                    per = (time.time() - t0) / i
+                    log.info("heights: %d/%d %s, ~%.0f min left", i, len(batch), dict(counts), per * (len(batch) - i) / 60)
+    finally:
+        state.update(last_batch=dict(counts), requests=client.requests_made)
     return counts
 
 
-def serve(once: bool = False, dry_run: bool = False, limit: int | None = None) -> int:
+def run_batch(max_players: int, retry_misses: bool = False, dry_run: bool = False) -> int:
     state = load_state()
-    while True:
-        try:
-            pending, n_new, n_retry = queue()
-            pending = pending[:limit] if limit else pending
-            log.info("heights: %d to scrape (%d new, %d retries of misses older than %d days)",
-                     len(pending), n_new, n_retry, config.HEIGHTS_RETRY_DAYS)
-            if dry_run:
-                eta_h = len(pending) * config.HEIGHTS_RATE_S * 1.4 / 3600   # ~1.4 requests per player
-                log.info("dry run: ~%.1f h at %.1f s/request; next up: %s", eta_h, config.HEIGHTS_RATE_S,
-                         [p["Name"] for p in pending[:8]])
-                return 0
-            state.update(queue=len(pending), queue_new=n_new, queue_retry=n_retry, pass_started=_now())
-            if pending:
-                state["state"] = "scraping"
-                save_state(state)
-                counts = scrape(pending, state)
-                state.update(last_pass=dict(counts), last_pass_done=_now())
-                log.info("heights: pass done %s", dict(counts))
-            if once:
-                state["state"] = "stopped"
-                save_state(state)
-                return 0
-            state.update(state="idle", queue=0)
-            save_state(state)
-            time.sleep(config.HEIGHTS_IDLE_S)
-        except Blocked as e:
-            log.error("heights: BR is refusing us (%s); waiting %.0f h", e, config.HEIGHTS_BLOCK_S / 3600)
-            state.update(state="blocked", last_block=_now(), last_error=str(e))
-            save_state(state)
-            notify.send("Heights: Baseball Reference is blocking us",
-                        f"{e}. Rows so far are saved; trying again in {config.HEIGHTS_BLOCK_S / 3600:.0f} h.", "warn")
-            if once:
-                return 1
-            time.sleep(config.HEIGHTS_BLOCK_S)
-        except Exception as e:                         # never crash: log, wait, go again
-            log.exception("heights: unexpected error; retrying in 10 min")
-            state.update(state="error", last_error=f"{_now()} {type(e).__name__}: {e}")
-            save_state(state)
-            if once:
-                return 1
-            time.sleep(600)
+    until = cooldown_until(state)
+    if until and not dry_run:
+        log.info("heights: skipped: BR blocked us %s; no requests until %s",
+                 state["last_block"], until.isoformat(timespec="minutes"))
+        return 0
+    pending, n_new, n_retry = queue(retry_misses)
+    batch = pending[:max_players]
+    log.info("heights: %d players queued (%d new%s); this batch: %d", len(pending), n_new,
+             f", {n_retry} misses to re-try" if retry_misses else "", len(batch))
+    if dry_run:
+        per_night = config.HEIGHTS_PER_NIGHT
+        log.info("dry run: this batch ~%.0f min at %.1f s/request; the whole queue ~%.0f nights at %d a night; next up: %s",
+                 len(batch) * config.HEIGHTS_RATE_S * 1.4 / 60, config.HEIGHTS_RATE_S,
+                 len(pending) / per_night, per_night, [p["Name"] for p in batch[:8]])
+        return 0
+    if not batch:
+        return 0
+    state.update(state="scraping", batch_started=_now(), queue=len(pending))
+    save_state(state)
+    try:
+        counts = scrape(batch, state)
+        state.update(state="done", batch_done=_now())
+        log.info("heights: done %s (%d requests)", dict(counts), state.get("requests", 0))
+        return 0
+    except Blocked as e:
+        state.update(state="blocked", last_block=_now(), last_error=f"{_now()} {e}")
+        log.error("heights: BR is refusing us (%s); no requests for %d days", e, config.HEIGHTS_BLOCK_COOLDOWN_DAYS)
+        return 1
+    except Transient as e:
+        state.update(state="stopped (errors)")
+        log.error("heights: stopped: %s", e)
+        return 1
+    finally:
+        save_state(state)
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Baseball Reference heights -> heights.csv (always-on service)")
-    ap.add_argument("--once", action="store_true", help="one pass over the queue, then exit")
+    ap = argparse.ArgumentParser(description="Baseball Reference heights -> heights.csv (a small nightly batch)")
+    ap.add_argument("--max-players", type=int, default=config.HEIGHTS_PER_NIGHT,
+                    help=f"players this batch (default {config.HEIGHTS_PER_NIGHT}; keep it small, BR blocks volume)")
+    ap.add_argument("--retry-misses", action="store_true", help="also re-try not_found / ambiguous / no_height players")
     ap.add_argument("--dry-run", action="store_true", help="queue size + ETA, no requests")
-    ap.add_argument("--limit", type=int, help="scrape at most N players per pass (testing)")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s",
                         datefmt="%Y-%m-%d %H:%M:%S")
-    return serve(once=args.once, dry_run=args.dry_run, limit=args.limit)
+    return run_batch(args.max_players, args.retry_misses, args.dry_run)
 
 
 if __name__ == "__main__":

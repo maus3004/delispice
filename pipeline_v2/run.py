@@ -7,7 +7,7 @@
 
 Nightly: download (upload folders of the last 7 days) -> load -> build (changed years) -> re-score
 the changed level-years with the existing models -> refresh the app's disk caches -> graceful
-reload -> delete old worker logs -> Discord.
+reload -> delete old worker logs -> a small batch of Baseball Reference heights (heights.py) -> Discord.
 Monthly (the 1st, or the next run when one was missed): download --all (full FTP recheck), build
 --re288, and instead of re-scoring, retrain every level for the current season plus the past years
 whose year files changed since the last monthly run.
@@ -40,7 +40,7 @@ from pipeline_v2 import config, ledger, notify
 
 log = logging.getLogger("run")
 
-TIMEOUT_S = {"download": 6 * 3600, "load": 2 * 3600, "build": 3600, "model": 2 * 3600, "warm": 1800}
+TIMEOUT_S = {"download": 6 * 3600, "load": 2 * 3600, "build": 3600, "model": 2 * 3600, "warm": 1800, "heights": 2 * 3600}
 MODEL_LINES = ("saved", "SKIPPED", "FAILED", "failed for")   # trainer output worth keeping in the log
 MONTHLY_GAP_DAYS = 35            # no monthly run for this long (the 1st was missed): run it now
 
@@ -49,8 +49,9 @@ class StepFailed(Exception):
     pass
 
 
-def step(name: str, module_args: list[str], timeout: int, keep_output: bool = False) -> None:
-    """Run ``python -m <module_args>`` with the lock handed down. Raises StepFailed."""
+def step(name: str, module_args: list[str], timeout: int, keep: tuple[str, ...] = ()) -> list[str]:
+    """Run ``python -m <module_args>`` with the lock handed down; copies its output lines containing
+    any of ``keep`` into the run log and returns them. Raises StepFailed."""
     env = {**os.environ, ledger.LOCK_HELD_ENV: "1"}
     t0 = time.time()
     log.info("%s: starting (%s)", name, " ".join(module_args))
@@ -60,13 +61,13 @@ def step(name: str, module_args: list[str], timeout: int, keep_output: bool = Fa
     except subprocess.TimeoutExpired:
         raise StepFailed(f"{name}: still running after {timeout / 3600:.1f} h, stopped") from None
     lines = [ln for ln in (p.stdout + p.stderr).splitlines() if ln.strip()]
-    if keep_output:
-        for ln in lines:
-            if any(k in ln for k in MODEL_LINES):
-                log.info("  %s", ln.strip())
+    kept = [ln.strip() for ln in lines if keep and any(k in ln for k in keep)]
+    for ln in kept:
+        log.info("  %s", ln)
     if p.returncode != 0:
         raise StepFailed(f"{name} exited with {p.returncode}: " + " | ".join(lines[-4:])[-600:])
     log.info("%s: done in %.0f s", name, time.time() - t0)
+    return kept
 
 
 def last_run(con, job: str, since: str) -> tuple[int | None, dict]:
@@ -108,7 +109,7 @@ def rescore(level_years: dict[str, list[str]], problems: list[str]) -> int:
                 continue
             try:
                 step(f"re-score {module.rsplit('.', 1)[1]} {lv} {' '.join(ys)}",
-                     [module, "--level", lv, "--years", *ys, flag], TIMEOUT_S["model"], keep_output=True)
+                     [module, "--level", lv, "--years", *ys, flag], TIMEOUT_S["model"], keep=MODEL_LINES)
                 calls += 1
             except StepFailed as e:
                 problems.append(str(e))
@@ -135,7 +136,7 @@ def retrain(level_years: dict[str, list[str]], problems: list[str]) -> int:
         for module, flag in (("backend.models.cq_store", "--xrv"), ("backend.models.eye_store", "--eye")):
             try:
                 step(f"retrain {module.rsplit('.', 1)[1]} {lv} {' '.join(years)}",
-                     [module, "--level", lv, "--years", *years, flag], TIMEOUT_S["model"], keep_output=True)
+                     [module, "--level", lv, "--years", *years, flag], TIMEOUT_S["model"], keep=MODEL_LINES)
                 calls += 1
             except StepFailed as e:
                 problems.append(str(e))
@@ -254,6 +255,11 @@ def run(args: argparse.Namespace) -> int:
             counts["reload"] = "not needed (nothing changed)"
 
         counts["worker log folders removed"] = clean_worker_logs()
+        try:            # last, and independent of the rest: a block here is reported, nothing else waits on it
+            out = step("heights", ["pipeline_v2.heights"], TIMEOUT_S["heights"], keep=("heights: done", "heights: skipped"))
+            counts["heights"] = out[-1].split("heights: ", 1)[-1][:160] if out else "nothing queued"
+        except StepFailed as e:
+            problems.append(str(e))
         counts["took"] = f"{(time.time() - t0) / 60:.0f} min"
         counts["problems"] = problems
         ledger.finish_run(con, run_id, "ok", counts)

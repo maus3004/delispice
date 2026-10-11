@@ -76,10 +76,10 @@ GHOST_RUNNER_LEVELS = {"NWL", "CPL", "Cape Cod Baseball League", "Cali Collegiat
 
 # ── Heights ───────────────────────────────────────────────────────────────────────────────────────
 HEIGHTS_RATE_S = 6.5      # seconds between Baseball Reference requests; never below ~4 (IP bans)
-HEIGHTS_RETRY_DAYS = 30   # re-try a player BR didn't match (not_found / ambiguous / no_height) after this long
-HEIGHTS_IDLE_S = 6 * 3600                 # queue empty: look again after this long
-HEIGHTS_BLOCK_S = 24 * 3600               # BR refusing us (403/429): wait this long before trying again
-HEIGHTS_STATE = HERE / "logs" / "heights_state.json"   # what the service is doing, for `status`
+HEIGHTS_PER_NIGHT = 250   # players per nightly batch (~350 requests, ~40 min). BR also limits volume: an
+                          # always-on scraper was blocked after ~1,000 requests in 2 h (2026-10-10)
+HEIGHTS_BLOCK_COOLDOWN_DAYS = 3          # after BR blocks us (403/429), no requests for this long
+HEIGHTS_STATE = HERE / "logs" / "heights_state.json"   # the last batch and last block, for `status`
 
 
 def secrets() -> dict[str, str]:

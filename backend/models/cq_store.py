@@ -4,7 +4,7 @@ The k-NN model in ``contact_quality.py`` takes minutes to train (full-season sca
 NEVER trained at request time. Instead:
 
   * Train offline (here), once per (Level, Year):   python -m backend.models.cq_store
-    Artifacts land in ``backend/models/artifacts/`` as ``cq_{level}_{year}.npz + .json``
+    Artifacts land in ``pipeline_v2/artifacts/`` as ``cq_{level}_{year}.npz + .json``
     (~10 MB each; git-ignored — build them on each machine, the data is already there).
   * Serve from the artifact: ``load(level, year)`` -> fitted ContactQualityModel (or None if not
     trained). delispice_app caches loaded models in-process and scores batted balls per report.
@@ -21,7 +21,7 @@ import polars as pl
 
 from pipeline_v2 import config
 
-ARTIFACT_DIR = config.ARTIFACTS_DIR       # pipeline_v2/artifacts, or backend/models/artifacts with DELISPICE_DATA=old
+ARTIFACT_DIR = config.ARTIFACTS_DIR       # pipeline_v2/artifacts
 _EVENT_COLS = ["GameID", "Inning", "Top/Bottom", "PlayResult", "RunsScored",
                "Direction", "ExitSpeed", "Angle", "re288_state"]
 
@@ -54,7 +54,7 @@ def _events(level: str, year: str) -> pl.DataFrame:
     if not files:
         raise FileNotFoundError(f"no parquets for level={level} year={year} (checked Others/{year})")
     lf = pl.scan_parquet([str(f) for f in files])
-    return (lf.select(cq.with_verified(lf, [*_EVENT_COLS, "Level"]))
+    return (lf.select([*_EVENT_COLS, "Level", "is_verified"])
               .filter(pl.col("Level") == level).drop("Level").collect())
 
 
@@ -74,7 +74,7 @@ def train(level: str, year: str, k: int = 800, alpha: float = 0.1):
     y = df["PlayResult"].replace_strict(cq.LABEL_MAP, return_dtype=pl.Int64).to_numpy()
     model = cq.ContactQualityModel().fit(X, y, weights, k, alpha)
     model.meta = {"level": level, "year": year, "n_rows": df.height, "feats": cq.FEATS,
-                  "verified_only": skipped is not None, "unverified_rows_skipped": skipped or 0}
+                  "verified_only": True, "unverified_rows_skipped": skipped}
     model.save(_base(level, year))
     # Every cached xRV came out of the OLD model, so it is stale the instant the model changes.
     _xrv_path(level, year).unlink(missing_ok=True)

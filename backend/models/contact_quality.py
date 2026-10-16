@@ -23,7 +23,7 @@ _EVENT_COLS = ["GameID", "Inning", "Top/Bottom", "PlayResult", "RunsScored",
                "Direction", "ExitSpeed", "Angle", "re288_state"]
 
 # P4 is a League-based pseudo-level (Power-4 conferences), physically stored inside the D1 partition;
-# the re288_matrix carries matching Level="P4" rows built by re_matrix.py.
+# the re288_matrix carries matching Level="P4" rows built by pipeline_v2/build.py.
 P4_LEVEL   = "P4"
 P4_LEAGUES = ["SEC", "ACC", "BIG10", "BIG12"]
 
@@ -40,28 +40,19 @@ def compute_run_delta(df: pl.DataFrame, rem: pl.DataFrame) -> pl.DataFrame:
         .with_columns(pl.col("re_after").fill_null(0))
         .with_columns((pl.col("RunsScored") + pl.col("re_after") - pl.col("re_before")).alias("run_delta")))
 
-def with_verified(lf: pl.LazyFrame, cols: list[str]) -> list[str]:
-    """``cols``, plus ``is_verified`` when the data has it (v2 data does; today's data doesn't)."""
-    return cols + (["is_verified"] if "is_verified" in lf.collect_schema().names() else [])
-
-
 class Refused(ValueError):
     """A (level, year) a model won't train on by design: too few batted balls for cq, an incomplete
     RE288 table for eye (plan.md §16). The training CLIs report it as skipped, not failed."""
 
 
-def keep_verified(df: pl.DataFrame) -> tuple[pl.DataFrame, int | None]:
+def keep_verified(df: pl.DataFrame) -> tuple[pl.DataFrame, int]:
     """Training rows from verified games only (plan.md §8): ``(rows to train on, unverified rows
-    skipped)``. ``is_verified`` is per game, so whole games drop out and half-innings stay intact.
-    Today's data has no such column (it only ever held verified files): it passes through unchanged
-    and the count is None."""
-    if "is_verified" not in df.columns:
-        return df, None
+    skipped)``. ``is_verified`` is per game, so whole games drop out and half-innings stay intact."""
     return df.filter(pl.col("is_verified")).drop("is_verified"), int((~df["is_verified"]).sum())
 
 
 def load_events(level: str, year: str) -> pl.DataFrame:
-    """Scan one (level, year)'s wbaserunners parquets -> the columns we need (incl. Direction).
+    """Scan one (level, year)'s serving parquets -> the columns we need (incl. Direction).
     P4 has no partition dir of its own: read the D1 partition and keep only Power-4 League rows."""
     if level == P4_LEVEL:
         # P4 is League-based: most games sit in D1/, but some P4-League games carry a non-D1 Level
@@ -71,14 +62,14 @@ def load_events(level: str, year: str) -> pl.DataFrame:
         if not files:
             raise FileNotFoundError(f"no parquets for P4 year={year} under {PIPELINE}")
         lf = pl.scan_parquet([str(f) for f in files])
-        return (lf.select(with_verified(lf, [*_EVENT_COLS, "League"]))
+        return (lf.select([*_EVENT_COLS, "League", "is_verified"])
                   .filter(pl.col("League").is_in(P4_LEAGUES))
                   .drop("League").collect())
     files = sorted((PIPELINE / level / year).glob("**/*.parquet"))
     if not files:
         raise FileNotFoundError(f"no parquets for level={level} year={year} under {PIPELINE}")
     lf = pl.scan_parquet([str(f) for f in files])
-    return lf.select(with_verified(lf, _EVENT_COLS)).collect()
+    return lf.select([*_EVENT_COLS, "is_verified"]).collect()
 
 def load_re_matrix(level: str, year: str) -> pl.DataFrame:
     return (pl.read_parquet(REM_PATH)

@@ -108,10 +108,9 @@ def load_pitches(level: str, year: str) -> pl.DataFrame:
     scope = (pl.col("League").is_in(cq.P4_LEAGUES) if level == cq.P4_LEVEL
              else pl.col("Level") == level)
     from backend.models import rv_store
-    lf = pl.scan_parquet([str(f) for f in files])
-    names = lf.collect_schema().names()
-    state = [c for c in rv_store.ROW_STATE if c in names and c not in _PITCH_COLS]   # v2: run value from the row
-    return (lf.select(cq.with_verified(lf, [*_PITCH_COLS, scope_col]) + state)
+    state = [c for c in rv_store.ROW_STATE if c not in _PITCH_COLS]   # run value comes from the row
+    return (pl.scan_parquet([str(f) for f in files])
+              .select([*_PITCH_COLS, scope_col, "is_verified", *state])
               .filter(scope).drop(scope_col).collect())
 
 
@@ -144,18 +143,17 @@ def prepare(df: pl.DataFrame) -> pl.DataFrame:
 def attach_run_value(df: pl.DataFrame, level: str, year: str) -> pl.DataFrame:
     """Add ``run_value`` — the realized change in run expectancy across each pitch.
 
-    Delegates to ``rv_store``, which already precomputes the state transition (the "state after" is
-    the NEXT pitch in the half-inning, so it cannot be derived from a filtered frame). Null for the
-    ~1% of pitches in half-innings that never recorded three outs."""
+    Delegates to ``rv_store``, which reads each row's own state transition (the "state after" is
+    the NEXT pitch in the half-inning, so the pipeline stores it; a filtered frame can't derive it).
+    Null for the ~1% of pitches in half-innings that never recorded three outs."""
     from backend.models import rv_store
-    rv = rv_store.attach_rv(df, data_year=year, re_level=level, re_year=year)
+    rv = rv_store.attach_rv(df, re_level=level, re_year=year)
     if rv is None:
-        raise FileNotFoundError(f"rv state artifact missing for {year}; run: "
-                                f"python -m backend.models.rv_store --years {year}")
+        raise FileNotFoundError(f"re288_matrix has no rows for level={level} year={year} ({rv_store.REM_PATH})")
     return df.with_columns(rv.alias("run_value"))
 
 
-def load_training_frame(level: str, year: str) -> tuple[pl.DataFrame, pl.DataFrame, int | None]:
+def load_training_frame(level: str, year: str) -> tuple[pl.DataFrame, pl.DataFrame, int]:
     """``(prepared pitches with run_value, re288 matrix, unverified pitches skipped)`` for one
     (level, year). Verified games only (plan.md §8); scoring (``eye_store.scorable_pitches``) still
     covers every pitch."""
@@ -333,7 +331,7 @@ def train(level: str, year: str) -> EyeModel:
     model = EyeModel().fit(d, count_run_values(rem))
     model.meta = {"level": level, "year": year, "n_rows": d.height,
                   "n_swings": int(d["swung"].sum()), "feats": MODEL_FEATS,
-                  "verified_only": skipped is not None, "unverified_rows_skipped": skipped or 0}
+                  "verified_only": True, "unverified_rows_skipped": skipped}
     return model
 
 

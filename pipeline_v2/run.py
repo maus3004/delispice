@@ -285,9 +285,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--monthly", action="store_true", help="also do the monthly steps (automatic on the 1st)")
     ap.add_argument("--no-reload", action="store_true", help="don't reload the app (machines without the service)")
     args = ap.parse_args(argv)
-    if not config.V2:
-        print("run: refusing to run with DELISPICE_DATA=old (it would train into the old artifacts)", file=sys.stderr)
-        return 2
     args.log_path = ledger.setup_logging()
     signal.signal(signal.SIGTERM, _stop)          # `kill`: record the run as failed, like Ctrl-C
     try:

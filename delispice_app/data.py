@@ -35,7 +35,7 @@ WBASE = config.PITCHES_DIR
 _ACR_CANDIDATES = (REPO / "backend" / "models" / "team_acronyms.csv",
                    REPO / "backend" / "research" / "team_acronyms.csv")
 ACR_CSV = next((p for p in _ACR_CANDIDATES if p.exists()), _ACR_CANDIDATES[0])
-CACHE_DIR = config.APP_CACHE_DIR            # .cache_v2, or .cache with DELISPICE_DATA=old (never mixed)
+CACHE_DIR = config.APP_CACHE_DIR            # delispice_app/.cache_v2
 print(f"[delispice] {config.data_mode()}", flush=True)
 
 GLOB_ALL = str(WBASE / "**" / "*.parquet")
@@ -56,9 +56,8 @@ BATTER_COLS = [
     "Balls", "Strikes",              # count — the eye model's decision context
 ]
 
-# v2 data (plan.md §8) carries each pitch's own state transition and its game's verification flag;
-# today's data has neither (run value comes from the rvstate artifacts, and every game is verified).
-# Reports read these too whenever the data has them.
+# Every row carries its pitch's own state transition (run value, plan.md §8) and its game's
+# verification flag; both reports read them.
 ROW_STATE_COLS = ["re288_state", "next_re288_state", "half_complete", "RunsScored", "is_verified"]
 
 ROLES = {
@@ -83,19 +82,10 @@ def _schema_for(cols) -> dict:
     return s
 
 
-@functools.lru_cache(maxsize=1)
-def has_row_states() -> bool:
-    """True for v2 data: every row carries ``next_re288_state``, ``half_complete`` and ``is_verified``."""
-    try:
-        return "next_re288_state" in pl.scan_parquet(GLOB_ALL).collect_schema().names()
-    except Exception:                          # no data yet
-        return False
-
-
 def _cols(role: str) -> list[str]:
-    """The role's report columns, plus the v2 per-row columns when the data has them."""
+    """The role's report columns, plus the per-row state and verification columns."""
     cols = ROLES[role]["cols"]
-    return cols + [c for c in ROW_STATE_COLS if c not in cols] if has_row_states() else cols
+    return cols + [c for c in ROW_STATE_COLS if c not in cols]
 
 
 ALL = "All"
@@ -255,11 +245,10 @@ def _build_index_parquet(role: str) -> None:
             Level, League, {r['team']} AS Team, {r['player']} AS Player, substr(Date, 1, 4) AS Year
           FROM read_parquet('{GLOB_ALL}', filename = true)
           WHERE {r['player']} IS NOT NULL AND Date IS NOT NULL AND length(Date) >= 4"""
-    if has_row_states():
-        # A level-year with only unverified games has no RE288 table or models (plan.md §8), so every
-        # RV / xRV / eye column would be blank: leave it out of the picker (plan.md §16, D5).
-        rows = (f"WITH r AS ({rows}), v AS (SELECT DISTINCT Level, substr(Date, 1, 4) AS Year "
-                f"FROM read_parquet('{GLOB_ALL}') WHERE is_verified) SELECT r.* FROM r SEMI JOIN v USING (Level, Year)")
+    # A level-year with only unverified games has no RE288 table or models (plan.md §8), so every
+    # RV / xRV / eye column would be blank: leave it out of the picker (plan.md §16, D5).
+    rows = (f"WITH r AS ({rows}), v AS (SELECT DISTINCT Level, substr(Date, 1, 4) AS Year "
+            f"FROM read_parquet('{GLOB_ALL}') WHERE is_verified) SELECT r.* FROM r SEMI JOIN v USING (Level, Year)")
     con = _con()
     con.execute(f"COPY ({rows}) TO '{path}' (FORMAT PARQUET)")
     con.close()
@@ -478,15 +467,15 @@ def _with_xrv(df: pl.DataFrame, sel_level: str = ALL,
 
 def _with_rv(df: pl.DataFrame, sel_level: str = ALL,
              re_level: str | None = None, re_year: str | None = None) -> pl.DataFrame:
-    """Append an ``RV`` column: the pitch's REALIZED change in run expectancy. Null when the
-    artifacts aren't built, or when the pitch sat in an incomplete half-inning (~1%).
+    """Append an ``RV`` column: the pitch's REALIZED change in run expectancy. Null when the chosen
+    run environment has no RE288 matrix, or when the pitch sat in an incomplete half-inning (~1%).
 
-    RV cannot be derived here — it depends on the NEXT pitch in the half-inning, which belongs to a
-    different batter (and often a different pitcher) than the one whose rows we scanned. So the
-    state TRANSITION is precomputed per season, and the run-expectancy matrix is applied on top,
-    right here. The split matters: the transition is looked up by the pitch's OWN year (a fact),
-    while the matrix follows the Run-Expectancy override (a choice) — so forcing a different level
-    or season re-values every pitch instead of dropping the ones outside that population."""
+    RV cannot be derived from these rows alone — it depends on the NEXT pitch in the half-inning,
+    which belongs to a different batter (and often a different pitcher) than the one whose rows we
+    scanned. So the pipeline stores each pitch's state TRANSITION in its row, and the run-expectancy
+    matrix is applied on top, right here. The split matters: the transition is a fact about the
+    pitch, while the matrix follows the Run-Expectancy override (a choice) — so forcing a different
+    level or season re-values every pitch instead of dropping the ones outside that population."""
     from backend.models import rv_store
     out = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("RV"))
     if df.height == 0 or "PitchUID" not in df.columns:
@@ -497,7 +486,7 @@ def _with_rv(df: pl.DataFrame, sel_level: str = ALL,
         env_year = re_year or yr
         if not (env_level and env_year and yr):
             continue
-        rv = rv_store.attach_rv(grp, data_year=yr, re_level=env_level, re_year=env_year)
+        rv = rv_store.attach_rv(grp, re_level=env_level, re_year=env_year)
         if rv is not None:
             parts.append(grp.select("PitchUID").with_columns(rv.alias("rv")))
     if not parts:
@@ -664,10 +653,9 @@ def _save_retags() -> None:
 def verified_only(uids) -> list[str]:
     """``uids`` without the pitches from unverified games (plan.md §11, App edit 8). Retags and
     cluster confirmations are keyed by PitchUID, and verification can give a pitch a new PitchUID
-    (12% of games, plan.md §2), so an edit made on an unverified pitch could silently vanish.
-    Today's data has only verified games: everything passes."""
+    (12% of games, plan.md §2), so an edit made on an unverified pitch could silently vanish."""
     uids = list(uids)
-    if not uids or not has_row_states():
+    if not uids:
         return uids
     con = _con()
     bad = {r[0] for r in con.execute(
@@ -762,8 +750,7 @@ def run_autocluster(pitcher: str, df: pl.DataFrame, use_release: bool = False,
     """Run the GMM on this pitcher's (current selection of) pitches and store the assignment.
     ``k`` pins the cluster count; left ``None``, ICL picks it. Verified pitches only (App edit 8):
     unverified ones keep their TaggedPitchType (see ``cluster_view``)."""
-    if "is_verified" in df.columns:
-        df = df.filter(pl.col("is_verified"))
+    df = df.filter(pl.col("is_verified"))
     res = _cluster_mod().run_gmm(df, use_release=use_release, k=k)
     res["names"] = {str(i): None for i in range(res["k"])}
     _load_autocluster()[pitcher] = res
@@ -801,8 +788,8 @@ def cluster_view(df: pl.DataFrame, pitcher: str) -> pl.DataFrame:
     if not ent or df.height == 0 or "PitchUID" not in df.columns:
         return df
     m = {u: cluster_label(ent, c) for u, c in ent["assign"].items()}
-    unclustered = (pl.when(~pl.col("is_verified")).then(pl.col("TaggedPitchType")).otherwise(pl.lit(UNCLUSTERED))
-                   if "is_verified" in df.columns else pl.lit(UNCLUSTERED))   # unverified: never clustered
+    unclustered = (pl.when(~pl.col("is_verified")).then(pl.col("TaggedPitchType"))   # unverified: never clustered
+                     .otherwise(pl.lit(UNCLUSTERED)))
     cols = [(pl.when(pl.col("PitchUID").is_in(list(m)))
                .then(pl.col("PitchUID").replace(m))
                .otherwise(unclustered)).alias("TaggedPitchType")]

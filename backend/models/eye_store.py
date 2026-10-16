@@ -6,7 +6,7 @@ depends on the league-wide policy at that location — which delispice_app, scan
 rows, cannot see. So nothing is ever trained at request time:
 
   * Train offline, once per (Level, Year):   python -m backend.models.eye_store --eye
-    Artifacts land in ``backend/models/artifacts/`` as ``eye_{level}_{year}_{ump,swing,ev}.txt``
+    Artifacts land in ``pipeline_v2/artifacts/`` as ``eye_{level}_{year}_{ump,swing,ev}.txt``
     + ``.json`` (small; git-ignored — build them on each machine, the data is already there).
   * Serve from the artifact: ``load(level, year)`` -> fitted EyeModel (or None if not trained),
     plus ``eye_lookup(level, year)`` -> the precomputed PitchUID -> eye table.
@@ -36,7 +36,7 @@ import polars as pl
 from pipeline_v2 import config
 
 
-ARTIFACT_DIR = config.ARTIFACTS_DIR       # pipeline_v2/artifacts, or backend/models/artifacts with DELISPICE_DATA=old
+ARTIFACT_DIR = config.ARTIFACTS_DIR       # pipeline_v2/artifacts
 
 
 def _base(level: str, year: str) -> Path:

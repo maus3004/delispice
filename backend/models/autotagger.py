@@ -41,7 +41,7 @@ MIN_PITCHES_SPLIT   = 20                                             # floor for
 
 # ── Data prep (notebook cells 1 + 3) ──────────────────────────────────────────────────────────────
 def load_pitches(level: str, year: str) -> pl.DataFrame:
-    """Scan one (level, year)'s wbaserunners parquets -> the autotagger columns, with the
+    """Scan one (level, year)'s serving parquets -> the autotagger columns, with the
     notebook's pooled-analysis filters (drops Both/Undefined throwers and non-pitch tags)."""
     files = sorted((PIPELINE / level / year).glob("**/*.parquet"))
     if not files:

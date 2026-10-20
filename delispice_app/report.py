@@ -43,6 +43,10 @@ IN_PLAY = pl.col("PitchCall") == "InPlay"
 BATTED_BALL = IN_PLAY & pl.col("ExitSpeed").is_not_null()
 PITCH_NAMES  = {"FourSeamFastBall": "Four-Seam", "TwoSeamFastBall": "Two-Seam", "ChangeUp": "Changeup"}
 NON_PITCHES  = ["Undefined", "Other"]
+# Per-pitch Stuff+ columns (data._with_stuff) -> the model table headers, in display order after xRV/BBE.
+STUFF_GRADES = {"Stuff": "Stuff+", "WhiffPlus": "Whiff+", "FoulPlus": "Foul+", "ContactPlus": "Contact+"}
+# A pitch-type row's majority Stuff+ group (ties -> alphabetical, so a row always gets the same one).
+_IN_MAIN_GROUP = pl.col("StuffGroup") == pl.col("StuffGroup").drop_nulls().mode().sort().first()
 PITCH_COLORS = {"Four-Seam": "#d62728", "Fastball": "#d62728", "Two-Seam": "#ff7f0e", "Sinker": "#ff7f0e",
                 "Cutter": "#8c564b", "Slider": "#e6b800", "Sweeper": "#bcbd22", "Curveball": "#1f77b4",
                 "Changeup": "#2ca02c", "Splitter": "#9467bd", "Knuckleball": "#7f7f7f"}
@@ -129,9 +133,9 @@ def build_summary(df: pl.DataFrame) -> pl.DataFrame:
     outs = int(df["OutsOnPlay"].sum() or 0) + so
     retired = so + df.filter(pl.col("PlayResult").is_in(["Out", "Sacrifice"])).height
     return pl.DataFrame([{
-        "IP": f"{outs // 3}.{outs % 3}", "Pitches Thrown": n,
-        "Pitches per PA": num(n / bf) if bf else "", "Batters Faced": bf, "Batters Retired": retired,
-        "Walks + HBP": bb + hbp, "Strikeouts": so, "Hits": hits,
+        "IP": f"{outs // 3}.{outs % 3}", "NP": n,
+        "TBF": bf, "Batters Retired": retired,
+        "BB + HBP": bb + hbp, "SO": so, "Hits": hits,
         "Rel Height": num(df["RelHeight"].mean()), "Rel Side": num(df["RelSide"].mean()),
         "Extension": num(df["Extension"].mean()),
         "K%": pct(so / bf) if bf else "", "BB%": pct(bb / bf) if bf else "",
@@ -142,40 +146,62 @@ def build_summary(df: pl.DataFrame) -> pl.DataFrame:
     }])
 
 
+def _arsenal_agg(df: pl.DataFrame) -> pl.DataFrame:
+    """One row per pitch type (most used first): every number the arsenal and model tables show."""
+    return (df.filter(pl.col("TaggedPitchType").is_not_null() & ~pl.col("TaggedPitchType").is_in(NON_PITCHES))
+              .group_by("TaggedPitchType").agg(
+                  pl.len().alias("count"),
+                  pl.col("RelSpeed").mean().alias("velo"), pl.col("RelSpeed").max().alias("velo_max"),
+                  pl.col("SpinRate").mean().alias("spin"),
+                  pl.col("PitchCall").is_in(STRIKE_CALLS).mean().alias("strike"),
+                  # Zone % = in-zone pitches / pitches with a location (the heatmap's strike zone, ZONE)
+                  IN_ZONE.filter(HAS_LOC).mean().alias("zone"),
+                  (pl.col("PitchCall") == "StrikeSwinging").sum().alias("whiffs"),
+                  pl.col("PitchCall").is_in(SWING_CALLS).sum().alias("swings"),
+                  pl.col("InducedVertBreak").mean().alias("vb"), pl.col("HorzBreak").mean().alias("hb"),
+                  # circular mean of the spin axis (robust to the 0/360 wrap), later shown as a clock
+                  pl.col("SpinAxis").radians().sin().mean().alias("ax_sin"),
+                  pl.col("SpinAxis").radians().cos().mean().alias("ax_cos"),
+                  pl.col("Extension").mean().alias("ext"),
+                  pl.col("ExitSpeed").filter(BATTED_BALL).mean().alias("ev"),
+                  (pl.col("ExitSpeed") >= HARD_HIT_MPH).filter(BATTED_BALL).mean().alias("hh"),
+                  pl.col("xRV").mean().alias("xrv"),      # expected runs allowed per ball in play
+                  pl.col("RV").mean().alias("rv"),        # REALIZED runs per pitch (RE288 delta)
+                  # Stuff+ and its pieces: the plain average of the pitches' own grades (O2), over the
+                  # row's MAJORITY group only. Each pitch is graded within the group the model put it in,
+                  # and a tag row can straddle two (a changeup row with a few pitches graded as fastballs).
+                  *[pl.col(c).filter(_IN_MAIN_GROUP if "StuffGroup" in df.columns else pl.lit(True)).mean().alias(c)
+                    for c in STUFF_GRADES if c in df.columns],
+              ).sort("count", descending=True))
+
+
+def _pitch_name(r) -> str:
+    return PITCH_NAMES.get(r["TaggedPitchType"], r["TaggedPitchType"])
+
+
 def build_arsenal(df: pl.DataFrame) -> pl.DataFrame:
+    """Shape, usage and results per pitch type. The model numbers are in ``build_model_table``."""
     n = df.height
-    agg = (df.filter(pl.col("TaggedPitchType").is_not_null() & ~pl.col("TaggedPitchType").is_in(NON_PITCHES))
-             .group_by("TaggedPitchType").agg(
-                 pl.len().alias("count"),
-                 pl.col("RelSpeed").mean().alias("velo"), pl.col("RelSpeed").max().alias("velo_max"),
-                 pl.col("SpinRate").mean().alias("spin"),
-                 pl.col("PitchCall").is_in(STRIKE_CALLS).mean().alias("strike"),
-                 (pl.col("PitchCall") == "StrikeSwinging").sum().alias("whiffs"),
-                 pl.col("PitchCall").is_in(SWING_CALLS).sum().alias("swings"),
-                 pl.col("InducedVertBreak").mean().alias("vb"), pl.col("HorzBreak").mean().alias("hb"),
-                 # circular mean of the spin axis (robust to the 0/360 wrap), later shown as a clock
-                 pl.col("SpinAxis").radians().sin().mean().alias("ax_sin"),
-                 pl.col("SpinAxis").radians().cos().mean().alias("ax_cos"),
-                 pl.col("RelHeight").mean().alias("rh"),
-                 pl.col("RelSide").mean().alias("rs"), pl.col("Extension").mean().alias("ext"),
-                 pl.col("ExitSpeed").filter(BATTED_BALL).mean().alias("ev"),
-                 (pl.col("ExitSpeed") >= HARD_HIT_MPH).filter(BATTED_BALL).mean().alias("hh"),
-                 pl.col("xRV").mean().alias("xrv"),      # expected runs allowed per ball in play
-                 pl.col("RV").mean().alias("rv"),        # REALIZED runs per pitch (RE288 delta)
-             ).sort("count", descending=True))
     rows = []
-    for r in agg.iter_rows(named=True):
+    for r in _arsenal_agg(df).iter_rows(named=True):
         whiff = r["whiffs"] / r["swings"] if r["swings"] else None
         axis = (math.degrees(math.atan2(r["ax_sin"], r["ax_cos"])) % 360
                 if r["ax_sin"] is not None and r["ax_cos"] is not None else None)
-        rows.append({"Pitch": PITCH_NAMES.get(r["TaggedPitchType"], r["TaggedPitchType"]),
-                     "Pitch Count": r["count"], "Pitch Usage %": pct(r["count"] / n) if n else "",
+        rows.append({"Pitch": _pitch_name(r),
+                     "Count (%)": f"{r['count']:,} ({pct(r['count'] / n)})" if n else f"{r['count']:,}",
                      "Avg Velo": num(r["velo"], 1), "Max Velo": num(r["velo_max"], 1), "Avg Spin": num(r["spin"], 0),
-                     "Strike %": pct(r["strike"]), "WHIFF %": pct(whiff), "Vert Break": num(r["vb"]),
-                     "Horz Break": num(r["hb"]), "Tilt": spin_clock(axis), "Rel Height": num(r["rh"]),
-                     "Rel Side": num(r["rs"]), "Extension": num(r["ext"]), "Hard Hit %": pct(r["hh"]),
-                     "Avg EV": num(r["ev"]), "RV/100": rv100(r["rv"]), "xRV/BBE": num(r["xrv"], 3)})
+                     "Strike %": pct(r["strike"]), "Zone %": pct(r["zone"]), "WHIFF %": pct(whiff),
+                     "Vert Break": num(r["vb"]), "Horz Break": num(r["hb"]), "Tilt": spin_clock(axis),
+                     "Extension": num(r["ext"]), "Hard Hit %": pct(r["hh"]), "Avg EV": num(r["ev"])})
     return pl.DataFrame(rows)
+
+
+def build_model_table(df: pl.DataFrame) -> pl.DataFrame:
+    """The model table under the arsenal, same rows and order: run value (realized RV/100 and the
+    contact model's xRV/BBE), then Stuff+ and its pieces."""
+    return pl.DataFrame([{"Pitch": _pitch_name(r), "RV/100": rv100(r["rv"]), "xRV/BBE": num(r["xrv"], 3),
+                          **{label: num(r.get(c), 0) for c, label in STUFF_GRADES.items()}}
+                         for r in _arsenal_agg(df).iter_rows(named=True)])
 
 
 # ── Batter report (starting scaffold — tables/charts to be extended) ──────────────────────────────
@@ -439,6 +465,8 @@ def count_mask(selm):
 
 # ── Location heatmap surfaces ────────────────────────────────────────────────────────────────────
 ZONE = dict(b=1.5, t=3.3775, h=0.83)                    # strike zone in FEET: bottom, top, half-width
+HAS_LOC = pl.col("PlateLocSide").is_not_null() & pl.col("PlateLocHeight").is_not_null()
+IN_ZONE = (pl.col("PlateLocSide").abs() <= ZONE["h"]) & pl.col("PlateLocHeight").is_between(ZONE["b"], ZONE["t"])
 XR, YR = (-2.0, 2.0), (0.5, 4.5)                        # heatmap window (feet)
 MOVE_LIM = 30                                           # movement chart static ±30 in axes
 _gx = np.linspace(XR[0], XR[1], 70)
@@ -682,12 +710,69 @@ def movement_fig(pitches: pl.DataFrame, colors: dict | None = None) -> go.Figure
             mode="markers", name=f"{pt} ({s.height})",
             marker=dict(color=palette.get(pt, "#8c8c8c"), size=6, opacity=0.6), customdata=cd,
             hovertemplate=ht))
-    fig.update_layout(width=520, height=470, template="plotly_white",
+    fig.update_layout(width=460, height=450, template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, font=dict(size=9)),
         margin=dict(l=10, r=10, t=30, b=10),
         xaxis=dict(range=[-MOVE_LIM, MOVE_LIM], title="", zeroline=True, zerolinecolor="#ccc"),
         yaxis=dict(range=[-MOVE_LIM, MOVE_LIM], title="", zeroline=True, zerolinecolor="#ccc",
                    scaleanchor="x", scaleratio=1))
+    return fig
+
+
+SHOULDER_FRAC = 0.70       # arm-angle estimate: the shoulder sits at 70% of standing height
+
+
+def release_fig(pitches: pl.DataFrame, height_in: int | None = None, colors: dict | None = None) -> go.Figure:
+    """Release points (RelSide x RelHeight, pitcher's view: a RHP releases on the + side) per pitch
+    type. With the pitcher's height, each pitch type also gets its estimated arm angle: a right triangle
+    from the shoulder (centred over the rubber, at 70% of height) to the release point, angle =
+    atan(rise above the shoulder / |RelSide|), averaged over the pitch type's pitches. Its line runs
+    from the shoulder at that angle, as long as the type's average shoulder-to-release distance.
+    No height -> release points only."""
+    palette = colors or PITCH_COLORS
+    d = (pitches.filter(pl.col("TaggedPitchType").is_not_null() & ~pl.col("TaggedPitchType").is_in(NON_PITCHES)
+                        & pl.col("RelSide").is_not_null() & pl.col("RelHeight").is_not_null())
+                .with_columns(pl.col("TaggedPitchType").replace(PITCH_NAMES).alias("PT")))
+    sh = SHOULDER_FRAC * height_in / 12 if height_in else None
+    if sh is not None:
+        rise, out = pl.col("RelHeight") - sh, pl.col("RelSide").abs()
+        d = d.with_columns(arm=pl.arctan2(rise, out).degrees(), reach=(rise ** 2 + out ** 2).sqrt())
+    fig, lines = go.Figure(), []
+    for pt in d.group_by("PT").len().sort("len", descending=True)["PT"].to_list():
+        s, c = d.filter(pl.col("PT") == pt), palette.get(pt, "#8c8c8c")
+        name = pt
+        if sh is not None:
+            ang, reach = s["arm"].mean(), s["reach"].mean()
+            side = 1.0 if s["RelSide"].mean() >= 0 else -1.0
+            x1, y1 = side * reach * math.cos(math.radians(ang)), sh + reach * math.sin(math.radians(ang))
+            name += f" · {ang:.0f}°"
+            lines.append(go.Scatter(x=[0, x1], y=[sh, y1], mode="lines", line=dict(color=c, width=3),
+                                    legendgroup=pt, showlegend=False,
+                                    hovertemplate=f"<b>{pt}</b><br>Arm angle {ang:.0f}°<extra></extra>"))
+        fig.add_trace(go.Scatter(x=s["RelSide"].to_list(), y=s["RelHeight"].to_list(), mode="markers",
+            name=name, legendgroup=pt, marker=dict(color=c, size=5, opacity=0.45),
+            hovertemplate=f"<b>{pt}</b><br>Rel Side %{{x:.2f}} ft · Rel Height %{{y:.2f}} ft<extra></extra>"))
+    for tr in lines:                                    # arm lines on top of the release clouds
+        fig.add_trace(tr)
+    if sh is not None and lines:
+        fig.add_trace(go.Scatter(x=[0], y=[sh], mode="markers", showlegend=False,
+            marker=dict(color="#222", size=9, symbol="circle"),
+            hovertemplate=f"Shoulder (est.) {sh:.2f} ft = 70% of {height_in // 12}-{height_in % 12}<extra></extra>"))
+        # The pitcher's overall arm angle: the mean over every pitch (so pitch types count by usage),
+        # written beside the shoulder on the side away from the arm lines.
+        arm_side = 1.0 if d["RelSide"].mean() >= 0 else -1.0
+        fig.add_annotation(x=0, y=sh, text=f"<b>Avg arm angle {d['arm'].mean():.0f}°</b>", showarrow=False,
+                           xanchor="right" if arm_side > 0 else "left", xshift=-10 * arm_side,
+                           font=dict(size=12, color="#222"), bgcolor="rgba(255,255,255,0.85)")
+    title = "Release Point · Arm Angle (est.)" if sh is not None else "Release Point · add a height for arm angle"
+    fig.update_layout(width=560, height=450, template="plotly_white",
+        title=dict(text=title, x=0.5, xref="paper", y=0.97, yref="container", font=dict(size=13)),
+        legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=1.02, font=dict(size=11)),
+        margin=dict(l=10, r=10, t=40, b=10),
+        xaxis=dict(range=[-4.5, 4.5], title="Rel Side (ft)", zeroline=True, zerolinecolor="#ccc", fixedrange=True),
+        yaxis=dict(range=[0, 8], title="Rel Height (ft)", fixedrange=True, scaleanchor="x", scaleratio=1))
+    fig.add_annotation(text="Pitcher's view", x=1.0, y=0.0, xref="paper", yref="paper", xanchor="right",
+                       yanchor="bottom", showarrow=False, font=dict(size=11, color="#888"))
     return fig
 
 

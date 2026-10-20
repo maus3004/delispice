@@ -11,6 +11,7 @@ server in a native pop-up window via pywebview.
 """
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -22,7 +23,7 @@ import plotly.graph_objects as go
 from dash import ALL as ALLPM, Dash, Input, Output, Patch, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
-from . import data, leaderboard, report, scouting
+from . import data, game_report, leaderboard, report, scouting
 
 ALL = data.ALL
 RETAG_TYPES = ["Fastball", "Sinker", "FourSeamFastBall", "TwoSeamFastBall", "Cutter", "Slider",
@@ -44,14 +45,15 @@ def _title(text):
     return html.Div(text, style={"fontWeight": 600, "margin": "12px 0 3px", "fontFamily": FONT})
 
 
-def html_table(df, title=None, empty_msg="No data."):
-    """A polars DataFrame -> styled html.Table (maroon header), or an italic empty message."""
+def html_table(df, title=None, empty_msg="No data.", full_width=False):
+    """A polars DataFrame -> styled html.Table (maroon header), or an italic empty message.
+    ``full_width`` stretches the table to its container (to line tables up with each other)."""
     if df is None or df.height == 0:
         body = html.I(empty_msg)
     else:
         head = html.Tr([html.Th(c, style=TH) for c in df.columns])
         rows = [html.Tr([html.Td("" if v is None else v, style=TD) for v in r]) for r in df.iter_rows()]
-        body = html.Table([head, *rows], style=TABLE)
+        body = html.Table([head, *rows], style={**TABLE, "width": "100%"} if full_width else TABLE)
     return html.Div([_title(title), body]) if title else body
 
 
@@ -75,18 +77,21 @@ def _player_header(name, sub_bits, bio=None):
     return html.Div(children)
 
 
-def _bio_line(bio, report_years):
+def _bio_line(bio, report_years, on=None, edit_hint="below"):
     """The height / age / birthday / draft-eligibility line under a pitcher's name. Age + eligibility
-    use the report's season (single year -> that year's draft day) or today (multiple years)."""
+    use the report's season (single year -> that year's draft day) or today (multiple years); ``on``
+    (a date) overrides both: the Game Reports tab shows age on the game date and that season's draft."""
     if not bio or (bio["height_in"] is None and bio["birthdate"] is None):
-        return html.Div("Height / age unknown — add it with ✎ Edit height / birthday below.",
+        return html.Div(f"Height / age unknown — add it with ✎ Edit height / birthday {edit_hint}.",
                         style={"color": "#999", "fontSize": "12px", "fontStyle": "italic", "marginTop": "2px"})
     parts = []
     if bio["height"]:
         parts.append(bio["height"])
     bd = bio["birthdate"]
     if bd:
-        if len(report_years) == 1:
+        if on is not None:
+            draft_yr, age_ref = on.year, on
+        elif len(report_years) == 1:
             draft_yr, age_ref = report_years[0], report.draft_day(report_years[0])
         else:
             draft_yr, age_ref = date.today().year, date.today()
@@ -149,7 +154,12 @@ def _arsenal_block(dff, batter, count):
     label = f"{'/'.join(batter) if batter else 'All batters'} · {', '.join(count) if count else 'all counts'}"
     if dff.height == 0:
         return html.Div([_title(f"Arsenal · {label}"), html.I("No pitches match this split.")])
-    return _scroll(html_table(report.build_arsenal(dff), title=f"Arsenal · {label} · {dff.height:,} pitches"))
+    return html.Div([
+        _scroll(html_table(report.build_arsenal(dff), title=f"Arsenal · {label} · {dff.height:,} pitches",
+                           full_width=True)),
+        # The model numbers: same rows and order as the arsenal.
+        _scroll(html_table(report.build_model_table(dff), title="Model Tables")),
+    ])
 
 
 _VS_LABEL = {"All": "All pitchers", "Right": "vs RHP", "Left": "vs LHP"}
@@ -302,7 +312,7 @@ def _pct_panel(pitcher, level, years_sel):
                  style={"fontSize": "10.5px", "color": "#777", "textAlign": "center",
                         "marginBottom": "6px"}),
         *rows,
-    ], style={"width": "370px", "padding": "26px 14px 8px", "fontFamily": FONT})
+    ], style={"width": "340px", "flex": "0 0 auto", "padding": "26px 10px 8px", "fontFamily": FONT})
 
 
 # ── AutoCluster helpers ──────────────────────────────────────────────────────────────────────────
@@ -418,13 +428,15 @@ def _dropdown(did, options, value, width=None):
     return dcc.Dropdown(id=did, options=options, value=value, clearable=False, style=style)
 
 
-role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": "380px", "marginBottom": "10px"},
+# Retired tabs are off the tab bar, but their panels and callbacks stay in the code (hidden), so
+# bringing one back is removing it from this set. Lookup and Shortlist retired 2026-10-16.
+RETIRED_TABS = {"lookup", "shortlist"}
+_TABS = [("About", "about"), ("Lookup", "lookup"), ("Pitchers", "pitcher"), ("Batters", "batter"),
+         ("Game Reports", "game"), ("Shortlist", "shortlist")]
+_TABS = [(label, value) for label, value in _TABS if value not in RETIRED_TABS]
+role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": f"{110 * len(_TABS)}px", "marginBottom": "10px"},
                      colors={"primary": MAROON, "background": "#faf7f7", "border": "#e2c9cc"},
-                     children=[dcc.Tab(label="About", value="about"),
-                               dcc.Tab(label="Lookup", value="lookup"),
-                               dcc.Tab(label="Pitchers", value="pitcher"),
-                               dcc.Tab(label="Batters", value="batter"),
-                               dcc.Tab(label="Shortlist", value="shortlist")])
+                     children=[dcc.Tab(label=label, value=value) for label, value in _TABS])
 
 # Run-Expectancy (xRV) model picker. "Auto" scores each ball against its own (level, year) model;
 # any explicit pick re-scores every ball against that one trained RE matrix. Only (level, year) pairs
@@ -472,6 +484,68 @@ def _re_env_control(prefix):
     ])
 
 
+# Game Reports picker (game_report_decisions.md §2): Level -> Conference -> Team -> date -> player. Its own
+# controls, because the player tabs' Year checkboxes don't apply here: the typed date (or date range) picks
+# the season and narrows the player list to who played then.
+def _date_field(did):
+    # Dash's picker draws a white box as wide as its container, so the fixed width goes on a wrapper.
+    return html.Div(dcc.DatePickerSingle(id=did, display_format="MM/DD/YYYY", placeholder="MM/DD/YYYY",
+                                         clearable=True, first_day_of_week=0, style={"fontSize": "13px"}),
+                    style={"width": "170px", "flex": "0 0 auto"})
+
+
+_GR_RADIO = {"fontFamily": FONT, "fontSize": "13px", "display": "inline-block"}
+_SCOPE_ROW = {"display": "flex", "gap": "18px", "flexWrap": "wrap", "alignItems": "center"}
+_UPLOAD_BOX = {"width": "460px", "padding": "10px", "border": f"1px dashed {MAROON}", "borderRadius": "4px",
+               "textAlign": "center", "fontSize": "13px", "fontFamily": FONT, "background": "#fff", "cursor": "pointer"}
+gr_controls = html.Div(id="gr-controls", style={"display": "none"}, children=[
+    dcc.Store(id="gr-upload-id", storage_type="memory"),     # this browser session's upload (kept server-side)
+    html.Div([html.Span("Report for", style=LABEL),
+              dcc.RadioItems(id="gr-role", value="pitcher", inline=True, style=_GR_RADIO,
+                             inputStyle={"marginRight": "4px", "marginLeft": "10px"},
+                             options=[{"label": "Pitcher", "value": "pitcher"}, {"label": "Batter", "value": "batter"}]),
+              html.Span("Data", style={**LABEL, "marginLeft": "24px"}),
+              dcc.RadioItems(id="gr-source", value="data", inline=True, style=_GR_RADIO,
+                             inputStyle={"marginRight": "4px", "marginLeft": "10px"},
+                             options=[{"label": "Database games", "value": "data"},
+                                      {"label": "Upload a file", "value": "upload"}])],
+             style={"marginBottom": "8px"}),
+    # Upload (game_report_decisions.md §3): kept for this browser session only, never saved or shared.
+    html.Div(id="gr-upload-wrap", style={"display": "none"}, children=[
+        dcc.Upload(id="gr-upload", accept=".csv,.parquet", multiple=False, max_size=game_report.UPLOAD_MAX_BYTES,
+                   style=_UPLOAD_BOX,
+                   children=html.Div(["Drag a TrackMan CSV or parquet file here, or ", html.A("choose one"),
+                                      html.Div(f"Up to {game_report.UPLOAD_MAX_MB} MB · kept only for this "
+                                               "browser session", style={"color": "#888", "fontSize": "11px"})])),
+        html.Div(id="gr-upload-info", style={"fontSize": "12px", "marginTop": "6px", "maxWidth": "900px"}),
+    ]),
+    html.Div(id="gr-scope-row", children=[
+        html.Div([html.Span("Level", style=LABEL),
+                  _dropdown("gr-level", [{"label": ALL, "value": ALL}] + [{"label": l, "value": l} for l in data.levels()], _default_level)]),
+        html.Div([html.Span("Conference", style=LABEL), _dropdown("gr-conf", [{"label": ALL, "value": ALL}], ALL, width="150px")]),
+        html.Div([html.Span("Team", style=LABEL), _dropdown("gr-team", [{"label": ALL, "value": ALL}], ALL, width="320px")]),
+    ], style=_SCOPE_ROW),
+    html.Div([html.Span("Start", style=LABEL), _date_field("gr-start"),
+              html.Span("End (optional)", style={**LABEL, "marginLeft": "14px"}), _date_field("gr-end")],
+             style={"marginTop": "10px", "display": "flex", "alignItems": "center", "gap": "4px", "flexWrap": "wrap"}),
+    html.Div([html.Span("Pitcher", id="gr-player-label", style=LABEL),
+              dcc.Dropdown(id="gr-player", options=[], value=None, placeholder="Type a name to search…",
+                           style={"width": "460px", "fontSize": "13px"})],
+             style={"marginTop": "10px", "display": "flex", "alignItems": "center"}),
+    # Shown only when the name belongs to more than one TrackMan player ("Lynch, Ryan" is three).
+    html.Div(id="gr-pid-wrap", style={"display": "none"}, children=[
+        html.Span("Which player?", style=LABEL),
+        dcc.RadioItems(id="gr-pid", options=[], value=None, inputStyle={"marginRight": "6px"},
+                       style={"fontFamily": FONT, "fontSize": "13px", "marginTop": "4px"})]),
+    # Shown only for a single date with two games (a doubleheader): G1, G2 or both.
+    html.Div(id="gr-dh-wrap", style={"display": "none"}, children=[
+        html.Span("Game", style=LABEL),
+        dcc.RadioItems(id="gr-dh", options=[], value=None, inline=True, style=_GR_RADIO,
+                       inputStyle={"marginRight": "4px", "marginLeft": "10px"})]),
+    html.Div(id="gr-status", style={"color": "#666", "fontSize": "12px", "marginTop": "10px"}),
+])
+
+
 selection = html.Div([
     role_tabs,
     html.Div(id="picker-controls", style={"display": "none"}, children=[
@@ -491,13 +565,30 @@ selection = html.Div([
     html.Div([html.Span(id="pick-status", style={"color": "#666", "fontSize": "12px"})],
              style={"marginTop": "10px"}),
     ]),
+    gr_controls,
 ], style={"padding": "14px 16px", "background": "#faf7f7", "borderBottom": f"2px solid {MAROON}"})
 
-splits = html.Div([
-    html.Div([html.Span("Batter:", style=LABEL), _checklist("batter-check", ["LHH", "RHH"])]),
-    html.Div([html.Span("Count:", style=LABEL), _checklist("count-check", report.SITS + report.SPECIFICS)],
-             style={"marginTop": "6px"}),
-], style={"margin": "8px 0"})
+def _splits_label(batter, count):
+    """Summary text for the collapsed splits control — shows the active split so a filter stays
+    visible even when collapsed."""
+    if not batter and not count:
+        return "Splits: All batters · all counts"
+    return f"Splits: {'/'.join(batter) if batter else 'All batters'} · {', '.join(count) if count else 'all counts'}"
+
+
+# Batter / Count splits, collapsed by default (a dropdown under the summary table).
+splits = html.Details(open=False, style={"margin": "8px 0", "fontFamily": FONT}, children=[
+    html.Summary(_splits_label([], []), id="splits-summary",
+                 style={"cursor": "pointer", "fontSize": "13px", "fontWeight": 600, "color": MAROON}),
+    html.Div([
+        html.Div("Batter AND Count drive the arsenal and model tables AND the heatmap (heatmap stat: "
+                 "dropdown on the chart). Movement, release point + velocity show all pitches.",
+                 style={"fontSize": "12px", "color": "#666", "marginBottom": "6px"}),
+        html.Div([html.Span("Batter:", style=LABEL), _checklist("batter-check", ["LHH", "RHH"])]),
+        html.Div([html.Span("Count:", style=LABEL), _checklist("count-check", report.SITS + report.SPECIFICS)],
+                 style={"marginTop": "6px"}),
+    ], style={"margin": "6px 0 2px"}),
+])
 
 # Retag tool (lives on the pitcher report; edits apply to both reports via the data override layer)
 _BTN = {"fontSize": "12px", "cursor": "pointer", "marginLeft": "6px", "padding": "2px 8px"}
@@ -551,20 +642,24 @@ pitcher_report = html.Div(id="report", style={"display": "none"}, children=[
     html.Div(id="report-header"),
     _bio_edit_form("bio"),
     _re_env_control("re"),
-    html.Div(id="summary"),
+    # Tables first (summary, then the arsenal + model table, driven by the splits), then the charts.
+    # This block is as wide as its widest table, and the summary + arsenal tables stretch to fill it,
+    # so their edges line up (capped at the page width; past that the tables scroll sideways).
+    html.Div([
+        html.Div(id="summary"),
+        splits,
+        dcc.Loading(type="default", children=[html.Div(id="arsenal")]),
+    ], style={"width": "fit-content", "maxWidth": "100%"}),
     html.Hr(style={"margin": "10px 0"}),
-    html.Div("Splits — Batter AND Count drive the arsenal table AND the heatmap (heatmap stat: "
-             "dropdown on the chart). Movement + velocity show all pitches.",
-             style={"fontFamily": FONT, "fontSize": "13px", "fontWeight": 600}),
-    splits,
+    # Movement · percentiles · release point on ONE line (scrolls sideways on a narrow window rather
+    # than wrapping). The retag tool sits right under it: it works by lassoing the movement chart.
     dcc.Loading(type="default", children=[
-        html.Div(id="arsenal"),
-        html.Hr(style={"margin": "10px 0"}),
-        retag_panel,
-        html.Div([_graph("move-graph"), html.Div(id="pct-panel"), _graph("heat-graph")],
-                 style={"display": "flex", "gap": "10px", "flexWrap": "wrap"}),
-        _graph("velo-graph"),
+        html.Div([_graph("move-graph"), html.Div(id="pct-panel"), _graph("release-graph")],
+                 style={"display": "flex", "gap": "10px", "flexWrap": "nowrap", "overflowX": "auto",
+                        "alignItems": "flex-start"}),
     ]),
+    retag_panel,
+    dcc.Loading(type="default", children=[_graph("heat-graph"), _graph("velo-graph")]),
 ])
 
 # Batter report
@@ -650,10 +745,10 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
             "player to build their report."],
            style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.5"}),
 
-    html.P(
+    *([] if "shortlist" in RETIRED_TABS else [html.P(
         ["Go to the ", html.B("Shortlist"), " tab to read scouting reports on various amateur players by our contributors!"],
         style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.5"}
-    ),
+    )]),
 
     html.H3(
         "Contributors",
@@ -1598,12 +1693,58 @@ def cb_lk_download(_n, role, years_sel, levels, conf, team, min_pitches, cols, s
                            f"lookup_{role}_{'-'.join(levels)}.csv")
 
 
+# ══ Game Reports: one player's game, or a date range (game_report.py builds the pieces) ══════════
+gr_retag_panel = html.Details(open=False, style={"margin": "6px 0", "background": "#faf7f7",
+                                                 "border": "1px solid #e2c9cc", "padding": "4px 10px"}, children=[
+    html.Summary("🏷  Retag pitches", style={"cursor": "pointer", "fontWeight": 600, "fontSize": "13px",
+                                             "fontFamily": FONT, "padding": "4px 0"}),
+    html.Div([
+        html.Div([html.Span("Box/lasso-select errant pitches on the movement chart, then assign to",
+                            style={"fontSize": "12px"}),
+                  dcc.Dropdown(id="gr-retag-to", options=RETAG_TYPE_OPTS, placeholder="pitch type…", style=_RDD),
+                  html.Button("Assign selected", id="gr-retag-apply", n_clicks=0, style=_BTN),
+                  html.Span(id="gr-retag-status", style={"marginLeft": "6px", "color": "#666", "fontSize": "12px"})],
+                 style=_ROW),
+        html.Div([html.Span(id="gr-retag-info", style={"fontSize": "12px", "color": "#666"}),
+                  html.Button("Revert this game", id="gr-revert-game", n_clicks=0, style=_BTN),
+                  html.Button("Revert this pitcher", id="gr-revert-pitcher", n_clicks=0, style=_BTN)],
+                 style=_ROW),
+        html.Div("Retags are saved for everyone and shared with the Pitchers tab; TrackMan's data itself is "
+                 "never changed, and reverting brings the original pitch types back. Pitches from unverified "
+                 "games can't be retagged (their IDs can change when the verified file arrives).",
+                 style={"fontSize": "11px", "color": "#888", "marginBottom": "4px"}),
+    ]),
+])
+
+_UNVERIFIED = {"background": "#fff4e5", "border": "1px solid #f0c27b", "color": "#7a4b00", "padding": "6px 10px",
+               "fontSize": "13px", "fontFamily": FONT, "margin": "6px 0", "maxWidth": "900px"}
+_ROW_SCROLL = {"display": "flex", "gap": "10px", "flexWrap": "nowrap", "overflowX": "auto", "alignItems": "flex-start"}
+game_panel = html.Div(id="game-panel", style={"display": "none"}, children=[
+    dcc.Store(id="gr-retag-version", data=0), dcc.Store(id="gr-uids", data=[]),
+    dcc.Store(id="gbio-version", data=0), dcc.Store(id="gbio-target"),
+    html.Div(id="gr-report", style={"display": "none"}, children=[
+        html.Div(id="gr-header"),
+        _bio_edit_form("gbio"),
+        _re_env_control("gre"),                              # xRV + RV against another (level, year)
+        html.Div(id="gr-unverified"),
+        html.Div(id="gr-files"),
+        # Tables first: the line (and, for a date range, one row per game), then the arsenal + model
+        # tables, in one block as wide as the widest table so their edges line up. Then the charts.
+        html.Div([html.Div(id="gr-line"), html.Div(id="gr-pergame"), html.Div(id="gr-arsenal")],
+                 style={"width": "fit-content", "maxWidth": "100%", "marginTop": "10px"}),
+        html.Div([_graph("gr-move-graph"), _graph("gr-release-graph")], style=_ROW_SCROLL),
+        html.Div(gr_retag_panel, id="gr-retag-wrap"),       # hidden for an uploaded file
+        html.Div([_graph(f"gr-loc-{i}") for i in range(4)], style={**_ROW_SCROLL, "gap": "4px"}),
+    ]),
+])
+
+
 app.layout = html.Div([dcc.Store(id="retag-version", data=0),
                        dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
                        dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
                        dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"), selection,
                        html.Div([about_panel, lookup_panel, shortlist_panel, pitcher_report,
-                                 batter_report], style={"padding": "12px 16px"})],
+                                 batter_report, game_panel], style={"padding": "12px 16px"})],
                       style={"fontFamily": FONT})
 
 
@@ -1616,14 +1757,16 @@ def cb_label(role):
 # ── About tab: show the About panel, hide the picker controls (reports hide via the player reset) ──
 @app.callback(Output("about-panel", "style"), Output("picker-controls", "style"),
               Output("shortlist-panel", "style"), Output("lookup-panel", "style"),
+              Output("gr-controls", "style"), Output("game-panel", "style"),
               Input("role-tabs", "value"))
 def cb_about_toggle(role):
     about = {"padding": "8px 4px"} if role == "about" else {"display": "none"}
     shortlist = {"padding": "8px 4px"} if role == "shortlist" else {"display": "none"}
     lookup = {"padding": "8px 4px"} if role == "lookup" else {"display": "none"}
-    # Lookup carries its own scope controls, so the shared player picker stays hidden there too.
-    picker = {"display": "none"} if role in ("about", "shortlist", "lookup") else {"display": "block"}
-    return about, picker, shortlist, lookup
+    game = {"display": "block"} if role == "game" else {"display": "none"}
+    # Lookup and Game Reports carry their own controls, so the shared player picker stays hidden there too.
+    picker = {"display": "none"} if role in ("about", "shortlist", "lookup", "game") else {"display": "block"}
+    return about, picker, shortlist, lookup, game, game
 
 
 # ── Cascading pickers (role-aware; all off the small in-memory index) ─────────────────────────────
@@ -1659,7 +1802,7 @@ def cb_player(role, years_sel, level, conf, team):
     Output("move-graph", "figure"), Output("velo-graph", "figure"),
     Output("arsenal", "children"), Output("heat-graph", "figure"), Output("pick-status", "children"),
     Output("batter-check", "value"), Output("count-check", "value"), Output("pct-panel", "children"),
-    Output("bio-target", "data"),
+    Output("bio-target", "data"), Output("release-graph", "figure"),
     Input("player-dd", "value"), Input("retag-version", "data"), Input("bio-version", "data"),
     Input("re-level-dd", "value"), Input("re-year-dd", "value"),
     State("role-tabs", "value"), State("year-check", "value"),
@@ -1668,15 +1811,16 @@ def cb_player(role, years_sel, level, conf, team):
 def cb_build(pitcher, _rv, _bv, re_lvl, re_yr, role, years_sel, level, team):
     hidden = {"display": "none"}
     if role != "pitcher":
-        return (hidden, *([no_update] * 11))
+        return (hidden, *([no_update] * 12))
     if not pitcher:
         return (hidden, "", "", go.Figure(), go.Figure(), "", go.Figure(),
-                "Pick filters, then choose a pitcher.", [], [], "", None)
+                "Pick filters, then choose a pitcher.", [], [], "", None, go.Figure())
 
     pitches = data.get_rows("pitcher", pitcher, level, team, years_sel, _re_sel(re_lvl), _re_sel(re_yr))
     if pitches.height == 0:
         msg = html.Div(html.I(f"No rows for '{pitcher}' under the current filters."))
-        return {"display": "block"}, msg, "", go.Figure(), go.Figure(), "", go.Figure(), "", [], [], "", None
+        return ({"display": "block"}, msg, "", go.Figure(), go.Figure(), "", go.Figure(), "", [], [], "", None,
+                go.Figure())
 
     hand = report.hand_of(pitches)
     teams = ", ".join(data.team_label(t) for t in _uniq(pitches["PitcherTeam"]))
@@ -1694,10 +1838,11 @@ def cb_build(pitcher, _rv, _bv, re_lvl, re_yr, role, years_sel, level, team):
     header = _player_header(f"{pitcher} ({hand})", sub,
                             _bio_line(bio, sorted(int(y) for y in _uniq(pitches["Year"]))))
     # A new pitcher starts fresh at All batters / all counts (like the notebook's per-run splits).
-    return ({"display": "block"}, header, html_table(report.build_summary(pitches)),
+    return ({"display": "block"}, header, _scroll(html_table(report.build_summary(pitches), full_width=True)),
             report.movement_fig(pitches, colors), report.velocity_fig(pitches, pitcher, hand, colors),
             _arsenal_block(pitches, [], []), report.heatmap_fig(pitches), "", [], [],
-            _pct_panel(pitcher, level, years_sel), {"name": pitcher, "id": pid})
+            _pct_panel(pitcher, level, years_sel), {"name": pitcher, "id": pid},
+            report.release_fig(pitches, (bio or {}).get("height_in"), colors))
 
 
 # Keep the collapsed "Change run environment" summary reflecting the active pick (both reports).
@@ -1711,6 +1856,13 @@ def cb_re_env_label(lv, yr):
               Input("bre-level-dd", "value"), Input("bre-year-dd", "value"))
 def cb_bre_env_label(lv, yr):
     return _env_label(lv, yr)
+
+
+# Keep the collapsed "Splits" summary reflecting the active Batter / Count picks.
+@app.callback(Output("splits-summary", "children"),
+              Input("batter-check", "value"), Input("count-check", "value"))
+def cb_splits_label(batter, count):
+    return _splits_label(batter, count)
 
 
 def _modal_id(df, col):
@@ -2090,6 +2242,250 @@ def cb_cluster_download(_nc, _np, pitcher, role, years_sel, level, team):
         df.write_parquet(buf)
         return dcc.send_bytes(buf.getvalue(), f"{base}.parquet"), f"Exported {df.height:,} rows."
     return dcc.send_string(df.write_csv(), f"{base}.csv"), f"Exported {df.height:,} rows."
+
+
+# ══ Game Reports tab ══════════════════════════════════════════════════════════════════════════
+# Data source: database games, i.e. served data (Level / Conference / Team narrow them), or an uploaded
+# file (it IS the data, so those three filters hide; the date and player still narrow it).
+@app.callback(Output("gr-scope-row", "style"), Output("gr-upload-wrap", "style"), Input("gr-source", "value"))
+def cb_gr_source(source):
+    upload = source == "upload"
+    return ({"display": "none"} if upload else _SCOPE_ROW), ({"marginBottom": "8px"} if upload else {"display": "none"})
+
+
+@app.callback(Output("gr-upload-id", "data"), Output("gr-upload-info", "children"),
+              Output("gr-start", "date"), Output("gr-end", "date"),
+              Input("gr-upload", "contents"), State("gr-upload", "filename"), State("gr-upload-id", "data"),
+              State("gr-role", "value"), prevent_initial_call=True)
+def cb_gr_upload(contents, filename, old_key, role):
+    """Read the uploaded file into this server's memory for the session (replacing its last upload), and
+    set Start / End to the file's dates so its players show up straight away."""
+    if not contents:
+        raise PreventUpdate
+    try:
+        raw = base64.b64decode(contents.split(",", 1)[1])
+        up = game_report.read_upload(filename, raw)
+    except game_report.UploadError as e:
+        return old_key, html.Div(str(e), style={"color": "#a30000"}), no_update, no_update
+    except Exception as e:                                # a malformed upload must never break the page
+        return (old_key, html.Div(f"Couldn't read the file ({type(e).__name__}).", style={"color": "#a30000"}),
+                no_update, no_update)
+    key = game_report.put_upload(up, replaces=old_key)
+    dates = up["df"]["Date"].drop_nulls()
+    first, last = (dates.min(), dates.max()) if dates.len() else (None, None)
+    # The file's notes (missing columns etc.) go with the report itself, so a saved report keeps them.
+    return (key, html.Div(game_report.upload_summary(up, role or "pitcher"), style={"fontWeight": 600}),
+            first, (last if last != first else None))
+
+
+@app.callback(Output("gre-env-summary", "children"),
+              Input("gre-level-dd", "value"), Input("gre-year-dd", "value"))
+def cb_gre_env_label(lv, yr):
+    return _env_label(lv, yr)
+
+
+# Cascade: Level -> Conference -> Team -> date narrow the player list. With no date it spans every season;
+# with one, it's only who played in games that started on that date (or in that range).
+@app.callback(Output("gr-player-label", "children"), Output("gr-conf", "options"), Output("gr-conf", "value"),
+              Input("gr-role", "value"), Input("gr-level", "value"))
+def cb_gr_conf(role, level):
+    return ("Batter" if role == "batter" else "Pitcher",
+            [{"label": c, "value": c} for c in data.conference_options(role, None, level)], ALL)
+
+
+@app.callback(Output("gr-team", "options"), Output("gr-team", "value"),
+              Input("gr-role", "value"), Input("gr-level", "value"), Input("gr-conf", "value"))
+def cb_gr_team(role, level, conf):
+    return data.team_options(role, None, level, conf), ALL
+
+
+@app.callback(Output("gr-player", "options"), Output("gr-player", "value"),
+              Input("gr-role", "value"), Input("gr-level", "value"), Input("gr-conf", "value"),
+              Input("gr-team", "value"), Input("gr-start", "date"), Input("gr-end", "date"),
+              Input("gr-source", "value"), Input("gr-upload-id", "data"), State("gr-player", "value"))
+def cb_gr_player(role, level, conf, team, start, end, source, upload_key, current):
+    start, end = (start or "")[:10] or None, (end or "")[:10] or None
+    if source == "upload":
+        up = game_report.get_upload(upload_key)
+        opts = game_report.upload_players(up, role, start, end) if up else []
+        return opts, (current if current in opts else None)
+    opts = data.player_options(role, None, level, conf, team)
+    if start:
+        played = game_report.players_on(role, start, end, level, team)
+        opts = [p for p in opts if p in played]
+    return opts, (current if current in opts else None)
+
+
+# A name -> the TrackMan players behind it; the most recent is preselected, and the choice only shows
+# when there's more than one.
+@app.callback(Output("gr-pid", "options"), Output("gr-pid", "value"), Output("gr-pid-wrap", "style"),
+              Input("gr-player", "value"), State("gr-role", "value"), State("gr-level", "value"),
+              State("gr-team", "value"), State("gr-start", "date"), State("gr-end", "date"),
+              State("gr-source", "value"))
+def cb_gr_players(player, role, level, team, start, end, source):
+    if not player or source == "upload":           # an upload's rows are its own; no ID split
+        return [], None, {"display": "none"}
+    games = game_report.player_games(role, player, level, team)
+    ps = game_report.players(games, role)
+    start, end = (start or "")[:10] or None, (end or "")[:10] or None
+    if start:                    # with a date, only the same-named players who played then
+        ps = game_report.played_between(ps, games, start, end)
+    if ps.height == 0:
+        return [], None, {"display": "none"}
+    opts = [{"label": r["label"], "value": r["pid"]} for r in ps.iter_rows(named=True)]
+    return opts, opts[0]["value"], ({"marginTop": "8px"} if ps.height > 1 else {"display": "none"})
+
+
+# The calendars open on the player's latest game. Days without a game stay selectable: the picker won't
+# accept a disabled day even when typed, and a range's Start / End needn't be game days.
+@app.callback(Output("gr-start", "initial_visible_month"), Output("gr-end", "initial_visible_month"),
+              Input("gr-pid", "value"), Input("gr-upload-id", "data"), State("gr-player", "value"),
+              State("gr-role", "value"), State("gr-level", "value"), State("gr-team", "value"),
+              State("gr-source", "value"))
+def cb_gr_calendar(pid, upload_key, player, role, level, team, source):
+    if source == "upload":
+        up = game_report.get_upload(upload_key)
+        last = game_report.upload_latest_date(up) if up else None
+        return last, last
+    last = game_report.latest_game_date()
+    if player:
+        games = game_report.games_for(game_report.player_games(role, player, level, team), pid)
+        last = games["game_date"].max() if games.height else last
+    return last, last
+
+
+def _gr_empty(status, dh_opts=(), show_dh=False):
+    """Every Game Reports output with the report hidden, and a message in the picker band."""
+    return (status, list(dh_opts), {"marginTop": "8px"} if show_dh else {"display": "none"},
+            {"display": "none"}, "", "", "", "", "", go.Figure(), go.Figure(), "",
+            *[go.Figure() for _ in range(4)], [], "", None, {"display": "none"})
+
+
+@app.callback(
+    Output("gr-status", "children"), Output("gr-dh", "options"), Output("gr-dh-wrap", "style"),
+    Output("gr-report", "style"), Output("gr-header", "children"), Output("gr-unverified", "children"),
+    Output("gr-files", "children"), Output("gr-line", "children"), Output("gr-pergame", "children"),
+    Output("gr-move-graph", "figure"), Output("gr-release-graph", "figure"), Output("gr-arsenal", "children"),
+    *[Output(f"gr-loc-{i}", "figure") for i in range(4)],
+    Output("gr-uids", "data"), Output("gr-retag-info", "children"), Output("gbio-target", "data"),
+    Output("gr-retag-wrap", "style"),
+    Input("gr-pid", "value"), Input("gr-start", "date"), Input("gr-end", "date"), Input("gr-dh", "value"),
+    Input("gr-retag-version", "data"), Input("gbio-version", "data"), Input("gr-upload-id", "data"),
+    Input("gre-level-dd", "value"), Input("gre-year-dd", "value"),
+    State("gr-player", "value"), State("gr-role", "value"), State("gr-level", "value"), State("gr-team", "value"),
+    State("gr-source", "value"))
+def cb_gr_build(pid, start, end, dh, _rv, _bv, upload_key, re_lvl, re_yr, player, role, level, team, source):
+    upload = game_report.get_upload(upload_key) if source == "upload" else None
+    if source == "upload" and upload is None:
+        return _gr_empty("Upload a TrackMan CSV or parquet file." if not upload_key
+                         else "The upload has expired (uploads last a couple of idle hours): upload it again.")
+    if not player:
+        return _gr_empty("")
+    if role == "batter":
+        return _gr_empty("The batter game report is next; it isn't built yet.")
+    games = (game_report.upload_games(upload, role, player) if upload
+             else game_report.games_for(game_report.player_games(role, player, level, team), pid))
+    if games.height == 0:
+        return _gr_empty(f"No games for {player} under these filters.")
+    start, end = (start or "")[:10] or None, (end or "")[:10] or None
+    sel, msg, dh_opts = game_report.choose_games(games, start, end, dh)
+    if msg:
+        return _gr_empty(msg, dh_opts, bool(dh_opts))
+    re_level, re_year = _re_sel(re_lvl), _re_sel(re_yr)    # Auto -> each pitch's own (level, year)
+    rows = (game_report.upload_rows(upload, role, player, sel, re_level, re_year) if upload
+            else game_report.game_rows(role, player, level, team, sel, pid, re_level, re_year))
+    if rows.height == 0:
+        return _gr_empty(f"No pitches by {player} in the chosen games.", dh_opts, bool(dh_opts))
+    present = upload["present"] if upload else None      # an upload blanks the numbers its columns can't support
+
+    first = date.fromisoformat(sel["game_date"].min())
+    sub = [", ".join(data.team_label(t) for t in _uniq(sel["team"]))]
+    if sel.height == 1 and game_report.vs_text(sel.row(0, named=True)):
+        sub.append(game_report.vs_text(sel.row(0, named=True)))
+    sub += [game_report.date_span(sel), f"{rows.height:,} pitches"]
+    if upload:
+        sub.append(f"uploaded file: {upload['name']}")
+    pid_bio = pid or _modal_id(rows, "PitcherId")
+    bio = data.bio_lookup(player, pid_bio)
+    height_in = (bio or {}).get("height_in")
+    header = _player_header(f"{player} ({report.hand_of(rows)})", [b for b in sub if b],
+                            _bio_line(bio, [first.year], on=first, edit_hint="just below"))
+    note = game_report.unverified_note(sel)
+    files = html_table(game_report.files_table(sel, status="Uploaded" if upload else None),
+                       title="Game file" if sel.height == 1 else "Game files")
+    if sel.height > 3:                                   # a long range: the file list starts collapsed
+        files = html.Details([html.Summary(f"Game files · {sel.height}", style={"cursor": "pointer", "fontSize": "13px",
+                                                                               "fontWeight": 600, "color": MAROON}),
+                              files], style={"margin": "6px 0", "fontFamily": FONT})
+    if upload and upload["notes"]:
+        files = html.Div([files, *[html.Div(n, style={"color": "#666", "fontSize": "12px", "fontFamily": FONT})
+                                   for n in upload["notes"]]])
+    ars, model = game_report.arsenal_tables(rows, height_in, present)
+    d1_scale = bool(upload and upload.get("stuff_scale") == "D1")   # a Level-less upload: Stuff+ on D1's scale
+    arsenal = html.Div([_scroll(html_table(ars, title=f"Arsenal · {rows.height:,} pitches", full_width=True)),
+                        _scroll(html_table(model, title="Model Tables · Stuff+ on the D1 scale" if d1_scale
+                                           else "Model Tables"))])
+    uids = rows["PitchUID"].to_list()
+    retagged = len(set(uids) & set(data.load_retags()["pitch"]))
+    info = f"{retagged:,} pitch(es) in this report are retagged." if retagged else "No retags in this report."
+    return ("", dh_opts, {"marginTop": "8px"} if dh_opts else {"display": "none"}, {"display": "block"},
+            header, html.Div(note, style=_UNVERIFIED) if note else "", files,
+            _scroll(html_table(game_report.line_table(rows, present), full_width=True)),
+            (_scroll(html_table(game_report.per_game_table(rows, sel, present), title="By game", full_width=True))
+             if sel.height > 1 else ""),
+            report.movement_fig(rows), report.release_fig(rows, height_in), arsenal,
+            *game_report.location_figs(rows, has_results=present is None or "PlayResult" in present),
+            uids, info, {"name": player, "id": pid_bio},
+            {"display": "none"} if upload else {"display": "block"})
+
+
+@app.callback(Output("gr-retag-status", "children"), Input("gr-move-graph", "selectedData"))
+def cb_gr_lasso_status(sel):
+    n = len(sel["points"]) if sel and sel.get("points") else 0
+    if not n:
+        return "(none selected)"
+    uids = [p["customdata"][6] for p in sel["points"] if p.get("customdata")]
+    skipped = len(uids) - len(data.verified_only(uids))
+    return f"{n:,} selected" + (f" ({skipped:,} from unverified games: those can't be retagged)" if skipped else "")
+
+
+@app.callback(Output("gr-retag-version", "data"),
+              Input("gr-retag-apply", "n_clicks"),
+              State("gr-move-graph", "selectedData"), State("gr-retag-to", "value"),
+              State("gr-player", "value"), State("gr-retag-version", "data"), prevent_initial_call=True)
+def cb_gr_retag(_n, sel, to, player, ver):
+    if not player or not isinstance(to, str) or not (sel and sel.get("points")):
+        raise PreventUpdate
+    uids = [p["customdata"][6] for p in sel["points"] if p.get("customdata")]
+    if not uids:
+        raise PreventUpdate
+    data.set_pitch_overrides(uids, to, player)          # skips unverified pitches itself
+    return (ver or 0) + 1
+
+
+@app.callback(Output("gr-retag-version", "data", allow_duplicate=True),
+              Input("gr-revert-game", "n_clicks"), Input("gr-revert-pitcher", "n_clicks"),
+              State("gr-uids", "data"), State("gr-player", "value"), State("gr-retag-version", "data"),
+              prevent_initial_call=True)
+def cb_gr_revert(_ng, _np, uids, player, ver):
+    if ctx.triggered_id == "gr-revert-game" and uids:
+        data.set_pitch_overrides(uids, None, player)     # drops just this report's pitches' retags
+    elif ctx.triggered_id == "gr-revert-pitcher" and player:
+        data.clear_retags(player)                        # every retag under this name, like the Pitchers tab
+    else:
+        raise PreventUpdate
+    return (ver or 0) + 1
+
+
+@app.callback(
+    Output("gbio-save-status", "children"), Output("gbio-version", "data"),
+    Input("gbio-save-btn", "n_clicks"),
+    State("gbio-height-input", "value"), State("gbio-bday-input", "value"),
+    State("gbio-target", "data"), State("gbio-version", "data"),
+    prevent_initial_call=True,
+)
+def cb_save_game_bio(n, height_raw, bday_raw, target, ver):
+    return _save_bio(n, height_raw, bday_raw, target, ver)
 
 
 def main():

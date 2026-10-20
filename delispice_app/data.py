@@ -48,6 +48,7 @@ PITCHER_COLS = [
     "RelSpeed", "SpinRate", "SpinAxis", "RelHeight", "RelSide", "Extension",
     "InducedVertBreak", "HorzBreak", "PlateLocHeight", "PlateLocSide", "ExitSpeed",
     "Angle", "Direction",            # launch conditions for the contact-quality (xRV) model
+    "GameID", "ax0", "az0",          # Stuff+: the outing (FB_1 reference) and acceleration, for live grading
 ]
 BATTER_COLS = [
     "Date", "Batter", "BatterId", "BatterSide", "BatterTeam", "Level", "Pitcher", "PitcherThrows", "PitchUID",
@@ -69,7 +70,7 @@ ROLES = {
 # all-string schema an untyped empty frame would have.
 _STR_COLS = {"Date", "Pitcher", "PitcherId", "PitcherThrows", "PitcherTeam", "Batter", "BatterId",
              "BatterSide", "BatterTeam", "Level", "PitchUID", "TaggedPitchType", "PitchCall",
-             "KorBB", "PlayResult", "TaggedHitType"}
+             "KorBB", "PlayResult", "TaggedHitType", "GameID"}
 _INT_COLS = {"Balls", "Strikes", "PitchofPA", "OutsOnPlay", "RunsScored"}
 _BOOL_COLS = {"half_complete", "is_verified"}
 _STR_COLS |= {"re288_state", "next_re288_state"}
@@ -578,16 +579,99 @@ def _with_eye(df: pl.DataFrame, sel_level: str = ALL) -> pl.DataFrame:
                .with_columns(pl.col("Eye_new").cast(pl.Float64).alias("Eye")).drop("Eye_new"))
 
 
+# ── Stuff+ (v1) — what a pitch's SHAPE is worth, per pitch ───────────────────────────────────────
+# One model for all of D1 (P4 games are D1 rows), retrained once a season with its scale frozen inside
+# it (backend/models/stuff_v1). Score tables are built offline per season —
+# `python -m backend.models.stuff_store` — and a night's new games miss the table and are graded live.
+# A grade doesn't depend on the count, batter or result (it's graded against an average hitter across
+# all 24 count x side contexts), so the report's filters change which pitches are averaged, not a grade.
+STUFF_COLS = {"stuff": "Stuff", "whiff_plus": "WhiffPlus", "foul_plus": "FoulPlus", "contact_plus": "ContactPlus"}
+_STUFF_RAW = ["PitchUID", "GameID", "PitcherId", "Pitcher", "PitcherThrows", "PitcherTeam", "TaggedPitchType",
+              "RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak", "RelHeight", "RelSide", "ax0", "az0",
+              "BatterSide"]
+
+
+@functools.lru_cache(maxsize=1)
+def _stuff_model():
+    from backend.models import stuff_store
+    return stuff_store.load()
+
+
+@functools.lru_cache(maxsize=4)
+def _stuff_cache(year: str):
+    """PitchUID -> grades for one D1 season, or None if the table hasn't been built. maxsize=4 for the
+    same reason as the eye cache: these tables are dominated by 36-char PitchUIDs."""
+    from backend.models import stuff_store
+    return stuff_store.stuff_lookup(year)
+
+
+def _stuff_for(df: pl.DataFrame) -> pl.DataFrame:
+    """D1 rows -> PitchUID + the model's pitch group + the Stuff columns. Cached grades first, then ONE
+    live pass for the misses the model CAN grade. A pitch with no hand or shape is never in the table;
+    counting it as a miss would re-tag the season on every report and still grade nothing.
+    The live pass re-tags each WHOLE pitcher-season a miss belongs to: pitch groups and the FB_1
+    reference are fit per pitcher-season, so tagging a lone new outing would label it differently. It
+    runs on one process: for a few pitcher-seasons, starting joblib's pool costs more than the fits."""
+    cols = ["group", *STUFF_COLS]
+    parts = []
+    for (yr,), grp in df.partition_by("Year", as_dict=True).items():
+        uids = grp.select("PitchUID").unique()
+        cache = _stuff_cache(str(yr))
+        got = (uids.join(cache.select("PitchUID", *cols), on="PitchUID", how="left") if cache is not None
+               else uids.with_columns(pl.lit(None, dtype=pl.String).alias("group"),
+                                      *[pl.lit(None, dtype=pl.Float32).alias(c) for c in STUFF_COLS]))
+        miss = got.filter(pl.col("stuff").is_null()).select("PitchUID")
+        if miss.height and set(_STUFF_RAW).issubset(grp.columns):
+            from backend.models import stuff_v1
+            miss = grp.filter(stuff_v1.can_grade()).select("PitchUID").unique().join(miss, on="PitchUID", how="semi")
+            model = _stuff_model() if miss.height else None
+            if model is not None:
+                seasons = grp.join(miss, on="PitchUID", how="semi").select("PitcherId").unique()
+                rows = (grp.join(seasons, on="PitcherId", how="semi").unique(subset=["PitchUID"])
+                           .select(_STUFF_RAW).with_columns(Year=pl.lit(int(yr), pl.Int32)))
+                live = stuff_v1.score(rows, model, n_jobs=1)
+                if live.height:
+                    live = live.join(miss, on="PitchUID", how="semi").select("PitchUID", *cols)
+                    got = pl.concat([got.filter(pl.col("stuff").is_not_null()),
+                                     got.filter(pl.col("stuff").is_null()).select("PitchUID")
+                                        .join(live, on="PitchUID", how="left")], how="vertical_relaxed")
+        parts.append(got)
+    return pl.concat(parts, how="vertical_relaxed")
+
+
+STUFF_GROUP = "StuffGroup"      # the model's pitch group (FB / BB / OS) a pitch was graded in
+
+
+def _with_stuff(df: pl.DataFrame) -> pl.DataFrame:
+    """Append ``Stuff`` (Stuff+), ``WhiffPlus``, ``FoulPlus`` and ``ContactPlus`` per pitch, plus
+    ``StuffGroup``, the group it was graded in. D1 only; null for other levels, for pitches the model
+    can't tag (no handedness or shape), and before the model is trained. Each grade is within its pitch
+    group: a fastball's 110 is not a slider's 110."""
+    out = df.with_columns(pl.lit(None, dtype=pl.String).alias(STUFF_GROUP),
+                          *[pl.lit(None, dtype=pl.Float64).alias(c) for c in STUFF_COLS.values()])
+    if df.height == 0 or not {"PitchUID", "Level", "Year"}.issubset(df.columns):
+        return out
+    d1 = df.filter(pl.col("Level") == "D1")
+    if d1.height == 0:
+        return out
+    got = (_stuff_for(d1).unique(subset=["PitchUID"])
+             .select("PitchUID", pl.col("group").alias(STUFF_GROUP),
+                     *[pl.col(k).cast(pl.Float64).alias(v) for k, v in STUFF_COLS.items()]))
+    return out.drop(STUFF_GROUP, *STUFF_COLS.values()).join(got, on="PitchUID", how="left")
+
+
 @functools.lru_cache(maxsize=64)
 def _scored_cached(role: str, player: str, level: str, team: str, years_key: tuple[str, ...],
                    re_level: str | None, re_year: str | None) -> pl.DataFrame:
-    """Base rows (cached DuckDB fetch) + xRV (model), RV (realized) and Eye (decision) columns. The
-    first two are resolved against the picked Run-Expectancy (level, year); Eye is pre-scored in its
-    own environment (see _with_eye)."""
+    """Base rows (cached DuckDB fetch) + xRV (model), RV (realized) and Eye (decision) columns, and for
+    pitchers the Stuff+ grades. xRV and RV are resolved against the picked Run-Expectancy (level, year);
+    Eye is pre-scored in its own environment (see _with_eye); Stuff+ ignores the run environment picker
+    (its prices are frozen in the model, see _with_stuff)."""
     base = _rows_cached(role, player, level, team, years_key)
     scored = _with_xrv(base, sel_level=level, re_level=re_level, re_year=re_year)
     scored = _with_rv(scored, sel_level=level, re_level=re_level, re_year=re_year)
-    return _with_eye(scored, sel_level=level)
+    scored = _with_eye(scored, sel_level=level)
+    return _with_stuff(scored) if role == "pitcher" else scored
 
 
 def get_rows(role: str, player: str, level=ALL, team=ALL, years_sel=None,

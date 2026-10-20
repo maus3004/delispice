@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="760" height="900" viewBox="0 0 760 900" role="img">
 <title>pipeline_v2 architecture</title>
-<desc>TrackMan FTP v3 folders feed download.py, which writes every file into raw/. load.py turns pitch CSVs into one parquet per game in games/. build.py rebuilds changed years into serving/ plus the RE288 matrix. Model artifacts are re-scored nightly and retrained monthly, and the app is refreshed with warm caches and a graceful reload. Every step records into the pipeline.db ledger, which feeds status, the pipeline page and Discord alerts. An always-on heights service reads serving/ and writes heights.csv for the app.</desc>
+<desc>TrackMan FTP v3 folders feed download.py, which writes every file into raw/. load.py turns pitch CSVs into one parquet per game in games/. build.py rebuilds changed years into serving/ every night and the RE288 matrix monthly. Model artifacts are re-scored nightly and retrained monthly, and the app is refreshed with warm caches and a graceful reload. Every step records into the pipeline.db ledger, which feeds status, the pipeline page and Discord alerts. An always-on heights service reads serving/ and writes heights.csv for the app.</desc>
 <style>
 .t{font:600 14px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
 .s{font:400 12px system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif}
@@ -20,7 +20,7 @@
 <line x1="210" y1="392" x2="210" y2="424" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
 <g><rect x="60" y="428" width="300" height="56" rx="8" fill="#F1EFE8" stroke="#888780"/><text class="t" x="210" y="448" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">games/</text><text class="s" x="210" y="466" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">One parquet per game</text></g>
 <line x1="210" y1="484" x2="210" y2="516" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
-<g><rect x="60" y="520" width="300" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7"/><text class="t" x="210" y="540" text-anchor="middle" dominant-baseline="central" fill="#3C3489">build.py</text><text class="s" x="210" y="558" text-anchor="middle" dominant-baseline="central" fill="#534AB7">Rebuild changed years + RE288</text></g>
+<g><rect x="60" y="520" width="300" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7"/><text class="t" x="210" y="540" text-anchor="middle" dominant-baseline="central" fill="#3C3489">build.py</text><text class="s" x="210" y="558" text-anchor="middle" dominant-baseline="central" fill="#534AB7">Changed years nightly, RE288 monthly</text></g>
 <line x1="210" y1="576" x2="210" y2="608" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>
 <g><rect x="60" y="612" width="300" height="56" rx="8" fill="#F1EFE8" stroke="#888780"/><text class="t" x="210" y="632" text-anchor="middle" dominant-baseline="central" fill="#2C2C2A">serving/</text><text class="s" x="210" y="650" text-anchor="middle" dominant-baseline="central" fill="#5F5E5A">Year folders, read by models + app</text></g>
 <line x1="210" y1="668" x2="210" y2="700" stroke="#5F5E5A" stroke-width="1.2" marker-end="url(#a)"/>

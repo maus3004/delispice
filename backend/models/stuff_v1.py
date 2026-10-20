@@ -80,7 +80,10 @@ GAP_MAX, REL_H_MAX, REL_S_MAX = 2, 0.75, 1.0  # pitcher-ID merge, rule C (M2)
 # pitch types). Only the frozen mean/SD change; nothing else in the model does.
 SCALE_METHOD = "per_pitch"
 MIN_PT = 100
-CHUNK = 120_000
+CHUNK = 120_000                              # pitches per predict call (x 24 contexts)
+GRADE_CHUNK = 500_000                        # pitches per grading block, so grading memory stays flat
+# The columns grading needs (the boosters' shape features + the labels and keys the outputs carry).
+GRADE_COLS = ["PitchUID", "pid", "Year", "group", "retag", "type", "PitcherThrows", *SHAPE_ALL, *DIFFS]
 # Raw columns a pitch needs to be graded (the tagger's shape + the sources of SHAPE_ALL), plus a pitcher hand.
 RAW_NEEDED = ["RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak", "RelHeight", "RelSide", "ax0", "az0"]
 
@@ -386,6 +389,7 @@ class StuffModel:
         return w * WP + (1 - w) * (f * FP + (1 - f) * (v - SH))
 
     def set_average_pieces(self, P: pl.DataFrame, n_sample: int = 200_000):
+        P = P.select("group", *SHAPE_ALL, *DIFFS)
         for g in GROUPS:
             d = P.filter(pl.col("group") == g)
             d = d.sample(min(n_sample, d.height), seed=SEED)
@@ -398,10 +402,16 @@ class StuffModel:
 
     def raw_grades(self, P: pl.DataFrame) -> pl.DataFrame:
         """PitchUID + runs (expected runs per swing), the context-averaged pieces and the run breakdown
-        (``d_*``, runs vs. a pitch with the group's average pieces). ``P`` = gradeable pitches."""
+        (``d_*``, runs vs. a pitch with the group's average pieces). ``P`` = gradeable pitches, graded
+        ``GRADE_CHUNK`` at a time (each pitch's grade depends only on its own row)."""
+        if P.height <= GRADE_CHUNK:
+            return self._raw_grades_block(P)
+        return pl.concat([self._raw_grades_block(P.slice(a, GRADE_CHUNK)) for a in range(0, P.height, GRADE_CHUNK)])
+
+    def _raw_grades_block(self, P: pl.DataFrame) -> pl.DataFrame:
         keys = ["runs", "whiff", "foul", "contact", "d_whiff", "d_foul", "d_contact"]
         out = {k: np.full(P.height, np.nan) for k in keys}
-        fr = P.with_row_index("_i")
+        fr = P.select("group", "PitcherThrows", *SHAPE_ALL, *DIFFS).with_row_index("_i")
         for (g, hand), d in fr.partition_by(["group", "PitcherThrows"], as_dict=True).items():
             if g not in GROUPS or hand not in self.weights.get(g, {}):
                 continue
@@ -496,8 +506,16 @@ def _context_weights(train: pl.DataFrame) -> dict:
     return out
 
 
+def _peak_gb() -> float:
+    """This process's peak memory so far (ru_maxrss is KB on Linux, bytes on macOS)."""
+    import resource
+    import sys
+    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return r / 2**30 if sys.platform == "darwin" else r / 2**20
+
+
 def _log(msg, t0):
-    print(f"  {msg} ({time.time() - t0:.0f}s)", flush=True)
+    print(f"  {msg} ({time.time() - t0:.0f}s, peak {_peak_gb():.1f} GB)", flush=True)
 
 
 def train(years: list[str] | None = None, fraction: float = 1.0) -> tuple[StuffModel, pl.DataFrame]:
@@ -514,9 +532,10 @@ def train(years: list[str] | None = None, fraction: float = 1.0) -> tuple[StuffM
     raw, templates = add_labels(raw)
     _log("pitch groups tagged", t0)
     season = season_prices(years)
-    raw = add_features(add_targets(raw, season))
-    P = raw.filter(pl.col("gradeable"))
+    P = add_features(add_targets(raw, season)).filter(pl.col("gradeable"))
+    del raw                                  # memory: from here on only P and the swings are needed
     train_ = _assign_folds(P.filter(pl.col("is_verified"), pl.col("y").is_not_null(), pl.col("same").is_not_null()))
+    P = P.select(GRADE_COLS)
     _log(f"{train_.height:,} training swings, {P.height:,} gradeable pitches", t0)
     train_, hit = hitter_feature(train_)
     _log(f"hitter feature: {hit}", t0)
@@ -537,13 +556,15 @@ def train(years: list[str] | None = None, fraction: float = 1.0) -> tuple[StuffM
             model.boosters[(g, p)] = b = _fit(dg.filter(keep), feats_for(g), label, objective, refit_all=True)
             trees[f"{g}_{p}"] = b.num_trees()
     _log(f"pieces fitted: {trees}", t0)
+    n_swings = train_.height
+    del train_, dg                           # memory: grading needs only the boosters and P
     model.set_average_pieces(P)
     raw_g = model.raw_grades(P)
     model.set_scale(P, raw_g)
     grades = model.apply_scale(raw_g, P)
     _log(f"graded {grades.height:,} pitches", t0)
     model.meta = {**model.meta, "version": MODEL_VERSION, "level": LEVEL, "years": years, "fraction": fraction,
-                  "n_swings": train_.height, "n_pitches": P.height, "trees": trees, **merged, **hit,
+                  "n_swings": n_swings, "n_pitches": P.height, "trees": trees, **merged, **hit,
                   "trained": time.strftime("%Y-%m-%d %H:%M")}
     return model, _with_labels(grades, P)
 

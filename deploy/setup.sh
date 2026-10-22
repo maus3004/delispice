@@ -13,15 +13,15 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 echo "==> Repo root: $REPO"
 
-# 1. The TrackMan data must already be present at the identical relative path.
-if [ ! -d "$REPO/data_pipeline/wbaserunners" ]; then
-	echo "!! MISSING: $REPO/data_pipeline/wbaserunners"
-	echo "   The app reads TrackMan parquet from there (it is NOT in git). Put the"
-	echo "   data in place at that exact path, then re-run this script."
+# 1. The TrackMan data must already be present: pipeline_v2 builds serving/ from raw/ (it is NOT in git).
+if [ ! -d "$REPO/pipeline_v2/serving/pitches" ]; then
+	echo "!! MISSING: $REPO/pipeline_v2/serving/pitches"
+	echo "   The app reads TrackMan parquet from there. Copy pipeline_v2/raw/ + pipeline.db over"
+	echo "   (or download), run python -m pipeline_v2 run, then re-run this script."
 	exit 1
 fi
-PARQUET_N="$(find data_pipeline/wbaserunners -name '*.parquet' | wc -l | tr -d ' ')"
-echo "==> Found data_pipeline/wbaserunners ($PARQUET_N parquet files)"
+PARQUET_N="$(find pipeline_v2/serving/pitches -name '*.parquet' | wc -l | tr -d ' ')"
+echo "==> Found pipeline_v2/serving/pitches ($PARQUET_N parquet files)"
 
 # 2. Raise the open-file limit for THIS shell (the index build opens many files).
 #    systemd handles this separately via LimitNOFILE in delispice.service.

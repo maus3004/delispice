@@ -8,15 +8,9 @@
 **/__pycache__/
 **/*.pyc
 
-# ── data_pipeline: keep the pipeline SCRIPTS, ignore all the DATA ──────
-# The data dirs (data/ 9 GB, clean/ 6 GB, wbaserunners/ 6 GB) + logs move
-# box-to-box out of band (rsync), NEVER via git. So ignore everything under
-# data_pipeline/ by default, then re-include only the scripts + small refs.
-/data_pipeline/*
-!/data_pipeline/*.py
-# re_matrices/ is NOT tracked: the server's monthly job rewrites it (derived data).
-# heights.csv is intentionally NOT tracked — it's mutable scraped data each machine
-# appends to (the box runs its own scraper). Sync by rsync if ever needed, like the parquet.
+# ── data_pipeline: the pre-v2 pipeline, retired 2026-10-22 (pipeline_v2/plan.md phase 6) ──
+# Ignored so any leftover data on a machine never shows up as untracked files.
+/data_pipeline/
 
 # ── pipeline_v2: track the code, plan and diagrams; ignore all the data ─
 # raw/, games/, serving/, logs/, pipeline.db, heights.csv and .env (secrets)

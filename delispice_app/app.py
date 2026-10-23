@@ -23,7 +23,7 @@ import plotly.graph_objects as go
 from dash import ALL as ALLPM, Dash, Input, Output, Patch, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
-from . import data, game_report, leaderboard, report, scouting
+from . import data, game_report, leaderboard, pitch_lab, report, scouting
 
 ALL = data.ALL
 RETAG_TYPES = ["Fastball", "Sinker", "FourSeamFastBall", "TwoSeamFastBall", "Cutter", "Slider",
@@ -157,9 +157,16 @@ def _arsenal_block(dff, batter, count):
     return html.Div([
         _scroll(html_table(report.build_arsenal(dff), title=f"Arsenal · {label} · {dff.height:,} pitches",
                            full_width=True)),
-        # The model numbers: same rows and order as the arsenal.
-        _scroll(html_table(report.build_model_table(dff), title="Model Tables")),
+        # Contact and Stuff: same rows and order as the arsenal.
+        _side_by_side(_scroll(html_table(report.build_contact_table(dff), title="Contact")),
+                      _stuff_table_block(report.build_stuff_rows(dff))),
     ])
+
+
+def _side_by_side(*blocks):
+    """Tables on one line, top-aligned; they wrap under each other when the window is too narrow."""
+    return html.Div(blocks, style={"display": "flex", "flexWrap": "wrap", "alignItems": "flex-start",
+                                   "columnGap": "28px"})
 
 
 _VS_LABEL = {"All": "All pitchers", "Right": "vs RHP", "Left": "vs LHP"}
@@ -171,8 +178,8 @@ _BT_W = {"Pitch": 160, "Pitches Seen": 92, "Pitch Seen %": 92, "Swing %": 68, "C
          "Chase %": 66, "Hard Hit %": 84, "Avg EV": 68, "Eye/100": 76, "xRV/BBE": 76}
 
 
-def _bt_grid(cols):
-    return {"display": "grid", "gridTemplateColumns": " ".join(f"{_BT_W.get(c, 90)}px" for c in cols)}
+def _bt_grid(cols, widths=_BT_W):
+    return {"display": "grid", "gridTemplateColumns": " ".join(f"{widths.get(c, 90)}px" for c in cols)}
 
 
 def _bt_cell(val, i, kind):
@@ -195,6 +202,44 @@ def _bt_cell(val, i, kind):
     return html.Div("" if val is None else val, style=st)
 
 
+def _fam_first_cell(name, is_all=False):
+    """The first cell of a dropdown row: the name, behind a ▶ that turns when the row opens (no arrow
+    on the batter table's combined All row, which doesn't open)."""
+    bits = ([] if is_all else
+            [html.Span("▶", className="fam-arrow",
+                       style={"display": "inline-block", "marginRight": "7px", "fontSize": "10px", "color": MAROON})])
+    return html.Div(bits + [html.Span(name)],
+                    style={"padding": "4px 8px", "fontSize": "12px", "fontFamily": FONT, "fontWeight": 700,
+                           "background": "#efdde0" if is_all else "#faf3f4", "whiteSpace": "nowrap",
+                           "borderBottom": "2px solid #d9b3b8" if is_all else "1px solid #eee"})
+
+
+_ST_W = {"Pitch": 130, "Stuff+": 76, "Whiff+": 76, "Foul+": 76, "Contact+": 80}
+
+
+def _stuff_table_block(groups, title="Stuff"):
+    """The Stuff table: Stuff+ and its pieces per pitch type, each row opening (native <details>, like
+    the batter pitch table) to the same grades vs RHB and vs LHB."""
+    if not groups:
+        return html.Div([_title(title), html.I("No data.")])
+    cols = report.STUFF_TABLE_COLS
+    grid = _bt_grid(cols, _ST_W)
+    blocks = [html.Div([_bt_cell(c, i, "header") for i, c in enumerate(cols)], style=grid)]
+    for g in groups:
+        row = html.Div([_fam_first_cell(g["row"]["Pitch"])]
+                       + [_bt_cell(g["row"][c], i, "family") for i, c in enumerate(cols) if i > 0], style=grid)
+        subs = [html.Div([_bt_cell(s[c], i, "sub") for i, c in enumerate(cols)], style=grid) for s in g["subs"]]
+        blocks.append(html.Details([html.Summary(row), *subs], className="fam"))
+    no_splits = all(s[c] == "" for g in groups for s in g["subs"] for c in cols[1:])
+    hint = ("vs RHB / vs LHB need the Stuff+ tables rebuilt: python -m backend.models.stuff_store --add-splits"
+            if no_splits and any(g["row"]["Stuff+"] for g in groups) else None)
+    total_w = sum(_ST_W.get(c, 90) for c in cols)
+    return html.Div([_title(f"{title}  (click a pitch for vs RHB / vs LHB)"),
+                     _scroll(html.Div(blocks, style={"minWidth": f"{total_w}px", "width": f"{total_w}px",
+                                                     "border": "1px solid #e2e2e2"})),
+                     *([html.Div(hint, style={"color": "#999", "fontSize": "12px", "fontStyle": "italic"})] if hint else [])])
+
+
 def _batter_pitchtable_block(rows, vs):
     """Collapsible pitch-type table grouped into families (native <details>, no callback needed)."""
     families = report.batter_pitch_families(rows, None if vs == "All" else vs)
@@ -208,14 +253,7 @@ def _batter_pitchtable_block(rows, vs):
     for fam in families:
         is_all = fam["family"] == "All"             # leading combined row: not collapsible, no arrow
         kind = "all" if is_all else "family"
-        name_bits = ([] if is_all else
-                     [html.Span("▶", className="fam-arrow",
-                                style={"display": "inline-block", "marginRight": "7px", "fontSize": "10px", "color": MAROON})])
-        name_bits.append(html.Span(fam["agg"]["Pitch"]))
-        first = html.Div(name_bits,
-                         style={"padding": "4px 8px", "fontSize": "12px", "fontFamily": FONT, "fontWeight": 700,
-                                "background": "#efdde0" if is_all else "#faf3f4", "whiteSpace": "nowrap",
-                                "borderBottom": "2px solid #d9b3b8" if is_all else "1px solid #eee"})
+        first = _fam_first_cell(fam["agg"]["Pitch"], is_all)
         row_cells = [first] + [_bt_cell(fam["agg"][c], i, kind) for i, c in enumerate(cols) if i > 0]
         row = html.Div(row_cells, style=grid)
         if is_all:
@@ -432,7 +470,7 @@ def _dropdown(did, options, value, width=None):
 # bringing one back is removing it from this set. Lookup and Shortlist retired 2026-10-16.
 RETIRED_TABS = {"lookup", "shortlist"}
 _TABS = [("About", "about"), ("Lookup", "lookup"), ("Pitchers", "pitcher"), ("Batters", "batter"),
-         ("Game Reports", "game"), ("Shortlist", "shortlist")]
+         ("Game Reports", "game"), ("Pitch Lab", "lab"), ("Shortlist", "shortlist")]
 _TABS = [(label, value) for label, value in _TABS if value not in RETIRED_TABS]
 role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": f"{110 * len(_TABS)}px", "marginBottom": "10px"},
                      colors={"primary": MAROON, "background": "#faf7f7", "border": "#e2c9cc"},
@@ -581,7 +619,7 @@ splits = html.Details(open=False, style={"margin": "8px 0", "fontFamily": FONT},
     html.Summary(_splits_label([], []), id="splits-summary",
                  style={"cursor": "pointer", "fontSize": "13px", "fontWeight": 600, "color": MAROON}),
     html.Div([
-        html.Div("Batter AND Count drive the arsenal and model tables AND the heatmap (heatmap stat: "
+        html.Div("Batter AND Count drive the arsenal, Contact and Stuff tables AND the heatmap (heatmap stat: "
                  "dropdown on the chart). Movement, release point + velocity show all pitches.",
                  style={"fontSize": "12px", "color": "#666", "marginBottom": "6px"}),
         html.Div([html.Span("Batter:", style=LABEL), _checklist("batter-check", ["LHH", "RHH"])]),
@@ -642,7 +680,7 @@ pitcher_report = html.Div(id="report", style={"display": "none"}, children=[
     html.Div(id="report-header"),
     _bio_edit_form("bio"),
     _re_env_control("re"),
-    # Tables first (summary, then the arsenal + model table, driven by the splits), then the charts.
+    # Tables first (summary, then the arsenal + Contact + Stuff tables, driven by the splits), then the charts.
     # This block is as wide as its widest table, and the summary + arsenal tables stretch to fill it,
     # so their edges line up (capped at the page width; past that the tables scroll sideways).
     html.Div([
@@ -1739,12 +1777,144 @@ game_panel = html.Div(id="game-panel", style={"display": "none"}, children=[
 ])
 
 
+# ── Pitch Lab (pitch_lab.py): a hypothetical arsenal graded by Stuff+, kept in this browser session ──
+_PL_REF = pitch_lab.reference()                 # None until `python -m delispice_app.pitch_lab --build`
+_PL_NOTE = {"fontFamily": FONT, "fontSize": "12px", "color": "#666", "margin": "4px 0", "maxWidth": "900px"}
+_PL_TYPE_OPTS = [{"label": pitch_lab.NAME[t], "value": t} for t in pitch_lab.TYPES]
+# 430 px: Dash hides a slider's number box when the slider is under 300 px wide.
+_PL_CARD = {"border": "1px solid #e2c9cc", "borderRadius": "6px", "padding": "8px 12px 6px", "background": "#fff",
+            "width": "430px", "boxSizing": "border-box", "fontFamily": FONT, "fontSize": "13px"}
+_PL_ROWLAB = {"width": "48px", "flex": "0 0 auto", "fontSize": "12px", "color": "#444"}
+_PL_SUB = {"fontSize": "11px", "color": "#888", "margin": "4px 0 0"}
+_PL_SHORT = {"velo": "Velo", "ivb": "IVB", "hb": "HB", "spin": "Spin", "rel_h": "Height", "rel_s": "Side"}
+
+
+def _pl_slider(uid, f, value, ptype, hand):
+    """One input: a slider across what D1 pitchers of the group throw, with Dash's box for an exact value."""
+    lo, hi = pitch_lab.slider_range(_PL_REF, ptype, f, hand)
+    # updatemode "mouseup": one grade when the drag ends, not one per pixel of it
+    return html.Div([html.Span(_PL_SHORT[f], style=_PL_ROWLAB),
+                     html.Div(dcc.Slider(id={"type": "pl-f", "uid": uid, "f": f}, min=lo, max=hi, step=pitch_lab.STEP[f],
+                                         value=value, marks=None, updatemode="mouseup"),
+                              style={"flex": "1 1 auto", "minWidth": 0}),
+                     html.Span(pitch_lab.UNIT[f], style={"width": "24px", "flex": "0 0 auto", "fontSize": "11px", "color": "#888"})],
+                    style={"display": "flex", "alignItems": "center", "gap": "4px", "margin": "1px 0"})
+
+
+def _pl_card(lab, p, nm, col):
+    uid, primary = p["uid"], p["type"] == pitch_lab.PRIMARY
+    own = pitch_lab.own_release(p)
+    head = html.Div([
+        html.Span("●", style={"color": col[uid]}), html.Span(nm[uid], style={"fontWeight": 600}),
+        html.Span("· required" if primary else "", style={"color": "#888", "fontSize": "11px"}),
+        html.Span(id={"type": "pl-badge", "uid": uid}, style={"marginLeft": "auto"}),     # Stuff+, from cb_pl_results
+        html.Div() if primary else html.Button("✕", id={"type": "pl-del", "uid": uid}, n_clicks=0,
+                                               title="Remove this pitch", style={**_BTN, "color": MAROON}),
+    ], style={"display": "flex", "alignItems": "center", "gap": "6px", "marginBottom": "4px", "minHeight": "24px"})
+    return html.Div([
+        head, *[_pl_slider(uid, f, p[f], p["type"], lab["hand"]) for f in ("velo", "ivb", "hb", "spin")],
+        dcc.Checklist(id={"type": "pl-own", "uid": uid}, value=["own"] if own else [],
+                      options=[{"label": " Own release point (otherwise the arm slot)", "value": "own"}],
+                      style={"fontSize": "12px", "color": "#555", "margin": "4px 0 2px"}),
+        *([_pl_slider(uid, f, p[f], p["type"], lab["hand"]) for f in ("rel_h", "rel_s")] if own else []),
+    ], style=_PL_CARD)
+
+
+def _pl_editor(lab):
+    """The arsenal form: a pitcher card (hand + arm slot) and one card per pitch. Rendered from the session
+    store only when its structure changes (see cb_pl_render), so a slider is never redrawn under the mouse."""
+    nm, col = pitch_lab.names(lab), pitch_lab.colors(lab)
+    pitcher = html.Div([
+        html.Div("Pitcher", style={"fontWeight": 600, "marginBottom": "4px", "minHeight": "24px", "lineHeight": "24px"}),
+        html.Div([html.Span("Throws", style=_PL_ROWLAB),
+                  dcc.RadioItems(id={"type": "pl-hand", "i": 0}, value=lab["hand"], inline=True, style=_GR_RADIO,
+                                 inputStyle={"marginRight": "4px", "marginLeft": "10px"},
+                                 options=[{"label": "Right", "value": "Right"}, {"label": "Left", "value": "Left"}])],
+                 style={"display": "flex", "alignItems": "center", "margin": "2px 0 6px"}),
+        html.Div("Arm slot: every pitch releases here unless it has its own release point", style=_PL_SUB),
+        *[_pl_slider("arsenal", f, lab[f], pitch_lab.PRIMARY, lab["hand"]) for f in ("rel_h", "rel_s")],
+    ], style={**_PL_CARD, "background": "#faf7f7"})
+    return html.Div([
+        html.Div([pitcher, *[_pl_card(lab, p, nm, col) for p in lab["pitches"]]],
+                 style={"display": "flex", "flexWrap": "wrap", "gap": "10px", "alignItems": "flex-start"}),
+        html.Div("Drag a slider, or type an exact value in the box beside it. Each slider runs past what D1 pitchers of "
+                 "that group throw, by 20% of the input's largest value at each end; the yellow warning starts at the "
+                 "outer 1% of D1 pitches. HB "
+                 "and release side use TrackMan's signs, like the Pitchers tab: + is a right-hander's arm side, so a "
+                 "left-hander's arm side is −. Switching Throws mirrors them.", style={**_PL_NOTE, "marginTop": "6px"})])
+
+
+def _pl_help():
+    chk = (_PL_REF or {}).get("check") or {}
+    acc = (f" Tested on {chk['n']:,} real D1 breaking balls graded both ways, the rebuilt acceleration moves "
+           f"Stuff+ by {chk['mean_abs']:.1f} points on average (r {chk['r']:.2f}, bias {chk['bias']:+.2f})."
+           if chk else "")
+    li = lambda *t: html.Li(list(t), style={"marginBottom": "4px"})
+    return html.Details(open=False, style={"margin": "10px 0", "background": "#faf7f7", "border": "1px solid #e2c9cc",
+                                           "padding": "2px 12px", "maxWidth": "900px"}, children=[
+        html.Summary("How the Pitch Lab grades", style={"cursor": "pointer", "fontWeight": 600, "fontSize": "13px",
+                                                        "fontFamily": FONT, "padding": "6px 0"}),
+        html.Ul(style={"fontFamily": FONT, "fontSize": "13px", "lineHeight": "1.5", "paddingLeft": "18px"}, children=[
+            li("It's the same Stuff+ model as the Pitchers tab. Each pitch is graded against an average D1 hitter "
+               "across all 12 counts and both batter sides, weighted the way D1 pitchers of that hand use "
+               "pitches of that group."),
+            li("Grades are within a group: 100 is the average D1 fastball, breaking ball or offspeed pitch, and "
+               "10 points is one standard deviation of single pitches. A fastball's 110 is not a slider's 110."),
+            li("The D1 average shape grades a little under 100 (the average four-seam is about 94). Real pitches of "
+               "each type do average about 100, but the model rewards standing out, so the average of their grades "
+               "is higher than the grade of their average shape."),
+            li("Every pitch besides the primary fastball is also graded on its velo, HB and IVB differences from "
+               "it, so changing the fastball moves the other grades. Pick the primary fastball in the "
+               "sensitivity chart to see how much."),
+            li("The breaking-ball model reads spin-induced acceleration, not movement. The lab rebuilds it from "
+               "your movement and velo with physics (break = ½·a·t², the flight time t coming from velo) plus a "
+               "small offset fit on D1 breaking balls." + acc),
+            li("The model learned from real D1 pitches. Past the edges of what D1 pitchers throw it gives no extra "
+               "credit, and a combination nobody throws is a guess. So inputs outside 98% of D1 pitches of the group get "
+               "a warning, and the sliders reach only a little past the most extreme ones."),
+            li("Not in the model: extension, spin axis, arm angle, command and sequencing."),
+            li("Your arsenal stays in this browser tab. A refresh keeps it; closing the tab clears it. Nothing is "
+               "saved on the server."),
+        ]),
+    ])
+
+
+lab_panel = html.Div(id="lab-panel", style={"display": "none"}, children=[
+    dcc.Store(id="pl-lab", storage_type="session", data=pitch_lab.default_lab(_PL_REF) if _PL_REF else None),
+    dcc.Store(id="pl-known", storage_type="memory"),     # the arsenal the form currently shows
+    html.Div("Pitch Lab", style={"fontSize": "20px", "fontWeight": 700, "fontFamily": FONT}),
+    html.Div("Build a hypothetical arsenal and see how the Stuff+ model grades it. Start with the primary "
+             "fastball, because every other pitch is also graded on its differences from it. Each pitch you add "
+             "starts at the D1 average for its type.",
+             style={"fontFamily": FONT, "fontSize": "13px", "color": "#555", "margin": "2px 0 10px", "maxWidth": "900px"}),
+    html.Div([html.Span("Add a pitch", style=LABEL),
+              dcc.Dropdown(id="pl-add-type", options=_PL_TYPE_OPTS, value="SL", clearable=False,
+                           style={"width": "150px", "fontSize": "13px"}),
+              html.Button("＋ Add", id="pl-add", n_clicks=0, style=_BTN),
+              html.Button("Start over", id="pl-reset", n_clicks=0, style={**_BTN, "marginLeft": "18px"})],
+             style={**_ROW, "marginBottom": "10px"}),
+    html.Div(id="pl-editor"),
+    html.Div(id="pl-results", style={"marginTop": "6px"}),
+    html.Div([_graph("pl-move-graph"),
+              html.Div([html.Div([html.Span("Sensitivity for", style=LABEL),
+                                  dcc.Dropdown(id="pl-sens-pitch", options=[], value=None, clearable=False,
+                                               style={"width": "170px", "fontSize": "13px"})], style=_ROW),
+                        html.Div("Each panel moves one input with everything else held; the dot is where it is "
+                                 "now, and grey is outside 98% of D1 pitches of its group. For the primary "
+                                 "fastball, the dashed lines are the other pitches: its velo, HB and IVB move "
+                                 "their grades too.", style={**_PL_NOTE, "maxWidth": "900px"}),
+                        _graph("pl-sens-graph")])],
+             style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "alignItems": "flex-start", "marginTop": "8px"}),
+    _pl_help(),
+])
+
+
 app.layout = html.Div([dcc.Store(id="retag-version", data=0),
                        dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
                        dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
                        dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"), selection,
                        html.Div([about_panel, lookup_panel, shortlist_panel, pitcher_report,
-                                 batter_report, game_panel], style={"padding": "12px 16px"})],
+                                 batter_report, game_panel, lab_panel], style={"padding": "12px 16px"})],
                       style={"fontFamily": FONT})
 
 
@@ -1757,16 +1927,17 @@ def cb_label(role):
 # ── About tab: show the About panel, hide the picker controls (reports hide via the player reset) ──
 @app.callback(Output("about-panel", "style"), Output("picker-controls", "style"),
               Output("shortlist-panel", "style"), Output("lookup-panel", "style"),
-              Output("gr-controls", "style"), Output("game-panel", "style"),
+              Output("gr-controls", "style"), Output("game-panel", "style"), Output("lab-panel", "style"),
               Input("role-tabs", "value"))
 def cb_about_toggle(role):
     about = {"padding": "8px 4px"} if role == "about" else {"display": "none"}
     shortlist = {"padding": "8px 4px"} if role == "shortlist" else {"display": "none"}
     lookup = {"padding": "8px 4px"} if role == "lookup" else {"display": "none"}
     game = {"display": "block"} if role == "game" else {"display": "none"}
-    # Lookup and Game Reports carry their own controls, so the shared player picker stays hidden there too.
-    picker = {"display": "none"} if role in ("about", "shortlist", "lookup", "game") else {"display": "block"}
-    return about, picker, shortlist, lookup, game, game
+    lab = {"padding": "8px 4px"} if role == "lab" else {"display": "none"}
+    # Lookup, Game Reports and the Pitch Lab carry their own controls, so the shared player picker stays hidden.
+    picker = {"display": "none"} if role in ("about", "shortlist", "lookup", "game", "lab") else {"display": "block"}
+    return about, picker, shortlist, lookup, game, game, lab
 
 
 # ── Cascading pickers (role-aware; all off the small in-memory index) ─────────────────────────────
@@ -2420,11 +2591,11 @@ def cb_gr_build(pid, start, end, dh, _rv, _bv, upload_key, re_lvl, re_yr, player
     if upload and upload["notes"]:
         files = html.Div([files, *[html.Div(n, style={"color": "#666", "fontSize": "12px", "fontFamily": FONT})
                                    for n in upload["notes"]]])
-    ars, model = game_report.arsenal_tables(rows, height_in, present)
-    d1_scale = bool(upload and upload.get("stuff_scale") == "D1")   # a Level-less upload: Stuff+ on D1's scale
+    ars, contact, stuff = game_report.arsenal_tables(rows, height_in, present)
+    d1_scale = bool(upload and upload.get("stuff_scale") == "D1")   # a non-D1 / Level-less upload: Stuff+ on D1's scale
     arsenal = html.Div([_scroll(html_table(ars, title=f"Arsenal · {rows.height:,} pitches", full_width=True)),
-                        _scroll(html_table(model, title="Model Tables · Stuff+ on the D1 scale" if d1_scale
-                                           else "Model Tables"))])
+                        _side_by_side(_scroll(html_table(contact, title="Contact")),
+                                      _stuff_table_block(stuff, "Stuff · Stuff+ on the D1 scale" if d1_scale else "Stuff"))])
     uids = rows["PitchUID"].to_list()
     retagged = len(set(uids) & set(data.load_retags()["pitch"]))
     info = f"{retagged:,} pitch(es) in this report are retagged." if retagged else "No retags in this report."
@@ -2486,6 +2657,126 @@ def cb_gr_revert(_ng, _np, uids, player, ver):
 )
 def cb_save_game_bio(n, height_raw, bday_raw, target, ver):
     return _save_bio(n, height_raw, bday_raw, target, ver)
+
+
+# ── Pitch Lab ────────────────────────────────────────────────────────────────────────────────────
+# The arsenal lives in `pl-lab` (sessionStorage: a refresh keeps it, closing the tab clears it).
+# `pl-known` is what the form shows. Moving a slider updates both, so the form never re-renders under the
+# mouse. Add / remove / start over / a hand switch / an own-release toggle update only `pl-lab`, and the
+# mismatch re-renders.
+def _pl_lab(lab):
+    return pitch_lab.fit_to_sliders(lab if pitch_lab.is_valid(lab) else pitch_lab.default_lab(_PL_REF), _PL_REF)
+
+
+@app.callback(Output("pl-editor", "children"), Output("pl-known", "data"),
+              Input("pl-lab", "modified_timestamp"), State("pl-lab", "data"), State("pl-known", "data"))
+def cb_pl_render(_ts, lab, known):
+    if _PL_REF is None:
+        return html.I("The Pitch Lab isn't set up on this machine yet: run "
+                      "python -m delispice_app.pitch_lab --build, then restart the app."), None
+    lab = _pl_lab(lab)
+    if lab == known:
+        raise PreventUpdate
+    return _pl_editor(lab), lab
+
+
+@app.callback(Output("pl-lab", "data"), Output("pl-known", "data", allow_duplicate=True),
+              Input("pl-add", "n_clicks"), Input("pl-reset", "n_clicks"),
+              Input({"type": "pl-del", "uid": ALLPM}, "n_clicks"),
+              Input({"type": "pl-hand", "i": ALLPM}, "value"),
+              Input({"type": "pl-own", "uid": ALLPM}, "value"),
+              Input({"type": "pl-f", "uid": ALLPM, "f": ALLPM}, "value"),
+              State("pl-add-type", "value"), State("pl-known", "data"),
+              prevent_initial_call=True)
+def cb_pl_edit(_add, _reset, _dels, hands, _owns, _vals, add_type, known):
+    if known is None:
+        raise PreventUpdate
+    # Every structural change starts from the form as it is now, including a value typed in a slider's box.
+    cur = pitch_lab.overlay(known, {(i["id"]["uid"], i["id"]["f"]): i["value"] for i in ctx.inputs_list[5]})
+    # Every trigger, not just ctx.triggered_id (the first): a click right after typing in a slider's box
+    # arrives together with the box's blur, and the click must win.
+    fired = {t["prop_id"]: t["value"] for t in ctx.triggered}
+    if "pl-reset.n_clicks" in fired:
+        return pitch_lab.default_lab(_PL_REF, cur["hand"]), no_update
+    for pid, tid in ctx.triggered_prop_ids.items():
+        # A pitch only leaves on a real click: the pattern Input also fires when the form re-renders.
+        if isinstance(tid, dict) and tid.get("type") == "pl-del" and fired.get(pid):
+            return pitch_lab.remove_pitch(cur, tid["uid"]), no_update
+    if "pl-add.n_clicks" in fired:
+        return pitch_lab.add_pitch(cur, add_type, _PL_REF), no_update
+    if hands and hands[0] != cur["hand"]:
+        return pitch_lab.mirror(cur, hands[0]), no_update
+    for i in ctx.inputs_list[4]:                     # an own-release box that no longer matches the pitch
+        p = next((q for q in cur["pitches"] if q["uid"] == i["id"]["uid"]), None)
+        if p is not None and bool(i["value"]) != pitch_lab.own_release(p):
+            return pitch_lab.set_own_release(cur, p["uid"], bool(i["value"])), no_update
+    if cur == known:                     # the form re-rendered (or nothing changed): nothing to save
+        raise PreventUpdate
+    return cur, cur
+
+
+def _pl_results(lab, graded):
+    """The grades table, the pitches that can't be graded yet, and the out-of-range warnings."""
+    nm, missing = pitch_lab.names(lab), pitch_lab.incomplete(lab)
+    if graded.height == 0:
+        return html.Div("Fill in every number for the primary fastball: every grade is measured against it.",
+                        style=_UNVERIFIED)
+    out = [html_table(pitch_lab.grade_table(lab, graded), title="Grades (100 = D1 average for the group, 10 = one SD)")]
+    if missing:
+        out.append(html.Div("Not graded until every number is filled in: " + ", ".join(nm[u] for u in missing) + ".",
+                            style=_PL_NOTE))
+    warns = pitch_lab.warnings(lab, graded, _PL_REF)
+    if warns:
+        out.append(html.Div([html.Div("⚠ " + m) for _, m in warns], style={**_UNVERIFIED, "fontSize": "12px"}))
+    if len(lab["pitches"]) >= pitch_lab.MAX_PITCHES:
+        out.append(html.Div(f"That's the most pitches the lab holds ({pitch_lab.MAX_PITCHES}).", style=_PL_NOTE))
+    return html.Div(out, style={"width": "fit-content", "maxWidth": "100%"})
+
+
+def _pl_badge(g):
+    if g is None:
+        return ""
+    return html.Span(["Stuff+ ", html.B(f"{g:.0f}", style={"fontSize": "16px", "color": MAROON})],
+                     style={"fontSize": "11px", "color": "#666"})
+
+
+# `pl-known` is an Input too: after a re-render it fills the new cards' Stuff+ badges.
+@app.callback(Output("pl-results", "children"), Output("pl-move-graph", "figure"),
+              Output("pl-sens-pitch", "options"), Output("pl-sens-pitch", "value"),
+              Output({"type": "pl-badge", "uid": ALLPM}, "children"),
+              Input("pl-lab", "data"), Input("pl-known", "data"), Input("role-tabs", "value"),
+              State("pl-sens-pitch", "value"))
+def cb_pl_results(lab, _known, role, sel):
+    if role != "lab" or _PL_REF is None:     # graded only once the tab is open (the model load is lazy)
+        raise PreventUpdate
+    badges = ctx.outputs_list[4]             # the cards on screen now, which can lag the store by a render
+    model = data._stuff_model()
+    if model is None:
+        return (html.I("No Stuff+ model on this machine: python -m backend.models.stuff_store --train."),
+                pitch_lab.empty_fig(), [], None, [""] * len(badges))
+    lab = _pl_lab(lab)
+    graded = pitch_lab.grade(lab, model, _PL_REF)
+    nm = pitch_lab.names(lab)
+    stuff = dict(zip(graded["uid"], graded["stuff"])) if graded.height else {}
+    opts = [{"label": nm[p["uid"]], "value": p["uid"]} for p in lab["pitches"]]
+    keep = sel if sel in nm else lab["pitches"][0]["uid"]
+    return (_pl_results(lab, graded), pitch_lab.movement_fig(lab, graded, _PL_REF), opts,
+            no_update if keep == sel else keep, [_pl_badge(stuff.get(b["id"]["uid"])) for b in badges])
+
+
+@app.callback(Output("pl-sens-graph", "figure"),
+              Input("pl-lab", "data"), Input("pl-sens-pitch", "value"), Input("role-tabs", "value"))
+def cb_pl_sensitivity(lab, uid, role):
+    if role != "lab" or _PL_REF is None:
+        raise PreventUpdate
+    model = data._stuff_model()
+    lab = _pl_lab(lab)
+    if model is None or uid not in pitch_lab.names(lab):
+        raise PreventUpdate                  # a removed pitch: cb_pl_results picks a new one
+    sens, bounds = pitch_lab.sensitivity(lab, uid, model, _PL_REF)
+    if sens.height == 0:
+        return pitch_lab.empty_fig("Fill in every number for this pitch and the primary fastball.", 960, 560)
+    return pitch_lab.sensitivity_fig(lab, uid, sens, bounds)
 
 
 def main():

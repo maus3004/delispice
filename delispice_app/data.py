@@ -585,7 +585,10 @@ def _with_eye(df: pl.DataFrame, sel_level: str = ALL) -> pl.DataFrame:
 # `python -m backend.models.stuff_store` — and a night's new games miss the table and are graded live.
 # A grade doesn't depend on the count, batter or result (it's graded against an average hitter across
 # all 24 count x side contexts), so the report's filters change which pitches are averaged, not a grade.
-STUFF_COLS = {"stuff": "Stuff", "whiff_plus": "WhiffPlus", "foul_plus": "FoulPlus", "contact_plus": "ContactPlus"}
+# The same four grades vs RHB / vs LHB only (StuffRHB, ..., ContactPlusLHB) are the platoon splits; a
+# table built before they existed has none, and they stay blank until `--add-splits` fills it.
+_STUFF_BASE = {"stuff": "Stuff", "whiff_plus": "WhiffPlus", "foul_plus": "FoulPlus", "contact_plus": "ContactPlus"}
+STUFF_COLS = {**_STUFF_BASE, **{f"{k}_{s}": f"{v}{s.upper()}" for s in ("rhb", "lhb") for k, v in _STUFF_BASE.items()}}
 _STUFF_RAW = ["PitchUID", "GameID", "PitcherId", "Pitcher", "PitcherThrows", "PitcherTeam", "TaggedPitchType",
               "RelSpeed", "SpinRate", "InducedVertBreak", "HorzBreak", "RelHeight", "RelSide", "ax0", "az0",
               "BatterSide"]
@@ -617,6 +620,8 @@ def _stuff_for(df: pl.DataFrame) -> pl.DataFrame:
     for (yr,), grp in df.partition_by("Year", as_dict=True).items():
         uids = grp.select("PitchUID").unique()
         cache = _stuff_cache(str(yr))
+        if cache is not None:                  # an older table without the platoon splits: blank splits
+            cache = cache.with_columns(pl.lit(None, dtype=pl.Float32).alias(c) for c in STUFF_COLS if c not in cache.columns)
         got = (uids.join(cache.select("PitchUID", *cols), on="PitchUID", how="left") if cache is not None
                else uids.with_columns(pl.lit(None, dtype=pl.String).alias("group"),
                                       *[pl.lit(None, dtype=pl.Float32).alias(c) for c in STUFF_COLS]))

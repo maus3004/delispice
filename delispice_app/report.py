@@ -43,8 +43,11 @@ IN_PLAY = pl.col("PitchCall") == "InPlay"
 BATTED_BALL = IN_PLAY & pl.col("ExitSpeed").is_not_null()
 PITCH_NAMES  = {"FourSeamFastBall": "Four-Seam", "TwoSeamFastBall": "Two-Seam", "ChangeUp": "Changeup"}
 NON_PITCHES  = ["Undefined", "Other"]
-# Per-pitch Stuff+ columns (data._with_stuff) -> the model table headers, in display order after xRV/BBE.
+# Per-pitch Stuff+ columns (data._with_stuff) -> the Stuff table headers, in display order.
 STUFF_GRADES = {"Stuff": "Stuff+", "WhiffPlus": "Whiff+", "FoulPlus": "Foul+", "ContactPlus": "Contact+"}
+# The platoon splits: column suffix (StuffRHB, ...) -> the Stuff table's dropdown row under each pitch.
+STUFF_SIDES = {"RHB": "vs RHB", "LHB": "vs LHB"}
+STUFF_TABLE_COLS = ["Pitch", *STUFF_GRADES.values()]
 # A pitch-type row's majority Stuff+ group (ties -> alphabetical, so a row always gets the same one).
 _IN_MAIN_GROUP = pl.col("StuffGroup") == pl.col("StuffGroup").drop_nulls().mode().sort().first()
 PITCH_COLORS = {"Four-Seam": "#d62728", "Fastball": "#d62728", "Two-Seam": "#ff7f0e", "Sinker": "#ff7f0e",
@@ -147,7 +150,7 @@ def build_summary(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def _arsenal_agg(df: pl.DataFrame) -> pl.DataFrame:
-    """One row per pitch type (most used first): every number the arsenal and model tables show."""
+    """One row per pitch type (most used first): every number the arsenal, Contact and Stuff tables show."""
     return (df.filter(pl.col("TaggedPitchType").is_not_null() & ~pl.col("TaggedPitchType").is_in(NON_PITCHES))
               .group_by("TaggedPitchType").agg(
                   pl.len().alias("count"),
@@ -171,7 +174,7 @@ def _arsenal_agg(df: pl.DataFrame) -> pl.DataFrame:
                   # row's MAJORITY group only. Each pitch is graded within the group the model put it in,
                   # and a tag row can straddle two (a changeup row with a few pitches graded as fastballs).
                   *[pl.col(c).filter(_IN_MAIN_GROUP if "StuffGroup" in df.columns else pl.lit(True)).mean().alias(c)
-                    for c in STUFF_GRADES if c in df.columns],
+                    for c in [*STUFF_GRADES, *[g + s for s in STUFF_SIDES for g in STUFF_GRADES]] if c in df.columns],
               ).sort("count", descending=True))
 
 
@@ -180,7 +183,8 @@ def _pitch_name(r) -> str:
 
 
 def build_arsenal(df: pl.DataFrame) -> pl.DataFrame:
-    """Shape, usage and results per pitch type. The model numbers are in ``build_model_table``."""
+    """Shape, usage and results per pitch type, ending with realized RV/100. Contact quality is in
+    ``build_contact_table`` and the model grades in ``build_stuff_rows``."""
     n = df.height
     rows = []
     for r in _arsenal_agg(df).iter_rows(named=True):
@@ -192,16 +196,27 @@ def build_arsenal(df: pl.DataFrame) -> pl.DataFrame:
                      "Avg Velo": num(r["velo"], 1), "Max Velo": num(r["velo_max"], 1), "Avg Spin": num(r["spin"], 0),
                      "Strike %": pct(r["strike"]), "Zone %": pct(r["zone"]), "WHIFF %": pct(whiff),
                      "Vert Break": num(r["vb"]), "Horz Break": num(r["hb"]), "Tilt": spin_clock(axis),
-                     "Extension": num(r["ext"]), "Hard Hit %": pct(r["hh"]), "Avg EV": num(r["ev"])})
+                     "Extension": num(r["ext"]), "RV/100": rv100(r["rv"])})
     return pl.DataFrame(rows)
 
 
-def build_model_table(df: pl.DataFrame) -> pl.DataFrame:
-    """The model table under the arsenal, same rows and order: run value (realized RV/100 and the
-    contact model's xRV/BBE), then Stuff+ and its pieces."""
-    return pl.DataFrame([{"Pitch": _pitch_name(r), "RV/100": rv100(r["rv"]), "xRV/BBE": num(r["xrv"], 3),
-                          **{label: num(r.get(c), 0) for c, label in STUFF_GRADES.items()}}
+def build_contact_table(df: pl.DataFrame) -> pl.DataFrame:
+    """The Contact table under the arsenal, same rows and order: exit velocity, hard-hit rate and the
+    contact model's xRV/BBE."""
+    return pl.DataFrame([{"Pitch": _pitch_name(r), "Avg EV": num(r["ev"]), "Hard Hit %": pct(r["hh"]),
+                          "xRV/BBE": num(r["xrv"], 3)}
                          for r in _arsenal_agg(df).iter_rows(named=True)])
+
+
+def build_stuff_rows(df: pl.DataFrame) -> list[dict]:
+    """The Stuff table, same rows and order as the arsenal: per pitch type ``{row, subs}``, where row is
+    Stuff+ and its pieces and subs are the same grades vs RHB, then vs LHB (the pitch's dropdown)."""
+    out = []
+    for r in _arsenal_agg(df).iter_rows(named=True):
+        grades = lambda suf: {label: num(r.get(c + suf), 0) for c, label in STUFF_GRADES.items()}
+        out.append({"row": {"Pitch": _pitch_name(r), **grades("")},
+                    "subs": [{"Pitch": label, **grades(suf)} for suf, label in STUFF_SIDES.items()]})
+    return out
 
 
 # ── Batter report (starting scaffold — tables/charts to be extended) ──────────────────────────────

@@ -11,6 +11,8 @@ templates and graded.
     build them on each machine, the data is already there. Training also writes every season's
     score table.
   * Re-score from the existing model:   python -m backend.models.stuff_store --score-only --years 2026
+  * Add the vs-RHB / vs-LHB columns to tables built before they existed, without changing any grade:
+    python -m backend.models.stuff_store --add-splits --years 2026
   * Serve: ``load()`` -> StuffModel (or None), ``stuff_lookup(year)`` -> PitchUID -> grades.
 
 P4 pitches are D1 pitches graded by the same model, so the P4 level reads the D1 tables (PR6).
@@ -95,6 +97,30 @@ def build_score_cache(year: str) -> tuple[Path, int]:
     return path, scores.height
 
 
+def add_side_splits(year: str) -> tuple[Path, int, int]:
+    """Add the vs-RHB / vs-LHB grades to an existing score table, keeping its grades as they are.
+    The season is re-tagged and re-graded with the frozen model, and a pitch takes the new splits only
+    where that reproduces its stored Stuff+ (same group, within 0.01). A one-season re-score merges a
+    few pitcher IDs and retags a few pitches differently from training (~0.1%); those get null splits
+    rather than splits that don't match their grade. Returns (path, pitches, pitches with splits)."""
+    from backend.models import stuff_v1
+    from backend.models.cq_store import _atomic_write
+    model = load()
+    if model is None:
+        raise FileNotFoundError("no stuff artifact; train it first: python -m backend.models.stuff_store --train")
+    path = _score_path(year)
+    old = pl.read_parquet(path)
+    sides = stuff_v1.StuffModel.SIDE_COLS
+    new = (stuff_v1.score(stuff_v1.load_pitches([year], with_outcomes=False), model).unique(subset=["PitchUID"])
+           .select("PitchUID", pl.col("group").alias("_g"), pl.col("stuff").alias("_s"), *sides))
+    keep = (pl.col("group") == pl.col("_g")) & ((pl.col("stuff") - pl.col("_s")).abs() < 0.01)
+    out = (old.drop(sides, strict=False).join(new, on="PitchUID", how="left")
+              .with_columns(*[pl.when(keep).then(pl.col(c)).alias(c) for c in sides])
+              .drop("_g", "_s"))
+    _atomic_write(out, path)
+    return path, out.height, out.height - out["stuff_rhb"].null_count()
+
+
 def stuff_lookup(year: str, level: str = "D1") -> pl.DataFrame | None:
     """PitchUID -> grades for one season; None when the table hasn't been built. P4 reads D1."""
     from backend.models import contact_quality as cq
@@ -115,6 +141,8 @@ def main(argv=None):
     p = argparse.ArgumentParser(description="Train / re-score Stuff+ v1 (D1).")
     p.add_argument("--train", action="store_true", help="train the model on --years (default: all) and score them")
     p.add_argument("--score-only", action="store_true", help="re-score --years from the existing model")
+    p.add_argument("--add-splits", action="store_true",
+                   help="add the vs-RHB / vs-LHB columns to --years' existing tables (grades unchanged)")
     p.add_argument("--years", nargs="*", default=None, help="seasons (default: every season on disk)")
     p.add_argument("--fraction", type=float, default=1.0, help="smoke test: train on this share of pitchers")
     args = p.parse_args(argv)
@@ -135,8 +163,12 @@ def main(argv=None):
                 failed.append(y)
         if failed:
             raise SystemExit(f"stuff: re-score failed for {failed}")
+    elif args.add_splits:
+        for y in years:
+            path, n, k = add_side_splits(y)
+            print(f"saved {path.name}: splits on {k:,} of {n:,} pitches ({n - k:,} left blank)", flush=True)
     else:
-        p.error("pass --train or --score-only")
+        p.error("pass --train, --score-only or --add-splits")
 
 
 if __name__ == "__main__":

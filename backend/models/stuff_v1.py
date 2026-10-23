@@ -24,6 +24,11 @@ SDs better than the group average, on a scale FROZEN with the model (PR3: retrai
 Whiff+, Foul+ and Contact+ are the pieces on the same kind of scale. The run breakdown swaps this pitch's
 pieces in one at a time along the chain, against the group's average pieces.
 
+**Platoon splits** (``*_rhb`` / ``*_lhb``): the same four grades with the weights restricted to one
+batter side, on the same frozen scale, so a vs-RHB 110 and a blended 110 mean the same thing. The model's
+batter feature is same/opposite hand, so vs RHB is the same-hand half for a RHP and the opposite-hand half
+for a LHP. The blended grade is the weighted mix of the two.
+
 **Inputs a grade needs:** shape only (velo, IVB/HB or acceleration, spin, release height/side) plus the
 pitcher's FB_1 that outing for the differentials. The outing's real counts, batters and results don't
 enter a grade. Feature runs per group (PR1): movement for FB and OS, acceleration for BB.
@@ -69,6 +74,15 @@ def feats_for(group: str) -> list[str]:
 
 # The grading contexts: 12 counts x (same-hand, opposite-hand) batter.
 CTX = [(b, s, side) for b in range(4) for s in range(3) for side in (1, 0)]
+SAME = np.array([side for _, _, side in CTX], dtype=float)     # 1 at the same-hand contexts
+SIDES = ("rhb", "lhb")                                          # the platoon-split suffixes
+
+
+def side_weights(w: np.ndarray, hand: str) -> dict[str, np.ndarray]:
+    """A pitch's 24 grading weights restricted to one batter side and renormalized: vs RHB, vs LHB."""
+    same, opp = w * SAME, w * (1 - SAME)
+    same, opp = same / same.sum(), opp / opp.sum()
+    return {"rhb": same, "lhb": opp} if hand == "Right" else {"rhb": opp, "lhb": same}
 
 LGB_PARAMS = dict(learning_rate=0.05, num_leaves=31, max_depth=6, min_child_samples=500,
                   n_jobs=-1, verbose=-1, seed=42)
@@ -409,24 +423,30 @@ class StuffModel:
         return pl.concat([self._raw_grades_block(P.slice(a, GRADE_CHUNK)) for a in range(0, P.height, GRADE_CHUNK)])
 
     def _raw_grades_block(self, P: pl.DataFrame) -> pl.DataFrame:
-        keys = ["runs", "whiff", "foul", "contact", "d_whiff", "d_foul", "d_contact"]
+        keys = ["runs", "whiff", "foul", "contact", "d_whiff", "d_foul", "d_contact",
+                *[f"{k}_{s}" for s in SIDES for k in ("runs", "whiff", "foul", "contact")]]
         out = {k: np.full(P.height, np.nan) for k in keys}
         fr = P.select("group", "PitcherThrows", *SHAPE_ALL, *DIFFS).with_row_index("_i")
         for (g, hand), d in fr.partition_by(["group", "PitcherThrows"], as_dict=True).items():
             if g not in GROUPS or hand not in self.weights.get(g, {}):
                 continue
             w, (wb, fb, vb), idx = self.weights[g][hand], self.avg_pieces[g], d["_i"].to_numpy()
+            ws = side_weights(w, hand)
             V0 = self._value(wb, fb, vb)
             for a, n, (pw, pf, pv) in self._pieces(g, d):
                 V, V1, V2 = self._value(pw, pf, pv), self._value(pw, fb, vb), self._value(pw, pf, vb)
                 sl = idx[a:a + n]
                 out["runs"][sl], out["whiff"][sl], out["foul"][sl], out["contact"][sl] = V @ w, pw @ w, pf @ w, pv @ w
                 out["d_whiff"][sl], out["d_foul"][sl], out["d_contact"][sl] = (V1 - V0) @ w, (V2 - V1) @ w, (V - V2) @ w
+                for s, wsd in ws.items():
+                    out[f"runs_{s}"][sl], out[f"whiff_{s}"][sl] = V @ wsd, pw @ wsd
+                    out[f"foul_{s}"][sl], out[f"contact_{s}"][sl] = pf @ wsd, pv @ wsd
         return P.select("PitchUID").with_columns(**{k: pl.Series(v) for k, v in out.items()})
 
     # (column, output name, higher raw value is better for the pitcher)
     PLUS = [("runs", "stuff", False), ("whiff", "whiff_plus", True), ("foul", "foul_plus", True),
             ("contact", "contact_plus", False)]
+    SIDE_COLS = [f"{name}_{s}" for _, name, _ in PLUS for s in SIDES]       # stuff_rhb, stuff_lhb, ..., contact_plus_lhb
 
     def set_scale(self, P: pl.DataFrame, raw: pl.DataFrame):
         """Freeze the per-group mean/SD that define 100 and 10 points (PR2: ``SCALE_METHOD``)."""
@@ -440,8 +460,8 @@ class StuffModel:
         self.meta["scale_method"] = SCALE_METHOD
 
     def grade(self, P: pl.DataFrame) -> pl.DataFrame:
-        """PitchUID + Stuff+, Whiff+, Foul+, Contact+, expected runs per swing and runs saved per 100
-        swings by piece (positive = good for the pitcher)."""
+        """PitchUID + Stuff+, Whiff+, Foul+, Contact+, expected runs per swing, runs saved per 100
+        swings by piece (positive = good for the pitcher) and the four grades vs RHB / vs LHB only."""
         return self.apply_scale(self.raw_grades(P), P)
 
     def apply_scale(self, raw: pl.DataFrame, P: pl.DataFrame) -> pl.DataFrame:
@@ -450,11 +470,12 @@ class StuffModel:
         for c, name, higher in self.PLUS:
             mu = pl.col("group").replace_strict({g: self.scale[g][c][0] for g in GROUPS}, default=None)
             sd = pl.col("group").replace_strict({g: self.scale[g][c][1] for g in GROUPS}, default=None)
-            exprs.append((100 + 10 * (1 if higher else -1) * (pl.col(c) - mu) / sd).alias(name))
+            for suf in ("", *[f"_{s}" for s in SIDES]):       # the splits use the blended grade's scale
+                exprs.append((100 + 10 * (1 if higher else -1) * (pl.col(c + suf) - mu) / sd).alias(name + suf))
         return (raw.with_columns(exprs)
                    .with_columns(*[(-100 * pl.col(f"d_{p}")).alias(f"saved_{p}") for p in PIECES])
                    .select("PitchUID", "stuff", "whiff_plus", "foul_plus", "contact_plus", "runs",
-                           "saved_whiff", "saved_foul", "saved_contact"))
+                           "saved_whiff", "saved_foul", "saved_contact", *self.SIDE_COLS))
 
     # ── persistence: LightGBM text + JSON (no pickle; survives library upgrades, readable) ──
     def save(self, path):

@@ -297,8 +297,8 @@ LINE_NEEDS = {"IP": ["OutsOnPlay", "KorBB"], "Strike %": ["PitchCall"], "Zone %"
 ARSENAL_NEEDS = {"Avg Velo": ["RelSpeed"], "Max Velo": ["RelSpeed"], "Avg Spin": ["SpinRate"],
                  "Strike %": ["PitchCall"], "Zone %": _LOC,
                  "WHIFF %": ["PitchCall"], "Vert Break": ["InducedVertBreak"], "Horz Break": ["HorzBreak"],
-                 "Tilt": ["SpinAxis"], "Extension": ["Extension"], "Arm Angle": ["RelHeight", "RelSide"],
-                 "Hard Hit %": ["ExitSpeed"], "Avg EV": ["ExitSpeed"]}
+                 "Tilt": ["SpinAxis"], "Extension": ["Extension"], "Arm Angle": ["RelHeight", "RelSide"]}
+CONTACT_NEEDS = {"Hard Hit %": ["ExitSpeed"], "Avg EV": ["ExitSpeed"]}
 
 
 def _blank_missing(df: pl.DataFrame, present: set[str] | None, needs: dict[str, list[str]]) -> pl.DataFrame:
@@ -355,9 +355,9 @@ def arm_angles(rows: pl.DataFrame, height_in: int | None) -> dict[str, float]:
 
 
 def arsenal_tables(rows: pl.DataFrame, height_in: int | None,
-                   present: set[str] | None = None) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """(arsenal, model table), same rows and order as the Pitchers tab's: the arsenal with the Arm Angle
-    after Extension; rates blank for pitch types under SMALL_SAMPLE pitches."""
+                   present: set[str] | None = None) -> tuple[pl.DataFrame, pl.DataFrame, list[dict]]:
+    """(arsenal, Contact table, Stuff rows), same rows and order as the Pitchers tab's: the arsenal with
+    the Arm Angle after Extension; rates blank for pitch types under SMALL_SAMPLE pitches."""
     counts = _pitch_counts(rows)
     ars = report.build_arsenal(rows)
     if ars.height:
@@ -368,10 +368,11 @@ def arsenal_tables(rows: pl.DataFrame, height_in: int | None,
         cols = ars.columns
         at = cols.index("Extension") + 1
         ars = ars.select([*cols[:at], "Arm Angle", *[c for c in cols[at:] if c != "Arm Angle"]])
-        ars = _blank_missing(_blank_small(ars, counts, ["Strike %", "Zone %", "WHIFF %", "Hard Hit %"]),
+        ars = _blank_missing(_blank_small(ars, counts, ["Strike %", "Zone %", "WHIFF %", "RV/100"]),
                              present, ARSENAL_NEEDS)
-    model = _blank_small(report.build_model_table(rows), counts, ["RV/100", "xRV/BBE"])
-    return ars, model
+    contact = _blank_missing(_blank_small(report.build_contact_table(rows), counts, ["Hard Hit %", "xRV/BBE"]),
+                             present, CONTACT_NEEDS)
+    return ars, contact, report.build_stuff_rows(rows)
 
 
 # ── Location charts ──────────────────────────────────────────────────────────────────────────────
@@ -471,8 +472,8 @@ def read_upload(filename: str, content: bytes) -> dict:
     Every column is matched BY NAME against TrackMan's 170-column schema (order doesn't matter):
     unknown columns are ignored, missing ones become blank (and the numbers needing them are blanked),
     and values that don't read as their type become blank and are counted. Then the same typo fixes as
-    the pipeline (fix_dictionary), base states for a full game file (so it gets run value), and the same
-    xRV / RV / Stuff+ scoring as served rows, which stays blank without a Level."""
+    the pipeline (fix_dictionary), base states for a full game file (so it gets run value), the same
+    xRV / RV scoring as served rows (blank without a Level), and Stuff+ on the D1 scale whatever the Level."""
     from pipeline_v2 import baserunner, fix_dictionary
     from pipeline_v2.trackman_schema import pl_csv_schema as schema
     name = PurePosixPath(filename or "upload").name
@@ -535,17 +536,14 @@ def read_upload(filename: str, content: bytes) -> dict:
             df = step(df)
         except Exception:
             pass
-    # Stuff+ grades D1 pitches only (one model, trained on D1). A file with no Level at all (a practice /
-    # live BP export) is graded on that D1 scale anyway, and the report says so; a file that names
-    # another level keeps Stuff+ blank, as database games at that level do.
-    stuff_scale = None
+    # Stuff+ has one model, trained on D1, and _with_stuff grades D1 pitches only. An upload is graded on
+    # that D1 scale whatever its Level says (none, as in a practice / live BP export, or another level),
+    # and the report says so; database games at other levels still keep Stuff+ blank.
+    not_d1 = df.filter(pl.col("Level").is_null() | (pl.col("Level") != "D1"))
+    stuff_scale = "D1" if not_d1.height else None
     try:
-        if "Level" in present:
-            df = data._with_stuff(df)
-        else:
-            df = (data._with_stuff(df.with_columns(pl.lit("D1").alias("Level")))
-                      .with_columns(pl.lit(None, dtype=pl.Utf8).alias("Level")))
-            stuff_scale = "D1"
+        df = (data._with_stuff(df.with_columns(pl.col("Level").alias("_level"), pl.lit("D1").alias("Level")))
+                  .with_columns(pl.col("_level").alias("Level")).drop("_level"))
     except Exception:
         pass
     for c in ("xRV", "RV", *data.STUFF_COLS.values()):
@@ -559,6 +557,10 @@ def read_upload(filename: str, content: bytes) -> dict:
         notes.append("No Level column: Stuff+ is graded on the D1 scale (the model's only scale). RV and "
                      "xRV are blank unless you pick a run environment (⚙ under the name), which gives "
                      "xRV against that level.")
+    elif stuff_scale:
+        others = sorted(not_d1["Level"].drop_nulls().unique().to_list())
+        notes.append(f"Level {', '.join(others) or 'blank'}{' (not D1)' if others else ''}: Stuff+ is graded "
+                     "on the D1 scale (the model's only scale).")
     if lost:
         notes.append("Values that couldn't be read (left blank): "
                      + ", ".join(f"{c} ×{n}" for c, n in sorted(lost.items(), key=lambda t: -t[1])[:8]) + ".")

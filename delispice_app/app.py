@@ -45,14 +45,17 @@ def _title(text):
     return html.Div(text, style={"fontWeight": 600, "margin": "12px 0 3px", "fontFamily": FONT})
 
 
-def html_table(df, title=None, empty_msg="No data.", full_width=False):
+def html_table(df, title=None, empty_msg="No data.", full_width=False, compact=False):
     """A polars DataFrame -> styled html.Table (maroon header), or an italic empty message.
-    ``full_width`` stretches the table to its container (to line tables up with each other)."""
+    ``full_width`` stretches the table to its container (to line tables up with each other).
+    ``compact`` lets headers wrap and narrows the cell padding, so a wide table fits a narrower window
+    before it has to scroll sideways (the Game Reports arsenal: 1,536 px -> 1,025 px at its narrowest)."""
     if df is None or df.height == 0:
         body = html.I(empty_msg)
     else:
-        head = html.Tr([html.Th(c, style=TH) for c in df.columns])
-        rows = [html.Tr([html.Td("" if v is None else v, style=TD) for v in r]) for r in df.iter_rows()]
+        th, td = ({**TH, "whiteSpace": "normal", "padding": "4px 6px"}, {**TD, "padding": "3px 6px"}) if compact else (TH, TD)
+        head = html.Tr([html.Th(c, style=th) for c in df.columns])
+        rows = [html.Tr([html.Td("" if v is None else v, style=td) for v in r]) for r in df.iter_rows()]
         body = html.Table([head, *rows], style={**TABLE, "width": "100%"} if full_width else TABLE)
     return html.Div([_title(title), body]) if title else body
 
@@ -2673,7 +2676,7 @@ def cb_gr_build(pid, start, end, dh, _rv, _bv, upload_key, re_lvl, re_yr, player
                                    for n in upload["notes"]]])
     ars, contact, stuff = game_report.arsenal_tables(rows, height_in, present)
     d1_scale = bool(upload and upload.get("stuff_scale") == "D1")   # a non-D1 / Level-less upload: Stuff+ on D1's scale
-    arsenal = html.Div([_scroll(html_table(ars, title=f"Arsenal · {rows.height:,} pitches", full_width=True)),
+    arsenal = html.Div([_scroll(html_table(ars, title=f"Arsenal · {rows.height:,} pitches", full_width=True, compact=True)),
                         _side_by_side(_scroll(html_table(contact, title="Contact")),
                                       _stuff_table_block(stuff, "Stuff · Stuff+ on the D1 scale" if d1_scale else "Stuff"))])
     uids = rows["PitchUID"].to_list()
@@ -2683,8 +2686,8 @@ def cb_gr_build(pid, start, end, dh, _rv, _bv, upload_key, re_lvl, re_yr, player
                                      upload=bool(upload), height_in=height_in)
     return ("", dh_opts, {"marginTop": "8px"} if dh_opts else {"display": "none"}, {"display": "block"},
             header, html.Div(note, style=_UNVERIFIED) if note else "", files,
-            _scroll(html_table(game_report.line_table(rows, present), full_width=True)),
-            (_scroll(html_table(game_report.per_game_table(rows, sel, present), title="By game", full_width=True))
+            _scroll(html_table(game_report.line_table(rows, present), full_width=True, compact=True)),
+            (_scroll(html_table(game_report.per_game_table(rows, sel, present), title="By game", full_width=True, compact=True))
              if sel.height > 1 else ""),
             report.movement_fig(rows), report.release_fig(rows, height_in), arsenal,
             *game_report.location_figs(rows, has_results=present is None or "PlayResult" in present),

@@ -271,7 +271,7 @@ def files_table(games: pl.DataFrame, status: str | None = None) -> pl.DataFrame:
 
 # ── Tables ───────────────────────────────────────────────────────────────────────────────────────
 LINE_COLS = ["IP", "NP", "Strike %", "Zone %", "Zone-Pre2S%", "Chase%", "IZ-Whiff%", "P/PA", "TBF",
-             "Batters Retired", "BB + HBP", "SO", "Hits", "Extension", "K%", "BB%"]
+             "Batters Retired", "BB + HBP", "SO", "Hits", "K%", "BB%"]      # Extension dropped 2026-10-28 (arsenal has it)
 
 # Chase%, IZ-Whiff% and Zone-Pre2S% (added 2026-10-28), as (numerator, denominator) pitch filters. The zone
 # is Zone %'s box (report.ZONE) and a swing is Whiff %'s (report.SWING_CALLS), so they agree with the
@@ -304,7 +304,7 @@ def _line(rows: pl.DataFrame) -> dict:
             **{name: report.pct(rates[name]) for name in ("Zone-Pre2S%", "Chase%", "IZ-Whiff%")},
             "P/PA": report.num(s["NP"] / s["TBF"]) if s["TBF"] else "", "TBF": s["TBF"],
             "Batters Retired": s["Batters Retired"], "BB + HBP": s["BB + HBP"], "SO": s["SO"],
-            "Hits": s["Hits"], "Extension": s["Extension"], "K%": s["K%"], "BB%": s["BB%"]}
+            "Hits": s["Hits"], "K%": s["K%"], "BB%": s["BB%"]}
 
 
 # What each number needs from the file: an uploaded file without these columns gets the number blanked
@@ -313,12 +313,13 @@ _LOC = ["PlateLocSide", "PlateLocHeight"]
 ZONE_RATE_NEEDS = {"Chase%": ["PitchCall", *_LOC], "IZ-Whiff%": ["PitchCall", *_LOC], "Zone-Pre2S%": ["Strikes", *_LOC]}
 LINE_NEEDS = {**ZONE_RATE_NEEDS, "IP": ["OutsOnPlay", "KorBB"], "Strike %": ["PitchCall"], "Zone %": _LOC, "P/PA": ["PitchofPA"], "TBF": ["PitchofPA"],
               "Batters Retired": ["KorBB", "PlayResult"], "BB + HBP": ["KorBB", "PitchCall"], "SO": ["KorBB"],
-              "Hits": ["PlayResult"], "Extension": ["Extension"], "K%": ["KorBB", "PitchofPA"],
+              "Hits": ["PlayResult"], "K%": ["KorBB", "PitchofPA"],
               "BB%": ["KorBB", "PitchofPA"]}
 ARSENAL_NEEDS = {**ZONE_RATE_NEEDS, "Avg Velo": ["RelSpeed"], "Max Velo": ["RelSpeed"], "Avg Spin": ["SpinRate"],
                  "Strike %": ["PitchCall"], "Zone %": _LOC,
                  "WHIFF %": ["PitchCall"], "Vert Break": ["InducedVertBreak"], "Horz Break": ["HorzBreak"],
-                 "Tilt": ["SpinAxis"], "Extension": ["Extension"], "Arm Angle": ["RelHeight", "RelSide"]}
+                 "Tilt": ["SpinAxis"], "Extension": ["Extension"], "Arm Angle": ["RelHeight", "RelSide"],
+                 "Rel Height": ["RelHeight"], "Rel Side": ["RelSide"]}
 CONTACT_NEEDS = {"Hard Hit %": ["ExitSpeed"], "Avg EV": ["ExitSpeed"]}
 
 
@@ -375,34 +376,43 @@ def arm_angles(rows: pl.DataFrame, height_in: int | None) -> dict[str, float]:
     return {report.PITCH_NAMES.get(k, k): a for k, a in t.group_by("TaggedPitchType").agg(pl.col("arm").mean()).iter_rows()}
 
 
-def zone_rates(rows: pl.DataFrame) -> dict[str, dict]:
-    """Display pitch name -> {Chase%, IZ-Whiff%, Zone-Pre2S%} as fractions (the arsenal's rows)."""
+REL_COLS = {"Rel Height": "RelHeight", "Rel Side": "RelSide"}    # average release point (ft, pitcher's view)
+
+
+def type_extras(rows: pl.DataFrame) -> dict[str, dict]:
+    """Display pitch name -> the arsenal's Game Reports-only numbers: Chase%, IZ-Whiff% and Zone-Pre2S%
+    (fractions) and the average Rel Height / Rel Side (ft)."""
     t = rows.filter(pl.col("TaggedPitchType").is_not_null() & ~pl.col("TaggedPitchType").is_in(report.NON_PITCHES))
+    aggs = [*_zone_rate_exprs(), *[pl.col(src).mean().alias(name) for name, src in REL_COLS.items()]]
     return {report.PITCH_NAMES.get(r["TaggedPitchType"], r["TaggedPitchType"]): r
-            for r in t.group_by("TaggedPitchType").agg(_zone_rate_exprs()).iter_rows(named=True)}
+            for r in t.group_by("TaggedPitchType").agg(aggs).iter_rows(named=True)}
+
+
+# The Game Reports arsenal, left to right (changed 2026-10-28, Matt's order): usage and velo, then the
+# pitch's shape and release, then the results. Pitch types stay in the Pitchers tab's order (most used first).
+ARSENAL_COLS = ["Pitch", "Count (%)", "Avg Velo", "Max Velo", "Avg Spin",
+                "Vert Break", "Horz Break", "Tilt", "Extension", "Arm Angle", *REL_COLS,
+                "Strike %", "Zone %", "Zone-Pre2S%", "Chase%", "WHIFF %", "IZ-Whiff%", "RV/100"]
 
 
 def arsenal_tables(rows: pl.DataFrame, height_in: int | None,
                    present: set[str] | None = None) -> tuple[pl.DataFrame, pl.DataFrame, list[dict]]:
-    """(arsenal, Contact table, Stuff rows), same rows and order as the Pitchers tab's: the arsenal with
-    Zone-Pre2S% and Chase% after Zone %, IZ-Whiff% after WHIFF % and the Arm Angle after Extension;
-    rates blank for pitch types under SMALL_SAMPLE pitches."""
+    """(arsenal, Contact table, Stuff rows), same rows as the Pitchers tab's: the arsenal in ARSENAL_COLS
+    order, with the Arm Angle, Rel Height / Rel Side and the zone rates added; rates blank for pitch
+    types under SMALL_SAMPLE pitches."""
     counts = _pitch_counts(rows)
     ars = report.build_arsenal(rows)
     if ars.height:
-        arms, zr = arm_angles(rows, height_in), zone_rates(rows)
+        arms, ex = arm_angles(rows, height_in), type_extras(rows)
         ars = ars.with_columns(
             pl.col("Pitch").map_elements(lambda p: f"{arms[p]:.0f}°" if p in arms else "",
                                          return_dtype=pl.Utf8).alias("Arm Angle"),
-            *[pl.col("Pitch").map_elements(lambda p, k=k: report.pct(zr.get(p, {}).get(k)),
-                                           return_dtype=pl.Utf8).alias(k) for k in ZONE_RATES])
-        after = {"Zone %": ["Zone-Pre2S%", "Chase%"], "WHIFF %": ["IZ-Whiff%"], "Extension": ["Arm Angle"]}
-        added = {c for cs in after.values() for c in cs}
-        order = []
-        for c in ars.columns:
-            if c not in added:
-                order += [c, *after.get(c, [])]
-        ars = ars.select(order)
+            *[pl.col("Pitch").map_elements(lambda p, k=k: report.pct(ex.get(p, {}).get(k)),
+                                           return_dtype=pl.Utf8).alias(k) for k in ZONE_RATES],
+            *[pl.col("Pitch").map_elements(lambda p, k=k: report.num(ex.get(p, {}).get(k)),
+                                           return_dtype=pl.Utf8).alias(k) for k in REL_COLS])
+        # a column report.build_arsenal adds later still shows, at the end
+        ars = ars.select([c for c in ARSENAL_COLS if c in ars.columns] + [c for c in ars.columns if c not in ARSENAL_COLS])
         ars = _blank_missing(_blank_small(ars, counts, ["Strike %", "Zone %", "WHIFF %", "RV/100", *ZONE_RATES]),
                              present, ARSENAL_NEEDS)
     contact = _blank_missing(_blank_small(report.build_contact_table(rows), counts, ["Hard Hit %", "xRV/BBE"]),

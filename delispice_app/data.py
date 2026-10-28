@@ -49,6 +49,7 @@ PITCHER_COLS = [
     "InducedVertBreak", "HorzBreak", "PlateLocHeight", "PlateLocSide", "ExitSpeed",
     "Angle", "Direction",            # launch conditions for the contact-quality (xRV) model
     "GameID", "ax0", "az0",          # Stuff+: the outing (FB_1 reference) and acceleration, for live grading
+    "Batter", "Inning", "Top/Bottom", "PAofInning", "PitchNo", "Time",   # Game Reports' pitch-by-pitch log
 ]
 BATTER_COLS = [
     "Date", "Batter", "BatterId", "BatterSide", "BatterTeam", "Level", "Pitcher", "PitcherThrows", "PitchUID",
@@ -70,8 +71,8 @@ ROLES = {
 # all-string schema an untyped empty frame would have.
 _STR_COLS = {"Date", "Pitcher", "PitcherId", "PitcherThrows", "PitcherTeam", "Batter", "BatterId",
              "BatterSide", "BatterTeam", "Level", "PitchUID", "TaggedPitchType", "PitchCall",
-             "KorBB", "PlayResult", "TaggedHitType", "GameID"}
-_INT_COLS = {"Balls", "Strikes", "PitchofPA", "OutsOnPlay", "RunsScored"}
+             "KorBB", "PlayResult", "TaggedHitType", "GameID", "Top/Bottom", "Time"}
+_INT_COLS = {"Balls", "Strikes", "PitchofPA", "OutsOnPlay", "RunsScored", "Inning", "PAofInning", "PitchNo"}
 _BOOL_COLS = {"half_complete", "is_verified"}
 _STR_COLS |= {"re288_state", "next_re288_state"}
 
@@ -378,7 +379,8 @@ def _rows_cached(role: str, player: str, level: str, team: str, years_key: tuple
         where.append("substr(Date, 1, 4) IN (" + ", ".join("?" * len(years_sel)) + ")")
         params += years_sel
     con = _con()
-    df = con.execute(f"SELECT {', '.join(_cols(role))} FROM read_parquet({glob_list}) "
+    select = ", ".join('"' + c + '"' for c in _cols(role))      # quoted, for "Top/Bottom"
+    df = con.execute(f"SELECT {select} FROM read_parquet({glob_list}) "
                      f"WHERE {' AND '.join(where)}", params).pl()
     con.close()
     # Fetch + retags only. xRV is scored downstream in _scored_cached so the (RE level, year) the user

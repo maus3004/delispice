@@ -51,3 +51,36 @@ details.fam > summary:hover .fam-arrow {
 details.fam[open] > summary .fam-arrow {
     transform: rotate(90deg);
 }
+
+/* Game Reports pitch-by-pitch log (pitch_by_pitch.py): TrackMan's pitch list and selected-row look. */
+.pbp-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 5px 10px;
+    border: 0;
+    border-left: 3px solid transparent;
+    border-bottom: 1px solid #f0f0f0;
+    background: #fff;
+    cursor: pointer;
+    font-family: inherit;
+    text-align: left;
+}
+.pbp-row:hover { background: #f4f8fc; }
+.pbp-row.sel { background: #e3f0fb; border-left-color: #2b7bd6; }
+.pbp-dot { width: 13px; height: 13px; border-radius: 50%; flex: 0 0 13px; }
+.pbp-row.sel .pbp-dot { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #2b7bd6; }
+.pbp-big { font-size: 16px; font-weight: 600; min-width: 46px; }
+.pbp-n { font-size: 11px; color: #999; margin-left: auto; }
+.pbp-game { background: #8a1520; color: #fff; font-size: 12px; font-weight: 600; padding: 4px 8px; }
+.pbp-sec { background: #f2f2f2; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+           color: #555; padding: 4px 8px; border-bottom: 1px solid #e2e2e2; }
+details.pbp-fold > summary.pbp-sec { cursor: pointer; }
+.pbp-bat { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; color: #666;
+           padding: 3px 8px 2px; background: #fafafa; }
+.pbp-bat-name { overflow-wrap: anywhere; }          /* long names wrap instead of being cut with an ellipsis */
+.pbp-bat-end { font-weight: 700; color: #333; white-space: nowrap; flex: 0 0 auto; }
+/* The card's four panels: 2x2, one column when the window is too narrow for two. */
+.pbp-grid { display: grid; grid-template-columns: auto auto; gap: 8px; }
+@media (max-width: 900px) { .pbp-grid { grid-template-columns: auto; } }

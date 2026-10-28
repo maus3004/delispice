@@ -298,15 +298,25 @@ def grade(lab: dict, model, ref: dict) -> pl.DataFrame:
 
 
 GRADES = {"stuff": "Stuff+", "whiff_plus": "Whiff+", "foul_plus": "Foul+", "contact_plus": "Contact+"}
+SIDES = {"rhb": "vs RHB", "lhb": "vs LHB"}          # the model's platoon-split suffixes -> dropdown rows
+GRADE_COLS = ["Pitch", "Group", *GRADES.values()]
 
 
-def grade_table(lab: dict, graded: pl.DataFrame) -> pl.DataFrame:
-    """The grades table, in arsenal order: Pitch, Group, Stuff+, Whiff+, Foul+, Contact+."""
+def grade_rows(lab: dict, graded: pl.DataFrame) -> list[dict]:
+    """The grades table in arsenal order, shaped like the Pitchers tab's Stuff table: per pitch
+    ``{key, row, subs}``, where key is the pitch's uid, row is Pitch, Group, Stuff+, Whiff+, Foul+,
+    Contact+ and subs are the same grades vs RHB, then vs LHB (the pitch's dropdown)."""
     nm, by_uid = names(lab), {r["uid"]: r for r in graded.iter_rows(named=True)}
     f0 = lambda v: "" if v is None else f"{v:.0f}"
-    return pl.DataFrame([{"Pitch": nm[p["uid"]], "Group": pg.GROUP_NAME[TYPE_GROUP[p["type"]]],
-                          **{label: f0(by_uid[p["uid"]][c]) for c, label in GRADES.items()}}
-                         for p in lab["pitches"] if p["uid"] in by_uid])
+    out = []
+    for p in lab["pitches"]:
+        r = by_uid.get(p["uid"])
+        if r is None:
+            continue
+        grades = lambda suf: {label: f0(r.get(c + suf)) for c, label in GRADES.items()}
+        out.append({"key": p["uid"], "row": {"Pitch": nm[p["uid"]], "Group": pg.GROUP_NAME[TYPE_GROUP[p["type"]]], **grades("")},
+                    "subs": [{"Pitch": label, "Group": "", **grades(f"_{s}")} for s, label in SIDES.items()]})
+    return out
 
 
 def warnings(lab: dict, graded: pl.DataFrame, ref: dict) -> list[tuple[str, str]]:

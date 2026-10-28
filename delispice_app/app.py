@@ -23,7 +23,7 @@ import plotly.graph_objects as go
 from dash import ALL as ALLPM, Dash, Input, Output, Patch, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
-from . import data, game_report, leaderboard, pitch_lab, report, scouting
+from . import data, game_report, leaderboard, pitch_by_pitch, pitch_lab, report, scouting
 
 ALL = data.ALL
 RETAG_TYPES = ["Fastball", "Sinker", "FourSeamFastBall", "TwoSeamFastBall", "Cutter", "Slider",
@@ -214,27 +214,32 @@ def _fam_first_cell(name, is_all=False):
                            "borderBottom": "2px solid #d9b3b8" if is_all else "1px solid #eee"})
 
 
-_ST_W = {"Pitch": 130, "Stuff+": 76, "Whiff+": 76, "Foul+": 76, "Contact+": 80}
+_ST_W = {"Pitch": 130, "Group": 90, "Stuff+": 76, "Whiff+": 76, "Foul+": 76, "Contact+": 80}
 
 
-def _stuff_table_block(groups, title="Stuff"):
+def _stuff_table_block(groups, title="Stuff", cols=report.STUFF_TABLE_COLS, keep_open=None):
     """The Stuff table: Stuff+ and its pieces per pitch type, each row opening (native <details>, like
-    the batter pitch table) to the same grades vs RHB and vs LHB."""
+    the batter pitch table) to the same grades vs RHB and vs LHB. The Pitch Lab passes its own columns,
+    and ``keep_open`` = (id type, open keys): each row's summary gets the id {type, uid: the group's key}
+    and the open keys render open, so a re-render (every slider move) doesn't close them."""
     if not groups:
         return html.Div([_title(title), html.I("No data.")])
-    cols = report.STUFF_TABLE_COLS
     grid = _bt_grid(cols, _ST_W)
     blocks = [html.Div([_bt_cell(c, i, "header") for i, c in enumerate(cols)], style=grid)]
     for g in groups:
         row = html.Div([_fam_first_cell(g["row"]["Pitch"])]
                        + [_bt_cell(g["row"][c], i, "family") for i, c in enumerate(cols) if i > 0], style=grid)
         subs = [html.Div([_bt_cell(s[c], i, "sub") for i, c in enumerate(cols)], style=grid) for s in g["subs"]]
-        blocks.append(html.Details([html.Summary(row), *subs], className="fam"))
+        if keep_open:
+            blocks.append(html.Details([html.Summary(row, id={"type": keep_open[0], "uid": g["key"]}), *subs],
+                                       open=g["key"] in keep_open[1], className="fam"))
+        else:
+            blocks.append(html.Details([html.Summary(row), *subs], className="fam"))
     no_splits = all(s[c] == "" for g in groups for s in g["subs"] for c in cols[1:])
     hint = ("vs RHB / vs LHB need the Stuff+ tables rebuilt: python -m backend.models.stuff_store --add-splits"
             if no_splits and any(g["row"]["Stuff+"] for g in groups) else None)
     total_w = sum(_ST_W.get(c, 90) for c in cols)
-    return html.Div([_title(f"{title}  (click a pitch for vs RHB / vs LHB)"),
+    return html.Div([_title(title),
                      _scroll(html.Div(blocks, style={"minWidth": f"{total_w}px", "width": f"{total_w}px",
                                                      "border": "1px solid #e2e2e2"})),
                      *([html.Div(hint, style={"color": "#999", "fontSize": "12px", "fontStyle": "italic"})] if hint else [])])
@@ -1757,6 +1762,76 @@ gr_retag_panel = html.Details(open=False, style={"margin": "6px 0", "background"
 _UNVERIFIED = {"background": "#fff4e5", "border": "1px solid #f0c27b", "color": "#7a4b00", "padding": "6px 10px",
                "fontSize": "13px", "fontFamily": FONT, "margin": "6px 0", "maxWidth": "900px"}
 _ROW_SCROLL = {"display": "flex", "gap": "10px", "flexWrap": "nowrap", "overflowX": "auto", "alignItems": "flex-start"}
+
+# ── Pitch by pitch (pitch_by_pitch.py builds the pieces; the design is pitchbypitch.md) ──────────
+# TrackMan's iPad pitch screen: the pitch log on the left, the selected pitch's release / movement /
+# location / spin panels in the middle, its tag, grades and outcome on the right.
+_PBP_LABEL = {"fontSize": "10px", "fontWeight": 700, "letterSpacing": "0.04em", "color": MAROON,
+              "textTransform": "uppercase"}
+_PBP_BOX = {"border": "1px solid #e2e2e2", "background": "#fff", "padding": "6px 8px"}
+_PBP_TITLE = {"fontSize": "11px", "fontWeight": 700, "color": "#555", "textTransform": "uppercase", "letterSpacing": "0.04em"}
+_PBP_GRAPH = {"displaylogo": False, "displayModeBar": False}
+
+
+def _pbp_panel(title, graph_id, tiles_id, tiles_first=True):
+    """One of the card's four panels: a title, then the chart beside its column of value tiles."""
+    tiles = html.Div(id=tiles_id, style={"display": "flex", "flexDirection": "column", "gap": "6px"})
+    graph = dcc.Graph(id=graph_id, config=_PBP_GRAPH, figure=go.Figure())
+    return html.Div([html.Div([html.Span(title, style=_PBP_TITLE),
+                               html.Span("Pitcher's view", style={"fontSize": "11px", "color": "#aaa", "marginLeft": "8px"})]),
+                     html.Div([tiles, graph] if tiles_first else [graph, tiles],
+                              style={"display": "flex", "gap": "6px", "alignItems": "center"})], style=_PBP_BOX)
+
+
+def _pbp_tiles(items):
+    """[(label, value, unit)] -> TrackMan's value tiles. Labels stay on one line: a panel's tiles all
+    stretch to its widest label (the tile column is a flex column)."""
+    return [html.Div([html.Div(label, style={**_PBP_LABEL, "whiteSpace": "nowrap"}),
+                      # line height with room above the digits: at 1.15 some browsers shaved their tops
+                      html.Div(value, style={"fontSize": "20px", "fontWeight": 700, "lineHeight": "1.35"}),
+                      html.Div(unit, style={"fontSize": "10px", "color": "#999"})],
+                     style={"border": "1px solid #e6e6e6", "borderRadius": "4px", "padding": "3px 8px", "minWidth": "84px",
+                            "textAlign": "center", "background": "#fff"}) for label, value, unit in items]
+
+
+pbp_section = html.Div(style={"marginTop": "16px", "fontFamily": FONT}, children=[
+    dcc.Store(id="pbp-store"), dcc.Store(id="pbp-sel"),
+    html.Div("Pitch by pitch", style={"fontWeight": 600, "fontSize": "15px", "marginBottom": "6px"}),
+    # Wraps instead of scrolling sideways, so nothing sits off the right edge of a narrow window: the
+    # card (panels + right column) drops under the log, and the right column under the panels.
+    html.Div(style={"display": "flex", "gap": "8px", "flexWrap": "wrap", "alignItems": "flex-start"}, children=[
+        html.Div(style={**_PBP_BOX, "padding": 0, "width": "176px", "flex": "0 0 176px"}, children=[
+            html.Div([html.Span("Pitches", style=_PBP_TITLE),
+                      dcc.Dropdown(id="pbp-metric", value="velo", clearable=False, style={"width": "92px", "fontSize": "12px"},
+                                   options=[{"label": lab, "value": k} for k, (lab, _) in pitch_by_pitch.METRICS.items()])],
+                     style={"display": "flex", "justifyContent": "space-between", "alignItems": "center",
+                            "padding": "6px 8px", "borderBottom": "1px solid #e2e2e2"}),
+            html.Div(id="pbp-log", style={"height": "600px", "overflowY": "auto"}),
+        ]),
+        html.Div(style={"display": "flex", "gap": "8px", "flexWrap": "wrap", "alignItems": "flex-start",
+                        "flex": "1 1 0", "minWidth": "min-content"}, children=[
+        html.Div(className="pbp-grid", children=[             # 2x2, one column on a very narrow window (pitcher.css)
+            _pbp_panel("Release (ft)", "pbp-release", "pbp-rel-tiles"),
+            _pbp_panel("Movement (in)", "pbp-move", "pbp-move-tiles", tiles_first=False),
+            _pbp_panel("Location (ft)", "pbp-loc", "pbp-loc-tiles"),
+            _pbp_panel("Ball spin (tilt)", "pbp-tilt", "pbp-spin-tiles", tiles_first=False),
+        ]),
+        html.Div(style={"width": "190px", "flex": "0 0 190px", "display": "flex", "flexDirection": "column", "gap": "8px"}, children=[
+            html.Div([html.Div("Tag", style=_PBP_LABEL), html.Div(id="pbp-tag"),
+                      html.Div(id="pbp-retag-wrap", style={"marginTop": "6px"}, children=[
+                          dcc.Dropdown(id="pbp-retag-to", options=RETAG_TYPE_OPTS, placeholder="Retag as…", style={"fontSize": "12px"}),
+                          html.Div([html.Button("Retag", id="pbp-retag-btn", n_clicks=0, style={**_BTN, "marginLeft": 0}),
+                                    html.Button("Undo retag", id="pbp-unretag-btn", n_clicks=0, style=_BTN)],
+                                   style={"marginTop": "4px"}),
+                          html.Div(id="pbp-retag-note", style={"fontSize": "11px", "color": "#888", "marginTop": "4px"})])],
+                     style=_PBP_BOX),
+            html.Div(id="pbp-grades", style=_PBP_BOX),
+            html.Div(id="pbp-outcome", style=_PBP_BOX),
+        ]),
+        ]),
+    ]),
+])
+
 game_panel = html.Div(id="game-panel", style={"display": "none"}, children=[
     dcc.Store(id="gr-retag-version", data=0), dcc.Store(id="gr-uids", data=[]),
     dcc.Store(id="gbio-version", data=0), dcc.Store(id="gbio-target"),
@@ -1773,6 +1848,7 @@ game_panel = html.Div(id="game-panel", style={"display": "none"}, children=[
         html.Div([_graph("gr-move-graph"), _graph("gr-release-graph")], style=_ROW_SCROLL),
         html.Div(gr_retag_panel, id="gr-retag-wrap"),       # hidden for an uploaded file
         html.Div([_graph(f"gr-loc-{i}") for i in range(4)], style={**_ROW_SCROLL, "gap": "4px"}),
+        pbp_section,
     ]),
 ])
 
@@ -1860,6 +1936,9 @@ def _pl_help():
                "pitches of that group."),
             li("Grades are within a group: 100 is the average D1 fastball, breaking ball or offspeed pitch, and "
                "10 points is one standard deviation of single pitches. A fastball's 110 is not a slider's 110."),
+            li("Click a pitch in the grades table for vs RHB / vs LHB: the same grades against hitters of one side "
+               "only, on the same scale. The overall grade mixes the two the way D1 pitchers of that hand face "
+               "each side."),
             li("The D1 average shape grades a little under 100 (the average four-seam is about 94). Real pitches of "
                "each type do average about 100, but the model rewards standing out, so the average of their grades "
                "is higher than the grade of their average shape."),
@@ -1882,6 +1961,7 @@ def _pl_help():
 lab_panel = html.Div(id="lab-panel", style={"display": "none"}, children=[
     dcc.Store(id="pl-lab", storage_type="session", data=pitch_lab.default_lab(_PL_REF) if _PL_REF else None),
     dcc.Store(id="pl-known", storage_type="memory"),     # the arsenal the form currently shows
+    dcc.Store(id="pl-open", storage_type="memory", data=[]),   # uids whose vs RHB / vs LHB rows are open
     html.Div("Pitch Lab", style={"fontSize": "20px", "fontWeight": 700, "fontFamily": FONT}),
     html.Div("Build a hypothetical arsenal and see how the Stuff+ model grades it. Start with the primary "
              "fastball, because every other pitch is also graded on its differences from it. Each pitch you add "
@@ -2529,7 +2609,7 @@ def _gr_empty(status, dh_opts=(), show_dh=False):
     """Every Game Reports output with the report hidden, and a message in the picker band."""
     return (status, list(dh_opts), {"marginTop": "8px"} if show_dh else {"display": "none"},
             {"display": "none"}, "", "", "", "", "", go.Figure(), go.Figure(), "",
-            *[go.Figure() for _ in range(4)], [], "", None, {"display": "none"})
+            *[go.Figure() for _ in range(4)], [], "", None, {"display": "none"}, None)
 
 
 @app.callback(
@@ -2539,7 +2619,7 @@ def _gr_empty(status, dh_opts=(), show_dh=False):
     Output("gr-move-graph", "figure"), Output("gr-release-graph", "figure"), Output("gr-arsenal", "children"),
     *[Output(f"gr-loc-{i}", "figure") for i in range(4)],
     Output("gr-uids", "data"), Output("gr-retag-info", "children"), Output("gbio-target", "data"),
-    Output("gr-retag-wrap", "style"),
+    Output("gr-retag-wrap", "style"), Output("pbp-store", "data"),
     Input("gr-pid", "value"), Input("gr-start", "date"), Input("gr-end", "date"), Input("gr-dh", "value"),
     Input("gr-retag-version", "data"), Input("gbio-version", "data"), Input("gr-upload-id", "data"),
     Input("gre-level-dd", "value"), Input("gre-year-dd", "value"),
@@ -2597,8 +2677,10 @@ def cb_gr_build(pid, start, end, dh, _rv, _bv, upload_key, re_lvl, re_yr, player
                         _side_by_side(_scroll(html_table(contact, title="Contact")),
                                       _stuff_table_block(stuff, "Stuff · Stuff+ on the D1 scale" if d1_scale else "Stuff"))])
     uids = rows["PitchUID"].to_list()
-    retagged = len(set(uids) & set(data.load_retags()["pitch"]))
-    info = f"{retagged:,} pitch(es) in this report are retagged." if retagged else "No retags in this report."
+    retagged = set(uids) & set(data.load_retags()["pitch"])
+    info = f"{len(retagged):,} pitch(es) in this report are retagged." if retagged else "No retags in this report."
+    pbp = pitch_by_pitch.pitch_store(rows, sel, upload["kind"] if upload else pitch_by_pitch.GAME, retagged,
+                                     upload=bool(upload), height_in=height_in)
     return ("", dh_opts, {"marginTop": "8px"} if dh_opts else {"display": "none"}, {"display": "block"},
             header, html.Div(note, style=_UNVERIFIED) if note else "", files,
             _scroll(html_table(game_report.line_table(rows, present), full_width=True)),
@@ -2607,7 +2689,7 @@ def cb_gr_build(pid, start, end, dh, _rv, _bv, upload_key, re_lvl, re_yr, player
             report.movement_fig(rows), report.release_fig(rows, height_in), arsenal,
             *game_report.location_figs(rows, has_results=present is None or "PlayResult" in present),
             uids, info, {"name": player, "id": pid_bio},
-            {"display": "none"} if upload else {"display": "block"})
+            {"display": "none"} if upload else {"display": "block"}, pbp)
 
 
 @app.callback(Output("gr-retag-status", "children"), Input("gr-move-graph", "selectedData"))
@@ -2643,6 +2725,143 @@ def cb_gr_revert(_ng, _np, uids, player, ver):
         data.set_pitch_overrides(uids, None, player)     # drops just this report's pitches' retags
     elif ctx.triggered_id == "gr-revert-pitcher" and player:
         data.clear_retags(player)                        # every retag under this name, like the Pitchers tab
+    else:
+        raise PreventUpdate
+    return (ver or 0) + 1
+
+
+# ── Pitch by pitch: the log, a click, the card, retags ───────────────────────────────────────────
+def _pbp_row(p, i, metric, selected):
+    """One log row: the pitch-type dot, the big number and his pitch number (TrackMan's list)."""
+    tip = " · ".join(b for b in (p["pt"][i], f"{p['balls'][i]}-{p['strikes'][i]}" if p["balls"][i] is not None else "",
+                                 pitch_by_pitch.CALLS.get(p["call"][i], p["call"][i] or "")) if b)
+    return html.Button([html.Span(className="pbp-dot", style={"background": p["color"][i]}),
+                        html.Span(pitch_by_pitch.metric_text(p, i, metric), className="pbp-big"),
+                        html.Span(f"#{p['n'][i]}", className="pbp-n")],
+                       id={"type": "pbp-row", "i": i}, n_clicks=0, title=tip,
+                       className="pbp-row sel" if selected else "pbp-row")
+
+
+def _pbp_log(store, metric, sel_uid):
+    """The whole log: game titles, inning / session headers (Warmup collapsed), batter headers, rows."""
+    p, out = store["p"], []
+    for game in store["tree"]:
+        if game["title"]:
+            out.append(html.Div(game["title"], className="pbp-game"))
+        for s in game["sections"]:
+            body = []
+            for g in s["groups"]:
+                if g["title"]:
+                    body.append(html.Div([html.Span(g["title"], className="pbp-bat-name"),
+                                          html.Span(g["end"], className="pbp-bat-end")], className="pbp-bat"))
+                body += [_pbp_row(p, i, metric, p["uid"][i] == sel_uid) for i in g["idx"]]
+            if s["collapsed"]:
+                out.append(html.Details([html.Summary(s["title"], className="pbp-sec"), *body], className="pbp-fold"))
+            else:
+                out += ([html.Div(s["title"], className="pbp-sec")] if s["title"] else []) + body
+    return out
+
+
+@app.callback(Output("pbp-log", "children"), Output("pbp-sel", "data", allow_duplicate=True),
+              Input("pbp-store", "data"), Input("pbp-metric", "value"), State("pbp-sel", "data"),
+              prevent_initial_call=True)
+def cb_pbp_log(store, metric, sel):
+    """A new report (or a retag, or another big number) redraws the log. The selected pitch stays
+    selected when it's still in the report (a retag redraws everything), else the default one."""
+    if not store or not store["p"]["uid"]:
+        return [], None
+    uids = store["p"]["uid"]
+    if sel not in uids:
+        sel = uids[store["default"] or 0]
+    return _pbp_log(store, metric or "velo", sel), sel
+
+
+@app.callback(Output("pbp-sel", "data", allow_duplicate=True), Output({"type": "pbp-row", "i": ALLPM}, "className"),
+              Input({"type": "pbp-row", "i": ALLPM}, "n_clicks"), State("pbp-store", "data"),
+              prevent_initial_call=True)
+def cb_pbp_click(_clicks, store):
+    """A click selects that pitch and moves the highlight, without redrawing the log. Rows that were
+    just drawn (n_clicks 0) never count as a click."""
+    t = ctx.triggered_id
+    if not isinstance(t, dict) or not store or not any(c.get("value") for c in ctx.triggered):
+        raise PreventUpdate
+    i = t["i"]
+    return store["p"]["uid"][i], ["pbp-row sel" if o["id"]["i"] == i else "pbp-row" for o in ctx.outputs_list[1]]
+
+
+def _pbp_grades(c):
+    g = c["grades"]
+    head = "Stuff+" + (f" · {c['glabel']}" if c["glabel"] else "")
+    pieces = [html.Div([html.Span(label), html.Span(g[k], style={"fontWeight": 700})],
+                       style={"display": "flex", "justifyContent": "space-between", "fontSize": "13px"})
+              for k, label in (("whiff", "Whiff+"), ("foul", "Foul+"), ("contact", "Contact+"))]
+    return [html.Div(head, style=_PBP_LABEL),
+            html.Div(g["stuff"], style={"fontSize": "32px", "fontWeight": 800, "lineHeight": "1.3"}),   # room for the digit tops
+            *pieces,
+            html.Div(c["grade_note"], style={"fontSize": "11px", "color": "#888", "marginTop": "4px"}) if c["grade_note"] else None]
+
+
+def _pbp_outcome(c):
+    lines = [" · ".join(b for b in (c["count"], c["call"]) if b), c["result"], c["ev_la"]]
+    rv = [html.Div([html.Span("RV"), html.Span(c["rv"], style={"fontWeight": 700})],
+                   title="Run value of the pitch, in runs for the batter: negative is good for the pitcher",
+                   style={"display": "flex", "justifyContent": "space-between"})]
+    if c["xrv"] is not None:
+        rv.append(html.Div([html.Span("xRV"), html.Span(c["xrv"], style={"fontWeight": 700})],
+                           title="Expected run value of the batted ball (our contact model), same sign as RV",
+                           style={"display": "flex", "justifyContent": "space-between"}))
+    return [html.Div("Outcome", style=_PBP_LABEL),
+            *[html.Div(t, style={"fontSize": "13px"}) for t in lines if t],
+            html.Div(rv, style={"fontSize": "13px", "marginTop": "4px"})]
+
+
+@app.callback(Output("pbp-release", "figure"), Output("pbp-move", "figure"), Output("pbp-loc", "figure"),
+              Output("pbp-tilt", "figure"), Output("pbp-rel-tiles", "children"), Output("pbp-move-tiles", "children"),
+              Output("pbp-spin-tiles", "children"), Output("pbp-tag", "children"), Output("pbp-grades", "children"),
+              Output("pbp-outcome", "children"), Output("pbp-retag-wrap", "style"), Output("pbp-retag-to", "value"),
+              Output("pbp-retag-to", "disabled"), Output("pbp-retag-btn", "disabled"),
+              Output("pbp-unretag-btn", "style"), Output("pbp-retag-note", "children"),
+              Input("pbp-sel", "data"), State("pbp-store", "data"))
+def cb_pbp_card(sel, store):
+    """The selected pitch's card. Its charts always draw it over his other pitches of its type (Matt's
+    call, 2026-10-24: no "this pitch only" toggle)."""
+    if not store or sel not in store["p"]["uid"]:
+        raise PreventUpdate
+    i = store["p"]["uid"].index(sel)
+    c = pitch_by_pitch.card(store, i)
+    mode = pitch_by_pitch.SAME_TYPE
+    tag = [html.Div([html.Span(c["abbrev"], style={"fontSize": "26px", "fontWeight": 800, "marginRight": "8px"}),
+                     html.Span(c["pt"], style={"fontSize": "14px"})]),
+           html.Div(f"#{c['n']}" + (f" · Stuff+ group {c['group']}" if c["group"] else ""),
+                    style={"fontSize": "12px", "color": "#666"}),
+           html.Div("Retagged (saved for everyone)", style={"fontSize": "11px", "color": MAROON}) if c["retagged"] else None]
+    locked = not c["verified"]
+    note = "Unverified game: pitches can't be retagged until the verified file arrives." if locked else ""
+    return (pitch_by_pitch.release_fig(store, i, mode), pitch_by_pitch.movement_fig(store, i, mode),
+            pitch_by_pitch.location_fig(store, i, mode), pitch_by_pitch.tilt_fig(store, i, mode),
+            _pbp_tiles([("Release height", c["rel_height"], "ft"), ("Release side", c["rel_side"], "ft"),
+                        ("Extension", c["extension"], "ft")]
+                       + ([("Arm angle", c["arm"], "est.")] if c["arm"] else [])),   # only with a height on file
+            _pbp_tiles([("Vert Break", c["ivb"], "in"), ("Horz Break", c["hb"], "in")]),   # the arsenal's names
+            _pbp_tiles([("Pitch speed", c["velo"], "mph"), ("Total spin", c["spin"], "rpm"), ("Tilt", c["tilt"], "")]),
+            tag, _pbp_grades(c), _pbp_outcome(c),
+            {"display": "none"} if store["upload"] else {"marginTop": "6px"},     # uploads aren't ours to retag
+            None, locked, locked, _BTN if c["retagged"] and not locked else {"display": "none"}, note)
+
+
+@app.callback(Output("gr-retag-version", "data", allow_duplicate=True),
+              Input("pbp-retag-btn", "n_clicks"), Input("pbp-unretag-btn", "n_clicks"),
+              State("pbp-retag-to", "value"), State("pbp-sel", "data"), State("pbp-store", "data"),
+              State("gr-player", "value"), State("gr-retag-version", "data"), prevent_initial_call=True)
+def cb_pbp_retag(_n, _u, to, uid, store, player, ver):
+    """Retag (or undo the retag of) the selected pitch in retags.json, like the movement chart's lasso:
+    set_pitch_overrides skips unverified pitches itself. The whole report redraws with the new tag."""
+    if not uid or not player or not store or store["upload"]:
+        raise PreventUpdate
+    if ctx.triggered_id == "pbp-retag-btn" and isinstance(to, str):
+        data.set_pitch_overrides([uid], to, player)
+    elif ctx.triggered_id == "pbp-unretag-btn":
+        data.set_pitch_overrides([uid], None, player)
     else:
         raise PreventUpdate
     return (ver or 0) + 1
@@ -2715,13 +2934,15 @@ def cb_pl_edit(_add, _reset, _dels, hands, _owns, _vals, add_type, known):
     return cur, cur
 
 
-def _pl_results(lab, graded):
-    """The grades table, the pitches that can't be graded yet, and the out-of-range warnings."""
+def _pl_results(lab, graded, open_uids):
+    """The grades table (the open pitches' vs RHB / vs LHB rows still open), the pitches that can't be
+    graded yet, and the out-of-range warnings."""
     nm, missing = pitch_lab.names(lab), pitch_lab.incomplete(lab)
     if graded.height == 0:
         return html.Div("Fill in every number for the primary fastball: every grade is measured against it.",
                         style=_UNVERIFIED)
-    out = [html_table(pitch_lab.grade_table(lab, graded), title="Grades (100 = D1 average for the group, 10 = one SD)")]
+    out = [_stuff_table_block(pitch_lab.grade_rows(lab, graded), "Grades · 100 = D1 average for the group, 10 = one SD",
+                              pitch_lab.GRADE_COLS, keep_open=("pl-gopen", set(open_uids or [])))]
     if missing:
         out.append(html.Div("Not graded until every number is filled in: " + ", ".join(nm[u] for u in missing) + ".",
                             style=_PL_NOTE))
@@ -2745,8 +2966,8 @@ def _pl_badge(g):
               Output("pl-sens-pitch", "options"), Output("pl-sens-pitch", "value"),
               Output({"type": "pl-badge", "uid": ALLPM}, "children"),
               Input("pl-lab", "data"), Input("pl-known", "data"), Input("role-tabs", "value"),
-              State("pl-sens-pitch", "value"))
-def cb_pl_results(lab, _known, role, sel):
+              State("pl-sens-pitch", "value"), State("pl-open", "data"))
+def cb_pl_results(lab, _known, role, sel, open_uids):
     if role != "lab" or _PL_REF is None:     # graded only once the tab is open (the model load is lazy)
         raise PreventUpdate
     badges = ctx.outputs_list[4]             # the cards on screen now, which can lag the store by a render
@@ -2760,8 +2981,24 @@ def cb_pl_results(lab, _known, role, sel):
     stuff = dict(zip(graded["uid"], graded["stuff"])) if graded.height else {}
     opts = [{"label": nm[p["uid"]], "value": p["uid"]} for p in lab["pitches"]]
     keep = sel if sel in nm else lab["pitches"][0]["uid"]
-    return (_pl_results(lab, graded), pitch_lab.movement_fig(lab, graded, _PL_REF), opts,
+    return (_pl_results(lab, graded, open_uids), pitch_lab.movement_fig(lab, graded, _PL_REF), opts,
             no_update if keep == sel else keep, [_pl_badge(stuff.get(b["id"]["uid"])) for b in badges])
+
+
+@app.callback(Output("pl-open", "data"), Input({"type": "pl-gopen", "uid": ALLPM}, "n_clicks"),
+              State("pl-open", "data"), prevent_initial_call=True)
+def cb_pl_open(_clicks, open_uids):
+    """A click on a pitch in the grades table opens or closes its vs RHB / vs LHB rows (the browser does
+    that); remember which are open, so the next re-grade draws them open too."""
+    fired = {t["prop_id"]: t["value"] for t in ctx.triggered}
+    cur = set(open_uids or [])
+    for pid, tid in ctx.triggered_prop_ids.items():
+        # Only a real click: the pattern Input also fires (with no clicks) when the table re-renders.
+        if isinstance(tid, dict) and fired.get(pid):
+            cur ^= {tid["uid"]}
+    if cur == set(open_uids or []):
+        raise PreventUpdate
+    return sorted(cur)
 
 
 @app.callback(Output("pl-sens-graph", "figure"),

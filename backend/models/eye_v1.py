@@ -188,8 +188,10 @@ def count_run_values(rem: pl.DataFrame) -> pl.DataFrame:
         behind them is occupied, a run scoring with the bases loaded.
 
     Sanity: 0-0 reproduces the textbook linear weights (strike ~= -0.083, ball ~= +0.072), and every
-    cell matches the mean REALIZED run value of that event to ~0.005 runs — an independent check,
-    since one number comes from matrix arithmetic and the other from telescoping actual games.
+    cell matches the mean REALIZED run value of that event to within ~0.01 runs (D1 2022-2026: average
+    gap ~0.002; the largest are 2-strike called strikes, overstated by up to 0.011; balls within
+    0.006) — an independent check, since one number comes from matrix arithmetic and the other from
+    telescoping actual games. See backend/notebooks/eye_v1_challenges.ipynb.
     """
     red = rem.to_pandas()
     RE = {(r.base_state, r.Outs, r.Balls, r.Strikes): r.run_expectancy for r in red.itertuples()}

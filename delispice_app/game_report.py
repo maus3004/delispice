@@ -270,8 +270,26 @@ def files_table(games: pl.DataFrame, status: str | None = None) -> pl.DataFrame:
 
 
 # ── Tables ───────────────────────────────────────────────────────────────────────────────────────
-LINE_COLS = ["IP", "NP", "Strike %", "Zone %", "P/PA", "TBF", "Batters Retired", "BB + HBP", "SO", "Hits",
-             "Extension", "K%", "BB%"]
+LINE_COLS = ["IP", "NP", "Strike %", "Zone %", "Zone-Pre2S%", "Chase%", "IZ-Whiff%", "P/PA", "TBF",
+             "Batters Retired", "BB + HBP", "SO", "Hits", "Extension", "K%", "BB%"]
+
+# Chase%, IZ-Whiff% and Zone-Pre2S% (added 2026-10-28), as (numerator, denominator) pitch filters. The zone
+# is Zone %'s box (report.ZONE) and a swing is Whiff %'s (report.SWING_CALLS), so they agree with the
+# columns beside them and with the Lookup tab's chase_pct. Pitches without a location count in none.
+_SWING = pl.col("PitchCall").is_in(report.SWING_CALLS)
+_IZ = report.HAS_LOC & report.IN_ZONE
+_OZ = report.HAS_LOC & ~report.IN_ZONE
+_PRE2S = report.HAS_LOC & (pl.col("Strikes") < 2)
+ZONE_RATES = {
+    "Chase%": (_OZ & _SWING, _OZ),                                                  # swings / pitches out of the zone
+    "IZ-Whiff%": (_IZ & (pl.col("PitchCall") == "StrikeSwinging"), _IZ & _SWING),   # misses / swings in the zone
+    "Zone-Pre2S%": (_PRE2S & report.IN_ZONE, _PRE2S),                                # Zone % with 0 or 1 strike
+}
+
+
+def _zone_rate_exprs() -> list[pl.Expr]:
+    """The ZONE_RATES as aggregations: null when nothing qualifies (e.g. no swings in the zone)."""
+    return [pl.when(den.sum() > 0).then(num.sum() / den.sum()).alias(name) for name, (num, den) in ZONE_RATES.items()]
 
 
 def _line(rows: pl.DataFrame) -> dict:
@@ -281,7 +299,9 @@ def _line(rows: pl.DataFrame) -> dict:
     # Strike % = called + swinging strikes, fouls and balls in play over all pitches (report.STRIKE_CALLS,
     # the Pitchers tab's definition, so the two tabs agree).
     strike = rows.select(pl.col("PitchCall").is_in(report.STRIKE_CALLS).mean()).item() if rows.height else None
+    rates = rows.select(_zone_rate_exprs()).row(0, named=True) if rows.height else dict.fromkeys(ZONE_RATES)
     return {"IP": s["IP"], "NP": s["NP"], "Strike %": report.pct(strike), "Zone %": report.pct(zone),
+            **{name: report.pct(rates[name]) for name in ("Zone-Pre2S%", "Chase%", "IZ-Whiff%")},
             "P/PA": report.num(s["NP"] / s["TBF"]) if s["TBF"] else "", "TBF": s["TBF"],
             "Batters Retired": s["Batters Retired"], "BB + HBP": s["BB + HBP"], "SO": s["SO"],
             "Hits": s["Hits"], "Extension": s["Extension"], "K%": s["K%"], "BB%": s["BB%"]}
@@ -290,11 +310,12 @@ def _line(rows: pl.DataFrame) -> dict:
 # What each number needs from the file: an uploaded file without these columns gets the number blanked
 # (served data always has them). Location = PlateLocSide + PlateLocHeight.
 _LOC = ["PlateLocSide", "PlateLocHeight"]
-LINE_NEEDS = {"IP": ["OutsOnPlay", "KorBB"], "Strike %": ["PitchCall"], "Zone %": _LOC, "P/PA": ["PitchofPA"], "TBF": ["PitchofPA"],
+ZONE_RATE_NEEDS = {"Chase%": ["PitchCall", *_LOC], "IZ-Whiff%": ["PitchCall", *_LOC], "Zone-Pre2S%": ["Strikes", *_LOC]}
+LINE_NEEDS = {**ZONE_RATE_NEEDS, "IP": ["OutsOnPlay", "KorBB"], "Strike %": ["PitchCall"], "Zone %": _LOC, "P/PA": ["PitchofPA"], "TBF": ["PitchofPA"],
               "Batters Retired": ["KorBB", "PlayResult"], "BB + HBP": ["KorBB", "PitchCall"], "SO": ["KorBB"],
               "Hits": ["PlayResult"], "Extension": ["Extension"], "K%": ["KorBB", "PitchofPA"],
               "BB%": ["KorBB", "PitchofPA"]}
-ARSENAL_NEEDS = {"Avg Velo": ["RelSpeed"], "Max Velo": ["RelSpeed"], "Avg Spin": ["SpinRate"],
+ARSENAL_NEEDS = {**ZONE_RATE_NEEDS, "Avg Velo": ["RelSpeed"], "Max Velo": ["RelSpeed"], "Avg Spin": ["SpinRate"],
                  "Strike %": ["PitchCall"], "Zone %": _LOC,
                  "WHIFF %": ["PitchCall"], "Vert Break": ["InducedVertBreak"], "Horz Break": ["HorzBreak"],
                  "Tilt": ["SpinAxis"], "Extension": ["Extension"], "Arm Angle": ["RelHeight", "RelSide"]}
@@ -354,21 +375,35 @@ def arm_angles(rows: pl.DataFrame, height_in: int | None) -> dict[str, float]:
     return {report.PITCH_NAMES.get(k, k): a for k, a in t.group_by("TaggedPitchType").agg(pl.col("arm").mean()).iter_rows()}
 
 
+def zone_rates(rows: pl.DataFrame) -> dict[str, dict]:
+    """Display pitch name -> {Chase%, IZ-Whiff%, Zone-Pre2S%} as fractions (the arsenal's rows)."""
+    t = rows.filter(pl.col("TaggedPitchType").is_not_null() & ~pl.col("TaggedPitchType").is_in(report.NON_PITCHES))
+    return {report.PITCH_NAMES.get(r["TaggedPitchType"], r["TaggedPitchType"]): r
+            for r in t.group_by("TaggedPitchType").agg(_zone_rate_exprs()).iter_rows(named=True)}
+
+
 def arsenal_tables(rows: pl.DataFrame, height_in: int | None,
                    present: set[str] | None = None) -> tuple[pl.DataFrame, pl.DataFrame, list[dict]]:
     """(arsenal, Contact table, Stuff rows), same rows and order as the Pitchers tab's: the arsenal with
-    the Arm Angle after Extension; rates blank for pitch types under SMALL_SAMPLE pitches."""
+    Zone-Pre2S% and Chase% after Zone %, IZ-Whiff% after WHIFF % and the Arm Angle after Extension;
+    rates blank for pitch types under SMALL_SAMPLE pitches."""
     counts = _pitch_counts(rows)
     ars = report.build_arsenal(rows)
     if ars.height:
-        arms = arm_angles(rows, height_in)
+        arms, zr = arm_angles(rows, height_in), zone_rates(rows)
         ars = ars.with_columns(
             pl.col("Pitch").map_elements(lambda p: f"{arms[p]:.0f}°" if p in arms else "",
-                                         return_dtype=pl.Utf8).alias("Arm Angle"))
-        cols = ars.columns
-        at = cols.index("Extension") + 1
-        ars = ars.select([*cols[:at], "Arm Angle", *[c for c in cols[at:] if c != "Arm Angle"]])
-        ars = _blank_missing(_blank_small(ars, counts, ["Strike %", "Zone %", "WHIFF %", "RV/100"]),
+                                         return_dtype=pl.Utf8).alias("Arm Angle"),
+            *[pl.col("Pitch").map_elements(lambda p, k=k: report.pct(zr.get(p, {}).get(k)),
+                                           return_dtype=pl.Utf8).alias(k) for k in ZONE_RATES])
+        after = {"Zone %": ["Zone-Pre2S%", "Chase%"], "WHIFF %": ["IZ-Whiff%"], "Extension": ["Arm Angle"]}
+        added = {c for cs in after.values() for c in cs}
+        order = []
+        for c in ars.columns:
+            if c not in added:
+                order += [c, *after.get(c, [])]
+        ars = ars.select(order)
+        ars = _blank_missing(_blank_small(ars, counts, ["Strike %", "Zone %", "WHIFF %", "RV/100", *ZONE_RATES]),
                              present, ARSENAL_NEEDS)
     contact = _blank_missing(_blank_small(report.build_contact_table(rows), counts, ["Hard Hit %", "xRV/BBE"]),
                              present, CONTACT_NEEDS)
@@ -446,7 +481,8 @@ UPLOAD_BUDGET_BYTES = 2 * 1024 ** 3     # every session's uploads together; the 
 UPLOAD_RENAMES = {"HitType": "TaggedHitType"}
 # Columns our own parquet (an export of served data) carries beyond the TrackMan schema.
 _EXTRA = {"re288_state": pl.Utf8, "next_re288_state": pl.Utf8, "half_complete": pl.Boolean,
-          "is_verified": pl.Boolean, "source_file": pl.Utf8}
+          "is_verified": pl.Boolean, "source_file": pl.Utf8,
+          "PitchSession": pl.Utf8}       # practice exports: Warmup / Live, for the pitch-by-pitch headers
 # A full game file: count, inning and result columns, so the line, rates and run value all work.
 GAME_COLUMNS = ["PitchCall", "KorBB", "PlayResult", "PitchofPA", "PAofInning", "Inning", "Top/Bottom",
                 "Outs", "Balls", "Strikes", "OutsOnPlay"]

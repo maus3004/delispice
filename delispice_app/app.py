@@ -1851,6 +1851,7 @@ game_panel = html.Div(id="game-panel", style={"display": "none"}, children=[
         html.Div([_graph("gr-move-graph"), _graph("gr-release-graph")], style=_ROW_SCROLL),
         html.Div(gr_retag_panel, id="gr-retag-wrap"),       # hidden for an uploaded file
         html.Div([_graph(f"gr-loc-{i}") for i in range(4)], style={**_ROW_SCROLL, "gap": "4px"}),
+        html.Div(_graph("gr-stuff-dist"), style=_ROW_SCROLL),   # Stuff+ per pitch, drawn like the velo chart
         pbp_section,
     ]),
 ])
@@ -2612,7 +2613,7 @@ def _gr_empty(status, dh_opts=(), show_dh=False):
     """Every Game Reports output with the report hidden, and a message in the picker band."""
     return (status, list(dh_opts), {"marginTop": "8px"} if show_dh else {"display": "none"},
             {"display": "none"}, "", "", "", "", "", go.Figure(), go.Figure(), "",
-            *[go.Figure() for _ in range(4)], [], "", None, {"display": "none"}, None)
+            *[go.Figure() for _ in range(4)], [], "", None, {"display": "none"}, None, go.Figure())
 
 
 @app.callback(
@@ -2622,7 +2623,7 @@ def _gr_empty(status, dh_opts=(), show_dh=False):
     Output("gr-move-graph", "figure"), Output("gr-release-graph", "figure"), Output("gr-arsenal", "children"),
     *[Output(f"gr-loc-{i}", "figure") for i in range(4)],
     Output("gr-uids", "data"), Output("gr-retag-info", "children"), Output("gbio-target", "data"),
-    Output("gr-retag-wrap", "style"), Output("pbp-store", "data"),
+    Output("gr-retag-wrap", "style"), Output("pbp-store", "data"), Output("gr-stuff-dist", "figure"),
     Input("gr-pid", "value"), Input("gr-start", "date"), Input("gr-end", "date"), Input("gr-dh", "value"),
     Input("gr-retag-version", "data"), Input("gbio-version", "data"), Input("gr-upload-id", "data"),
     Input("gre-level-dd", "value"), Input("gre-year-dd", "value"),
@@ -2692,7 +2693,8 @@ def cb_gr_build(pid, start, end, dh, _rv, _bv, upload_key, re_lvl, re_yr, player
             report.movement_fig(rows), report.release_fig(rows, height_in), arsenal,
             *game_report.location_figs(rows, has_results=present is None or "PlayResult" in present),
             uids, info, {"name": player, "id": pid_bio},
-            {"display": "none"} if upload else {"display": "block"}, pbp)
+            {"display": "none"} if upload else {"display": "block"}, pbp,
+            game_report.stuff_dist_fig(rows, player, report.hand_of(rows)))
 
 
 @app.callback(Output("gr-retag-status", "children"), Input("gr-move-graph", "selectedData"))

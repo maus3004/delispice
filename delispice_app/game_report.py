@@ -476,6 +476,30 @@ def location_fig(rows: pl.DataFrame, view: str, show_legend: bool = False, has_r
     return fig
 
 
+def stuff_dist_fig(rows: pl.DataFrame, pitcher: str, hand: str) -> go.Figure:
+    """Each pitch's Stuff+, drawn like the Pitchers tab's velocity chart (report.distribution_fig): one
+    usage-weighted curve per pitch type and a dashed total. A pitch type keeps only the pitches graded in
+    its majority Stuff+ group, the ones the Stuff table averages: a grade means something only within its
+    group (a fastball's 110 is not a slider's 110). The dotted line is 100, the D1 average for a group."""
+    tag = pl.col("TaggedPitchType")
+    main_group = pl.col("StuffGroup").drop_nulls().mode().sort().first().over("TaggedPitchType")
+    d = (rows.filter(tag.is_not_null() & ~tag.is_in(report.NON_PITCHES) & pl.col("Stuff").is_not_null())
+             .filter(pl.col("StuffGroup") == main_group)
+             .with_columns(tag.replace(report.PITCH_NAMES).alias("PT")))
+    fig = report.distribution_fig(d, "Stuff", f"{pitcher} ({hand}) — Frequency of Pitches by Stuff+",
+                                  "Stuff+ (100 = D1 average for the pitch's group)", "Frequency of Stuff+", pad=10)
+    if len(fig.data):
+        fig.add_vline(x=100, line=dict(color="#999", width=1, dash="dot"), annotation_text="D1 avg",
+                      annotation_position="top", annotation_font=dict(size=10, color="#888"))
+    else:
+        fig.add_annotation(text="Not enough Stuff+ grades to draw (Stuff+ grades D1 games and uploads; a pitch type "
+                                "needs 5 graded pitches)", x=0.5, y=0.5, xref="paper", yref="paper",
+                           showarrow=False, font=dict(size=12, color="#888"))
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
+    return fig
+
+
 def location_figs(rows: pl.DataFrame, has_results: bool = True) -> list[go.Figure]:
     """The four location charts, left to right; the first carries the pitch-type legend."""
     return [location_fig(rows, v, show_legend=(i == 0), has_results=has_results) for i, v in enumerate(LOCATION_VIEWS)]

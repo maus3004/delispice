@@ -825,18 +825,19 @@ def _rgba(hexc, a):
     return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{a})"
 
 
-def velocity_fig(df: pl.DataFrame, pitcher: str, hand: str, colors: dict | None = None) -> go.Figure:
+def distribution_fig(d: pl.DataFrame, col: str, title: str, x_title: str, y_title: str, x_suffix: str = "",
+                     pad: float = 3, colors: dict | None = None) -> go.Figure:
+    """The velocity chart's look for any per-pitch number: one usage-weighted KDE per pitch type (``PT``
+    column, most used first; types under 5 pitches are skipped), filled, plus a dashed All Pitches total,
+    so each curve's area is that type's share of all the pitches drawn."""
     palette = colors or PITCH_COLORS
-    d = (df.filter(pl.col("TaggedPitchType").is_not_null() & ~pl.col("TaggedPitchType").is_in(NON_PITCHES)
-                   & pl.col("RelSpeed").is_not_null())
-           .with_columns(pl.col("TaggedPitchType").replace(PITCH_NAMES).alias("PT")))
     fig = go.Figure()
     if d.height >= 5:
         n = d.height
-        grid = np.linspace(d["RelSpeed"].min() - 3, d["RelSpeed"].max() + 3, 250)
+        grid = np.linspace(d[col].min() - pad, d[col].max() + pad, 250)
         total = np.zeros_like(grid)
         for pt in d.group_by("PT").len().sort("len", descending=True)["PT"].to_list():
-            v = d.filter(pl.col("PT") == pt)["RelSpeed"].to_numpy()
+            v = d.filter(pl.col("PT") == pt)[col].to_numpy()
             if len(v) < 5 or v.std() < 1e-6:
                 continue
             y = gaussian_kde(v)(grid) * (len(v) / n) * 100          # weighted by usage -> % of all pitches
@@ -848,10 +849,18 @@ def velocity_fig(df: pl.DataFrame, pitcher: str, hand: str, colors: dict | None 
         fig.add_trace(go.Scatter(x=grid, y=total, name="All Pitches", mode="lines",
             line=dict(color="#444", width=1.4, dash="dash"), hoverinfo="skip"))
     fig.update_layout(width=940, height=420, template="plotly_white", hovermode="x unified",
-        title=dict(text=f"{pitcher} ({hand}) — Frequency of Pitches by Pitch Speed", x=0.5, font=dict(size=14)),
+        title=dict(text=title, x=0.5, font=dict(size=14)),
         margin=dict(l=20, r=20, t=50, b=80),
         legend=dict(orientation="h", yanchor="top", y=-0.2, x=0.5, xanchor="center"),
-        xaxis=dict(title="Pitch Speed (MPH)", ticksuffix=" MPH", showspikes=True, spikemode="across",
+        xaxis=dict(title=x_title, ticksuffix=x_suffix, showspikes=True, spikemode="across",
                    spikethickness=1, spikecolor="#999", spikedash="dot"),
-        yaxis=dict(title="Frequency of Speed", ticksuffix="%", rangemode="tozero"))
+        yaxis=dict(title=y_title, ticksuffix="%", rangemode="tozero"))
     return fig
+
+
+def velocity_fig(df: pl.DataFrame, pitcher: str, hand: str, colors: dict | None = None) -> go.Figure:
+    d = (df.filter(pl.col("TaggedPitchType").is_not_null() & ~pl.col("TaggedPitchType").is_in(NON_PITCHES)
+                   & pl.col("RelSpeed").is_not_null())
+           .with_columns(pl.col("TaggedPitchType").replace(PITCH_NAMES).alias("PT")))
+    return distribution_fig(d, "RelSpeed", f"{pitcher} ({hand}) — Frequency of Pitches by Pitch Speed",
+                            "Pitch Speed (MPH)", "Frequency of Speed", x_suffix=" MPH", pad=3, colors=colors)

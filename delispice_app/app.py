@@ -12,10 +12,12 @@ server in a native pop-up window via pywebview.
 from __future__ import annotations
 
 import base64
+import importlib
 import io
 import json
 import os
 import re
+import sys
 from datetime import date, datetime
 
 import numpy as np
@@ -24,6 +26,16 @@ from dash import ALL as ALLPM, Dash, Input, Output, Patch, State, ctx, dcc, html
 from dash.exceptions import PreventUpdate
 
 from . import data, game_report, leaderboard, pitch_by_pitch, pitch_lab, report, scouting
+
+# Machine-local tabs: delispice_app/local_tabs.py is untracked, so a machine without it (the server) runs
+# without them. It provides TABS [(label, value)] and panels(app_module) -> [panel], which also registers
+# the tabs' callbacks. Only a missing file is skipped; an error inside it still raises.
+try:
+    local_tabs = importlib.import_module(f"{__package__}.local_tabs")   # not `from . import`: that raises a bare ImportError
+except ModuleNotFoundError as e:
+    if e.name != f"{__package__}.local_tabs":
+        raise
+    local_tabs = None
 
 ALL = data.ALL
 RETAG_TYPES = ["Fastball", "Sinker", "FourSeamFastBall", "TwoSeamFastBall", "Cutter", "Slider",
@@ -480,6 +492,8 @@ RETIRED_TABS = {"lookup", "shortlist"}
 _TABS = [("About", "about"), ("Lookup", "lookup"), ("Pitchers", "pitcher"), ("Batters", "batter"),
          ("Game Reports", "game"), ("Pitch Lab", "lab"), ("Shortlist", "shortlist")]
 _TABS = [(label, value) for label, value in _TABS if value not in RETIRED_TABS]
+LOCAL_TABS = {value for _, value in local_tabs.TABS} if local_tabs else set()
+_TABS += local_tabs.TABS if local_tabs else []
 role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": f"{110 * len(_TABS)}px", "marginBottom": "10px"},
                      colors={"primary": MAROON, "background": "#faf7f7", "border": "#e2c9cc"},
                      children=[dcc.Tab(label=label, value=value) for label, value in _TABS])
@@ -1993,12 +2007,14 @@ lab_panel = html.Div(id="lab-panel", style={"display": "none"}, children=[
 ])
 
 
+local_panels = local_tabs.panels(sys.modules[__name__]) if local_tabs else []   # this module, as __main__ or not
+
 app.layout = html.Div([dcc.Store(id="retag-version", data=0),
                        dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
                        dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
                        dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"), selection,
                        html.Div([about_panel, lookup_panel, shortlist_panel, pitcher_report,
-                                 batter_report, game_panel, lab_panel], style={"padding": "12px 16px"})],
+                                 batter_report, game_panel, lab_panel, *local_panels], style={"padding": "12px 16px"})],
                       style={"fontFamily": FONT})
 
 
@@ -2019,8 +2035,9 @@ def cb_about_toggle(role):
     lookup = {"padding": "8px 4px"} if role == "lookup" else {"display": "none"}
     game = {"display": "block"} if role == "game" else {"display": "none"}
     lab = {"padding": "8px 4px"} if role == "lab" else {"display": "none"}
-    # Lookup, Game Reports and the Pitch Lab carry their own controls, so the shared player picker stays hidden.
-    picker = {"display": "none"} if role in ("about", "shortlist", "lookup", "game", "lab") else {"display": "block"}
+    # Lookup, Game Reports, the Pitch Lab and local tabs carry their own controls, so the shared player picker stays hidden.
+    picker = ({"display": "none"} if role in ("about", "shortlist", "lookup", "game", "lab") or role in LOCAL_TABS
+              else {"display": "block"})
     return about, picker, shortlist, lookup, game, game, lab
 
 

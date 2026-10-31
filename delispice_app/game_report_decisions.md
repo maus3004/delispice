@@ -196,6 +196,13 @@ Still with Matt: the practice exports' column names (section 3).
 
 - **Strike %** (added 2026-10-19) = strikes ÷ all pitches, where a strike is a called strike, a swinging strike, any foul (`FoulBall`, `FoulBallNotFieldable`, `FoulBallFieldable`) or a ball in play: `report.STRIKE_CALLS`, the Pitchers tab's definition, so both tabs agree. Balls, balls in the dirt, hit-by-pitches, intentional balls, `AutomaticBall` / `AutomaticStrike` and `Undefined` count as non-strikes.
 - **Zone %** = pitches in the zone ÷ pitches with a plate location, using the zone the Pitcher and Batter reports already use (`report.ZONE`: 0.83 ft either side of the plate's center, 1.5 to 3.3775 ft high; the leaderboard's `ZONE_SQL` is the same box).
+- **Zone-Pre2S%, Chase% and IZ-Whiff%** (added 2026-10-28, Matt's request). They sit after Zone % in this table and in the per-game rows, and are defined in `game_report.ZONE_RATES`.
+  - **They reuse existing definitions:** the zone is Zone %'s box, and a swing is Whiff %'s (`report.SWING_CALLS`: swinging strikes, all three foul spellings, balls in play). Pitches without a plate location count in none of them.
+  - **Zone-Pre2S%** = pitches in the zone ÷ pitches with a location, both thrown with 0 or 1 strike.
+  - **Chase%** = swings at pitches outside the zone ÷ pitches outside the zone. It's the same as the leaderboard's `chase_pct`.
+  - **IZ-Whiff%** = swinging strikes on pitches in the zone ÷ swings on pitches in the zone. It's per swing, like Whiff %, not per pitch (Matt's call, 2026-10-28).
+  - **Uploads:** Chase% and IZ-Whiff% need `PitchCall`, and Zone-Pre2S% needs `Strikes`. A practice export has neither, so they're blank there, as the other numbers that need those columns are.
+- **Extension removed from this table and the per-game rows** (2026-10-28, Matt's request). It stays in the arsenal, per pitch type.
 
 ### Two charts, side by side
 
@@ -217,6 +224,15 @@ Still with Matt: the practice exports' column names (section 3).
 - **Stuff+ waits:** it exists only in the research notebooks so far (`backend/research/stuff_model/`); Matt is writing the production module.
 - **Always two tables** (decided 2026-10-16; revisit once it's built): the pitch data first, then a second table underneath with just the model numbers (RV/100, xRV/BBE, Stuff+). The screen and the PDF match.
 - **Small samples:** the pitch count always shows; rates (zone %, whiff %, hard-hit %, RV/100, xRV/BBE) are blank for a pitch type thrown fewer than 5 times.
+- **Zone-Pre2S%, Chase% and IZ-Whiff% per pitch type** (added 2026-10-28):
+  - **Definitions:** the same as in the line table above.
+  - **Columns:** Zone-Pre2S% and Chase% come after Zone %, and IZ-Whiff% after WHIFF %.
+  - **Small samples:** like the other rates, they're blank for a pitch type thrown fewer than 5 times. They're also blank when nothing qualifies, e.g. IZ-Whiff% with no swings in the zone.
+  - **Pitchers tab:** these are Game Reports only; the Pitchers tab's arsenal is unchanged.
+- **Column order and release point** (2026-10-28, Matt's request):
+  - **Order** (`game_report.ARSENAL_COLS`): Pitch · Count (%) · Avg Velo · Max Velo · Avg Spin · Vert Break · Horz Break · Tilt · Extension · Arm Angle · Rel Height · Rel Side · Strike % · Zone % · Zone-Pre2S% · Chase% · WHIFF % · IZ-Whiff% · RV/100. The shape and release columns now come right after Avg Spin.
+  - **Rel Height and Rel Side** are new, Game Reports only: the average release point per pitch type in feet, pitcher's view (a RHP's release side is +), shown with 2 decimals like Extension.
+  - **Fitting the window:** the line, By game and arsenal tables are compact (`html_table(..., compact=True)`), so headers wrap and cell padding is 6 px. With the two new columns the arsenal would be 1,536 px wide; compact, it fits any window over about 1,075 px before it scrolls sideways.
 - Same definitions as the Pitchers tab: whiff % = swinging strikes ÷ swings; hard-hit = exit velocity ≥ 95 mph on batted balls; tilt = the circular average of the spin axis, shown as a clock time.
 
 ### Location charts (four, side by side)

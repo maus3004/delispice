@@ -35,8 +35,8 @@ Two options are provided so you never have to touch the terminal:
 
 ## Using it
 
-0. **Choose a role** with the **Pitchers / Batters** tab at the top — it switches what the picker
-   looks up and which report renders.
+0. **Choose a role**: open **Season Reports** and set its **Report for** toggle to **Pitcher** or
+   **Batter**. It switches what the picker looks up and which report renders.
 1. **Pick a player** with the cascading filters: **Year(s)** (check any; none = all years) +
    **Level** → **Conference** → **Team** → **Pitcher/Batter** (type to search). Conference is the
    team's own conference (SEC = the 16 SEC schools). The report loads automatically.
@@ -74,7 +74,7 @@ Two options are provided so you never have to touch the terminal:
 |------|------|
 | `data.py` | DuckDB serving layer, generalized by **role** (`"pitcher"` / `"batter"`). Builds/caches a `(Part, Level, Team, Player, Year)` picker index per role (`.cache/{role}_index.parquet`); per player, scans **only** the partitions they appear in, projecting just that role's report columns (trajectories / notes / UIDs / etc. are never read). Results are cached in process. |
 | `report.py` | Pure report builders + Plotly figures. Pitchers: summary, arsenal (velo/spin/tilt), movement, heatmap, velocity. Batters: batting-line summary, spray chart. No Dash/DuckDB. |
-| `app.py` | Dash UI — the Pitchers/Batters tab, the shared role-aware cascade, both reports, and in-place pitcher split updates (the heatmap uses a Dash `Patch` so the on-chart stat selection is preserved). Run it directly for browser mode. |
+| `app.py` | Dash UI — the Season Reports tab (Pitcher / Batter toggle), the shared role-aware cascade, both reports, and in-place pitcher split updates (the heatmap uses a Dash `Patch` so the on-chart stat selection is preserved). Run it directly for browser mode. |
 | `backend/models/cluster.py` | Thin AutoCluster adapter (lives with the models, not in the app) — the GMM is the sibling `backend/models/autotagger.py`; the adapter keys labels by PitchUID and `data.py` loads it by file path. |
 | `launch.py` | Starts the Dash server on a local port and opens it in a native window via pywebview. |
 

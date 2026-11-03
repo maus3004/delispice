@@ -7,7 +7,7 @@ the D1 average shape for its type. ``grade`` grades whatever numbers are typed i
 sweeps one input at a time across its D1 range. The arsenal lives in the browser session only: the app
 keeps it in a session ``dcc.Store``, never on the server.
 
-**Signs.** Inputs use TrackMan's convention, the same numbers the Pitchers tab shows: HorzBreak and RelSide
+**Signs.** Inputs use TrackMan's convention, the same numbers the pitcher Season Report shows: HorzBreak and RelSide
 are + toward a right-hander's arm side, so a left-hander's arm side is −. Grading mirrors them to the
 model's convention (+ = arm side for both hands), the same way ``stuff_v1.add_features`` does.
 
@@ -238,7 +238,7 @@ def names(lab: dict) -> dict:
 
 
 def colors(lab: dict) -> dict:
-    """uid -> chart colour: the Pitchers tab's colour for the type, a spare colour for a repeat."""
+    """uid -> chart colour: the pitcher Season Report's colour for the type, a spare colour for a repeat."""
     used, out, spare = set(), {}, iter(c for c in report.CLUSTER_COLORS + ["#7f7f7f"] * MAX_PITCHES)
     for p in lab["pitches"]:
         c = report.PITCH_COLORS.get(NAME[p["type"]] if p["type"] != PRIMARY else "Four-Seam", "#8c8c8c")
@@ -303,7 +303,7 @@ GRADE_COLS = ["Pitch", "Group", *GRADES.values()]
 
 
 def grade_rows(lab: dict, graded: pl.DataFrame) -> list[dict]:
-    """The grades table in arsenal order, shaped like the Pitchers tab's Stuff table: per pitch
+    """The grades table in arsenal order, shaped like the pitcher Season Report's Stuff table: per pitch
     ``{key, row, subs}``, where key is the pitch's uid, row is Pitch, Group, Stuff+, Whiff+, Foul+,
     Contact+ and subs are the same grades vs RHB, then vs LHB (the pitch's dropdown)."""
     nm, by_uid = names(lab), {r["uid"]: r for r in graded.iter_rows(named=True)}
@@ -345,9 +345,9 @@ def warnings(lab: dict, graded: pl.DataFrame, ref: dict) -> list[tuple[str, str]
 
 def sensitivity(lab: dict, uid: str, model, ref: dict, n: int = 25) -> tuple[pl.DataFrame, dict]:
     """Sweep each input of pitch ``uid`` across its group's D1 range (plus its current value), one at
-    a time, everything else held. Returns (field, x, uid, stuff) rows and field -> (lo, hi) of the D1
-    range in display units. For the primary fastball, velo / HB / IVB also move every other pitch
-    (their differentials), so those sweeps carry the whole arsenal."""
+    a time, everything else held. Returns (field, x, uid, stuff, whiff_plus, foul_plus, contact_plus)
+    rows and field -> (lo, hi) of the D1 range in display units. For the primary fastball, velo / HB /
+    IVB also move every other pitch (their differentials), so those sweeps carry the whole arsenal."""
     target = next((p for p in lab["pitches"] if p["uid"] == uid), None)
     if target is None or uid in incomplete(lab) or lab["pitches"][0]["uid"] in incomplete(lab):
         return pl.DataFrame(), {}
@@ -374,7 +374,7 @@ def sensitivity(lab: dict, uid: str, model, ref: dict, n: int = 25) -> tuple[pl.
                       "x": [b for _, b, _ in keys], "whole": [c for *_, c in keys]})
     g = _graded(fr, model).join(k, on="scenario")
     g = g.filter((pl.col("uid") == uid) | pl.col("whole"))
-    return g.select("field", "x", "uid", "stuff").sort("field", "uid", "x"), bounds
+    return g.select("field", "x", "uid", *GRADES).sort("field", "uid", "x"), bounds
 
 
 # ── Figures ──────────────────────────────────────────────────────────────────────────────────────
@@ -387,7 +387,7 @@ def empty_fig(msg: str = "", width=460, height=450) -> go.Figure:
 
 
 def movement_fig(lab: dict, graded: pl.DataFrame, ref: dict) -> go.Figure:
-    """The arsenal on the Pitchers tab's movement chart (TrackMan HB x IVB, ±30 in), each pitch labelled
+    """The arsenal on the pitcher Season Report's movement chart (TrackMan HB x IVB, ±30 in), each pitch labelled
     with its Stuff+, over hollow markers at the D1 average shape of each type in the arsenal."""
     s, nm, col = _sign(lab["hand"]), names(lab), colors(lab)
     fig = go.Figure()
@@ -419,40 +419,50 @@ def movement_fig(lab: dict, graded: pl.DataFrame, ref: dict) -> go.Figure:
     return fig
 
 
-def sensitivity_fig(lab: dict, uid: str, sens: pl.DataFrame, bounds: dict) -> go.Figure:
+GRADE_COLOR = {"stuff": "#222222", "whiff_plus": "#2a78d6", "foul_plus": "#1baf7a", "contact_plus": "#eb6834"}
+
+
+def sensitivity_fig(lab: dict, uid: str, sens: pl.DataFrame, bounds: dict, all_grades: bool = False) -> go.Figure:
     """One panel per input: the pitch's Stuff+ as that input moves (solid), the current value (dot),
     and grey outside the D1 range. For the primary fastball's velo / HB / IVB, the other pitches' Stuff+
-    are dashed: those inputs move every grade in the arsenal."""
+    are dashed: those inputs move every grade in the arsenal. ``all_grades`` draws the pitch's Stuff+,
+    Whiff+, Foul+ and Contact+ instead, one colour per grade, and leaves the other pitches out."""
     nm, col = names(lab), colors(lab)
     target = next(p for p in lab["pitches"] if p["uid"] == uid)
+    shown = list(GRADES) if all_grades else ["stuff"]
     fig = make_subplots(rows=2, cols=3, horizontal_spacing=0.07, vertical_spacing=0.16,
                         subplot_titles=[f"{LABEL[f]} ({UNIT[f]})" for f in COL])
     for i, f in enumerate(COL):
         r, c = i // 3 + 1, i % 3 + 1
-        d = sens.filter(pl.col("field") == f)
+        d = sens.filter(pl.col("field") == f, *([pl.col("uid") == uid] if all_grades else []))
         if d.height == 0:
             continue
-        others = [u for u in d["uid"].unique(maintain_order=True).to_list() if u != uid]
-        for u in [uid, *others]:
+        # (uid, grade, legend name, colour, width, dash) per line
+        if all_grades:
+            lines = [(uid, g, GRADES[g], GRADE_COLOR[g], 3 if g == "stuff" else 2, "solid") for g in shown]
+        else:
+            others = [u for u in d["uid"].unique(maintain_order=True).to_list() if u != uid]
+            lines = [(u, "stuff", nm[u], col[u], 3 if u == uid else 1.5, "solid" if u == uid else "dash")
+                     for u in [uid, *others]]
+        for u, g, name, color, width, dash in lines:
             du = d.filter(pl.col("uid") == u)
-            fig.add_trace(go.Scatter(x=du["x"].to_list(), y=du["stuff"].to_list(), mode="lines",
-                name=nm[u], legendgroup=u, showlegend=(f == "velo" and bool(others)) or (i == 0 and u == uid),
-                line=dict(color=col[u], width=3 if u == uid else 1.5, dash="solid" if u == uid else "dash"),
-                hovertemplate=f"{nm[u]}<br>{LABEL[f]} %{{x}}<br>Stuff+ %{{y:.0f}}<extra></extra>"),
+            fig.add_trace(go.Scatter(x=du["x"].to_list(), y=du[g].to_list(), mode="lines",
+                name=name, legendgroup=name, showlegend=i == 0, line=dict(color=color, width=width, dash=dash),
+                hovertemplate=f"{nm[u]}<br>{LABEL[f]} %{{x}}<br>{GRADES[g]} %{{y:.0f}}<extra></extra>"),
                 row=r, col=c)
         cur = float(effective(lab, target, f))
-        y = d.filter((pl.col("uid") == uid) & (pl.col("x") == cur))["stuff"]
-        if y.len():
-            fig.add_trace(go.Scatter(x=[cur], y=[y[0]], mode="markers", showlegend=False,
-                marker=dict(size=10, color=col[uid], line=dict(color="#fff", width=1.5)),
-                hovertemplate=f"Now: {LABEL[f]} %{{x}}<br>Stuff+ %{{y:.0f}}<extra></extra>"), row=r, col=c)
+        now = d.filter((pl.col("uid") == uid) & (pl.col("x") == cur))
+        for g in shown if now.height else []:
+            fig.add_trace(go.Scatter(x=[cur], y=[now[g][0]], mode="markers", showlegend=False,
+                marker=dict(size=10, color=GRADE_COLOR[g] if all_grades else col[uid], line=dict(color="#fff", width=1.5)),
+                hovertemplate=f"Now: {LABEL[f]} %{{x}}<br>{GRADES[g]} %{{y:.0f}}<extra></extra>"), row=r, col=c)
         # after the traces: plotly skips a shape on a subplot that has no data yet
         (x0, x1), (lo, hi) = (d["x"].min(), d["x"].max()), bounds[f]
         for a, b in ((x0, lo), (hi, x1)):
             if b - a > 1e-3:                 # the grid is rounded to 0.001, so its ends can miss the range by less
                 fig.add_vrect(x0=a, x1=b, fillcolor="#e8e8e8", line_width=0, layer="below", row=r, col=c)
-    many = sens["uid"].n_unique() > 1
-    fig.update_yaxes(title_text="Stuff+", col=1)
+    many = all_grades or sens["uid"].n_unique() > 1
+    fig.update_yaxes(title_text="Grade" if all_grades else "Stuff+", col=1)
     fig.update_layout(width=960, height=580 if many else 550, template="plotly_white", showlegend=many,
                       margin=dict(l=10, r=10, t=70 if many else 40, b=10), hovermode="closest",
                       legend=dict(orientation="h", yanchor="bottom", y=1.08, x=0, font=dict(size=11)))

@@ -1,10 +1,10 @@
 """Dash UI for delispice_app (pitcher/batter reports) — a single Python program, no external API.
 
-A role tab (Pitchers / Batters) switches what the shared cascading picker looks up and which report
-renders below:
-  * Pitchers — summary, Batter + Count split checkboxes that drive the arsenal table AND the location
+The Season Reports tab's Pitcher / Batter toggle switches what the shared cascading picker looks up and
+which report renders below:
+  * Pitcher — summary, Batter + Count split checkboxes that drive the arsenal table AND the location
     heatmap, plus movement / heatmap / velocity charts.
-  * Batters — batting-line summary + a spray chart (a starting scaffold; more tables/charts to come).
+  * Batter — batting-line summary + a spray chart (a starting scaffold; more tables/charts to come).
 
 Run standalone (opens in a browser) with ``python -m delispice_app.app``; ``launch.py`` wraps this same
 server in a native pop-up window via pywebview.
@@ -489,12 +489,13 @@ def _dropdown(did, options, value, width=None):
 # Retired tabs are off the tab bar, but their panels and callbacks stay in the code (hidden), so
 # bringing one back is removing it from this set. Lookup and Shortlist retired 2026-10-16.
 RETIRED_TABS = {"lookup", "shortlist"}
-_TABS = [("About", "about"), ("Lookup", "lookup"), ("Pitchers", "pitcher"), ("Batters", "batter"),
+# Season Reports holds the pitcher and batter reports (one tab each until 2026-11-02); its own toggle picks
+# which, and the `role` store carries that pick to every role-aware callback (cb_role).
+_TABS = [("About", "about"), ("Lookup", "lookup"), ("Season Reports", "season"),
          ("Game Reports", "game"), ("Pitch Lab", "lab"), ("Shortlist", "shortlist")]
 _TABS = [(label, value) for label, value in _TABS if value not in RETIRED_TABS]
-LOCAL_TABS = {value for _, value in local_tabs.TABS} if local_tabs else set()
 _TABS += local_tabs.TABS if local_tabs else []
-role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": f"{110 * len(_TABS)}px", "marginBottom": "10px"},
+role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": f"{125 * len(_TABS)}px", "marginBottom": "10px"},
                      colors={"primary": MAROON, "background": "#faf7f7", "border": "#e2c9cc"},
                      children=[dcc.Tab(label=label, value=value) for label, value in _TABS])
 
@@ -609,6 +610,11 @@ gr_controls = html.Div(id="gr-controls", style={"display": "none"}, children=[
 selection = html.Div([
     role_tabs,
     html.Div(id="picker-controls", style={"display": "none"}, children=[
+    html.Div([html.Span("Report for", style=LABEL),
+              dcc.RadioItems(id="sr-role", value="pitcher", inline=True, style=_GR_RADIO,
+                             inputStyle={"marginRight": "4px", "marginLeft": "10px"},
+                             options=[{"label": "Pitcher", "value": "pitcher"}, {"label": "Batter", "value": "batter"}])],
+             style={"marginBottom": "8px"}),
     html.Div([html.Span("Year(s):", style=LABEL), _checklist("year-check", data.years()),
               html.Span("  (none = All years)", style={"color": "#888", "fontSize": "12px"})],
              style={"marginBottom": "8px"}),
@@ -800,8 +806,8 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
             "gap":"12px",
         },
     ),
-    html.P(["Pick the ", html.B("Pitchers"), " or ", html.B("Batters"),
-            " tab above to begin. Filter by year, level, conference, and team, then choose a "
+    html.P(["Open ", html.B("Season Reports"), " above and pick ", html.B("Pitcher"), " or ", html.B("Batter"),
+            " to begin. Filter by year, level, conference, and team, then choose a "
             "player to build their report."],
            style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.5"}),
 
@@ -1769,7 +1775,7 @@ gr_retag_panel = html.Details(open=False, style={"margin": "6px 0", "background"
                   html.Button("Revert this game", id="gr-revert-game", n_clicks=0, style=_BTN),
                   html.Button("Revert this pitcher", id="gr-revert-pitcher", n_clicks=0, style=_BTN)],
                  style=_ROW),
-        html.Div("Retags are saved for everyone and shared with the Pitchers tab; TrackMan's data itself is "
+        html.Div("Retags are saved for everyone and shared with Season Reports; TrackMan's data itself is "
                  "never changed, and reverting brings the original pitch types back. Pitches from unverified "
                  "games can't be retagged (their IDs can change when the verified file arrives).",
                  style={"fontSize": "11px", "color": "#888", "marginBottom": "4px"}),
@@ -1879,7 +1885,6 @@ _PL_TYPE_OPTS = [{"label": pitch_lab.NAME[t], "value": t} for t in pitch_lab.TYP
 _PL_CARD = {"border": "1px solid #e2c9cc", "borderRadius": "6px", "padding": "8px 12px 6px", "background": "#fff",
             "width": "430px", "boxSizing": "border-box", "fontFamily": FONT, "fontSize": "13px"}
 _PL_ROWLAB = {"width": "48px", "flex": "0 0 auto", "fontSize": "12px", "color": "#444"}
-_PL_SUB = {"fontSize": "11px", "color": "#888", "margin": "4px 0 0"}
 _PL_SHORT = {"velo": "Velo", "ivb": "IVB", "hb": "HB", "spin": "Spin", "rel_h": "Height", "rel_s": "Side"}
 
 
@@ -1900,7 +1905,6 @@ def _pl_card(lab, p, nm, col):
     own = pitch_lab.own_release(p)
     head = html.Div([
         html.Span("●", style={"color": col[uid]}), html.Span(nm[uid], style={"fontWeight": 600}),
-        html.Span("· required" if primary else "", style={"color": "#888", "fontSize": "11px"}),
         html.Span(id={"type": "pl-badge", "uid": uid}, style={"marginLeft": "auto"}),     # Stuff+, from cb_pl_results
         html.Div() if primary else html.Button("✕", id={"type": "pl-del", "uid": uid}, n_clicks=0,
                                                title="Remove this pitch", style={**_BTN, "color": MAROON}),
@@ -1925,17 +1929,10 @@ def _pl_editor(lab):
                                  inputStyle={"marginRight": "4px", "marginLeft": "10px"},
                                  options=[{"label": "Right", "value": "Right"}, {"label": "Left", "value": "Left"}])],
                  style={"display": "flex", "alignItems": "center", "margin": "2px 0 6px"}),
-        html.Div("Arm slot: every pitch releases here unless it has its own release point", style=_PL_SUB),
         *[_pl_slider("arsenal", f, lab[f], pitch_lab.PRIMARY, lab["hand"]) for f in ("rel_h", "rel_s")],
     ], style={**_PL_CARD, "background": "#faf7f7"})
-    return html.Div([
-        html.Div([pitcher, *[_pl_card(lab, p, nm, col) for p in lab["pitches"]]],
-                 style={"display": "flex", "flexWrap": "wrap", "gap": "10px", "alignItems": "flex-start"}),
-        html.Div("Drag a slider, or type an exact value in the box beside it. Each slider runs past what D1 pitchers of "
-                 "that group throw, by 20% of the input's largest value at each end; the yellow warning starts at the "
-                 "outer 1% of D1 pitches. HB "
-                 "and release side use TrackMan's signs, like the Pitchers tab: + is a right-hander's arm side, so a "
-                 "left-hander's arm side is −. Switching Throws mirrors them.", style={**_PL_NOTE, "marginTop": "6px"})])
+    return html.Div([pitcher, *[_pl_card(lab, p, nm, col) for p in lab["pitches"]]],
+                    style={"display": "flex", "flexWrap": "wrap", "gap": "10px", "alignItems": "flex-start"})
 
 
 def _pl_help():
@@ -1949,7 +1946,7 @@ def _pl_help():
         html.Summary("How the Pitch Lab grades", style={"cursor": "pointer", "fontWeight": 600, "fontSize": "13px",
                                                         "fontFamily": FONT, "padding": "6px 0"}),
         html.Ul(style={"fontFamily": FONT, "fontSize": "13px", "lineHeight": "1.5", "paddingLeft": "18px"}, children=[
-            li("It's the same Stuff+ model as the Pitchers tab. Each pitch is graded against an average D1 hitter "
+            li("It's the same Stuff+ model as Season Reports. Each pitch is graded against an average D1 hitter "
                "across all 12 counts and both batter sides, weighted the way D1 pitchers of that hand use "
                "pitches of that group."),
             li("Grades are within a group: 100 is the average D1 fastball, breaking ball or offspeed pitch, and "
@@ -1980,11 +1977,7 @@ lab_panel = html.Div(id="lab-panel", style={"display": "none"}, children=[
     dcc.Store(id="pl-lab", storage_type="session", data=pitch_lab.default_lab(_PL_REF) if _PL_REF else None),
     dcc.Store(id="pl-known", storage_type="memory"),     # the arsenal the form currently shows
     dcc.Store(id="pl-open", storage_type="memory", data=[]),   # uids whose vs RHB / vs LHB rows are open
-    html.Div("Pitch Lab", style={"fontSize": "20px", "fontWeight": 700, "fontFamily": FONT}),
-    html.Div("Build a hypothetical arsenal and see how the Stuff+ model grades it. Start with the primary "
-             "fastball, because every other pitch is also graded on its differences from it. Each pitch you add "
-             "starts at the D1 average for its type.",
-             style={"fontFamily": FONT, "fontSize": "13px", "color": "#555", "margin": "2px 0 10px", "maxWidth": "900px"}),
+    html.Div("Pitch Lab", style={"fontSize": "20px", "fontWeight": 700, "fontFamily": FONT, "marginBottom": "10px"}),
     html.Div([html.Span("Add a pitch", style=LABEL),
               dcc.Dropdown(id="pl-add-type", options=_PL_TYPE_OPTS, value="SL", clearable=False,
                            style={"width": "150px", "fontSize": "13px"}),
@@ -1996,11 +1989,12 @@ lab_panel = html.Div(id="lab-panel", style={"display": "none"}, children=[
     html.Div([_graph("pl-move-graph"),
               html.Div([html.Div([html.Span("Sensitivity for", style=LABEL),
                                   dcc.Dropdown(id="pl-sens-pitch", options=[], value=None, clearable=False,
-                                               style={"width": "170px", "fontSize": "13px"})], style=_ROW),
-                        html.Div("Each panel moves one input with everything else held; the dot is where it is "
-                                 "now, and grey is outside 98% of D1 pitches of its group. For the primary "
-                                 "fastball, the dashed lines are the other pitches: its velo, HB and IVB move "
-                                 "their grades too.", style={**_PL_NOTE, "maxWidth": "900px"}),
+                                               style={"width": "170px", "fontSize": "13px"}),
+                                  # on: the pitch's Stuff+, Whiff+, Foul+ and Contact+ lines (kept for this tab)
+                                  dcc.Checklist(id="pl-sens-all", value=[], persistence=True, persistence_type="session",
+                                                options=[{"label": " All four grades", "value": "all"}],
+                                                style={"fontSize": "13px", "fontFamily": FONT, "marginLeft": "10px"})],
+                                 style=_ROW),
                         _graph("pl-sens-graph")])],
              style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "alignItems": "flex-start", "marginTop": "8px"}),
     _pl_help(),
@@ -2012,14 +2006,24 @@ local_panels = local_tabs.panels(sys.modules[__name__]) if local_tabs else []   
 app.layout = html.Div([dcc.Store(id="retag-version", data=0),
                        dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
                        dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
-                       dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"), selection,
+                       dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"),
+                       dcc.Store(id="role", data="about"),      # "pitcher" / "batter" on Season Reports (cb_role)
+                       selection,
                        html.Div([about_panel, lookup_panel, shortlist_panel, pitcher_report,
                                  batter_report, game_panel, lab_panel, *local_panels], style={"padding": "12px 16px"})],
                       style={"fontFamily": FONT})
 
 
+# ── Season Reports: which report the shared picker serves ────────────────────────────────────────
+# `role` = the Pitcher / Batter toggle on Season Reports, the tab's own value anywhere else. Leaving the tab
+# changes it too, which resets the picker and hides the reports, as switching tabs always has.
+@app.callback(Output("role", "data"), Input("role-tabs", "value"), Input("sr-role", "value"))
+def cb_role(tab, who):
+    return who if tab == "season" else tab
+
+
 # ── Player-role label ────────────────────────────────────────────────────────────────────────────
-@app.callback(Output("player-label", "children"), Input("role-tabs", "value"))
+@app.callback(Output("player-label", "children"), Input("role", "data"))
 def cb_label(role):
     return "Batter" if role == "batter" else "Pitcher"
 
@@ -2035,15 +2039,14 @@ def cb_about_toggle(role):
     lookup = {"padding": "8px 4px"} if role == "lookup" else {"display": "none"}
     game = {"display": "block"} if role == "game" else {"display": "none"}
     lab = {"padding": "8px 4px"} if role == "lab" else {"display": "none"}
-    # Lookup, Game Reports, the Pitch Lab and local tabs carry their own controls, so the shared player picker stays hidden.
-    picker = ({"display": "none"} if role in ("about", "shortlist", "lookup", "game", "lab") or role in LOCAL_TABS
-              else {"display": "block"})
+    # Only Season Reports uses the shared player picker; every other tab carries its own controls (or none).
+    picker = {"display": "block"} if role == "season" else {"display": "none"}
     return about, picker, shortlist, lookup, game, game, lab
 
 
 # ── Cascading pickers (role-aware; all off the small in-memory index) ─────────────────────────────
 @app.callback(Output("conf-dd", "options"), Output("conf-dd", "value"),
-              Input("role-tabs", "value"), Input("year-check", "value"), Input("level-dd", "value"))
+              Input("role", "data"), Input("year-check", "value"), Input("level-dd", "value"))
 def cb_conf(role, years_sel, level):
     if role not in ("pitcher", "batter"):
         return [], ALL
@@ -2051,7 +2054,7 @@ def cb_conf(role, years_sel, level):
 
 
 @app.callback(Output("team-dd", "options"), Output("team-dd", "value"),
-              Input("role-tabs", "value"), Input("year-check", "value"),
+              Input("role", "data"), Input("year-check", "value"),
               Input("level-dd", "value"), Input("conf-dd", "value"))
 def cb_team(role, years_sel, level, conf):
     if role not in ("pitcher", "batter"):
@@ -2060,7 +2063,7 @@ def cb_team(role, years_sel, level, conf):
 
 
 @app.callback(Output("player-dd", "options"), Output("player-dd", "value"),
-              Input("role-tabs", "value"), Input("year-check", "value"), Input("level-dd", "value"),
+              Input("role", "data"), Input("year-check", "value"), Input("level-dd", "value"),
               Input("conf-dd", "value"), Input("team-dd", "value"))
 def cb_player(role, years_sel, level, conf, team):
     if role not in ("pitcher", "batter"):
@@ -2077,13 +2080,15 @@ def cb_player(role, years_sel, level, conf, team):
     Output("bio-target", "data"), Output("release-graph", "figure"),
     Input("player-dd", "value"), Input("retag-version", "data"), Input("bio-version", "data"),
     Input("re-level-dd", "value"), Input("re-year-dd", "value"),
-    State("role-tabs", "value"), State("year-check", "value"),
+    State("role", "data"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
 )
 def cb_build(pitcher, _rv, _bv, re_lvl, re_yr, role, years_sel, level, team):
     hidden = {"display": "none"}
     if role != "pitcher":
-        return (hidden, *([no_update] * 12))
+        # The batter report writes no status line, so the prompt follows the Batter toggle from here.
+        status = ("" if pitcher else "Pick filters, then choose a batter.") if role == "batter" else no_update
+        return (hidden, *([no_update] * 6), status, *([no_update] * 5))
     if not pitcher:
         return (hidden, "", "", go.Figure(), go.Figure(), "", go.Figure(),
                 "Pick filters, then choose a pitcher.", [], [], "", None, go.Figure())
@@ -2193,7 +2198,7 @@ def cb_save_batter_bio(n, height_raw, bday_raw, target, ver):
     Output("pick-status", "children", allow_duplicate=True), Output("bbio-target", "data"),
     Input("player-dd", "value"), Input("retag-version", "data"), Input("bbio-version", "data"),
     Input("bre-level-dd", "value"), Input("bre-year-dd", "value"),
-    State("role-tabs", "value"), State("year-check", "value"),
+    State("role", "data"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
     prevent_initial_call=True,
 )
@@ -2228,7 +2233,7 @@ def cb_build_batter(batter, _rv, _bv, re_lvl, re_yr, role, years_sel, level, tea
     Output("spray-graph", "figure", allow_duplicate=True),
     Output("launch-graph", "figure", allow_duplicate=True),
     Input("batter-vs", "value"),
-    State("role-tabs", "value"), State("player-dd", "value"), State("year-check", "value"),
+    State("role", "data"), State("player-dd", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
     State("bre-level-dd", "value"), State("bre-year-dd", "value"),
     prevent_initial_call=True,
@@ -2247,7 +2252,7 @@ def cb_batter_vs(vs, role, batter, years_sel, level, team, re_lvl, re_yr):
 @app.callback(
     Output("bheat-graph", "figure", allow_duplicate=True),
     Input("batter-family", "value"), Input("batter-vs", "value"),
-    State("role-tabs", "value"), State("player-dd", "value"), State("year-check", "value"),
+    State("role", "data"), State("player-dd", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
     State("bre-level-dd", "value"), State("bre-year-dd", "value"),
     prevent_initial_call=True,
@@ -2274,7 +2279,7 @@ def cb_batter_heat(family, vs, role, batter, years_sel, level, team, re_lvl, re_
     Output("arsenal", "children", allow_duplicate=True),
     Output("heat-graph", "figure", allow_duplicate=True),
     Input("batter-check", "value"), Input("count-check", "value"),
-    State("role-tabs", "value"), State("player-dd", "value"), State("year-check", "value"),
+    State("role", "data"), State("player-dd", "value"), State("year-check", "value"),
     State("level-dd", "value"), State("team-dd", "value"),
     State("re-level-dd", "value"), State("re-year-dd", "value"),
     prevent_initial_call=True,
@@ -2305,7 +2310,7 @@ def cb_lasso_status(sel):
 # and pitch types otherwise — so its dropdown options + label follow the current view.
 @app.callback(Output("retag-lasso-to", "options"), Output("retag-lasso-to", "placeholder"),
               Output("retag-lasso-label", "children"),
-              Input("retag-version", "data"), Input("player-dd", "value"), State("role-tabs", "value"))
+              Input("retag-version", "data"), Input("player-dd", "value"), State("role", "data"))
 def cb_lasso_options(_rv, pitcher, role):
     ent = data.cluster_state(pitcher) if (role == "pitcher" and pitcher) else None
     if ent:
@@ -2316,7 +2321,7 @@ def cb_lasso_options(_rv, pitcher, role):
 
 
 @app.callback(Output("retag-info", "children"),
-              Input("retag-version", "data"), Input("player-dd", "value"), State("role-tabs", "value"))
+              Input("retag-version", "data"), Input("player-dd", "value"), State("role", "data"))
 def cb_retag_info(_rv, pitcher, role):
     s = data.retag_summary(pitcher if role == "pitcher" else None)
     return f"Active: {s['pitches']:,} individual pitch(es) retagged." if s["pitches"] else "No retags yet."
@@ -2325,7 +2330,7 @@ def cb_retag_info(_rv, pitcher, role):
 @app.callback(Output("retag-version", "data"),
               Input("retag-lasso-apply", "n_clicks"),
               State("move-graph", "selectedData"), State("retag-lasso-to", "value"),
-              State("player-dd", "value"), State("role-tabs", "value"), State("retag-version", "data"),
+              State("player-dd", "value"), State("role", "data"), State("retag-version", "data"),
               prevent_initial_call=True)
 def cb_retag_lasso(_n, sel, to, pitcher, role, ver):
     if role != "pitcher" or not pitcher or to is None or not (sel and sel.get("points")):
@@ -2368,7 +2373,7 @@ def cb_retag_reset(_np, _na, pitcher, ver):
               Output("cluster-skip", "data", allow_duplicate=True),
               Input("cluster-run", "n_clicks"), Input("cluster-revert", "n_clicks"),
               State("cluster-release", "value"), State("cluster-k", "value"),
-              State("player-dd", "value"), State("role-tabs", "value"),
+              State("player-dd", "value"), State("role", "data"),
               State("year-check", "value"), State("level-dd", "value"), State("team-dd", "value"),
               State("retag-version", "data"), prevent_initial_call=True)
 def cb_cluster_run(_nr, _nv, release, k, pitcher, role, years_sel, level, team, ver):
@@ -2388,7 +2393,7 @@ def cb_cluster_run(_nr, _nv, release, k, pitcher, role, years_sel, level, team, 
 
 
 @app.callback(Output("cluster-status", "children"), Output("cluster-rename-area", "children"),
-              Input("retag-version", "data"), Input("player-dd", "value"), State("role-tabs", "value"))
+              Input("retag-version", "data"), Input("player-dd", "value"), State("role", "data"))
 def cb_cluster_ui(_rv, pitcher, role):
     if role != "pitcher" or not pitcher:
         return "", ""
@@ -2409,7 +2414,7 @@ def cb_cluster_ui(_rv, pitcher, role):
               Output("cluster-status", "children", allow_duplicate=True),
               Input({"type": "clu-split", "index": ALLPM}, "n_clicks"),
               State("split-movement-only", "value"),
-              State("player-dd", "value"), State("role-tabs", "value"), State("year-check", "value"),
+              State("player-dd", "value"), State("role", "data"), State("year-check", "value"),
               State("level-dd", "value"), State("team-dd", "value"), State("retag-version", "data"),
               prevent_initial_call=True)
 def cb_cluster_split(_clicks, move_only, pitcher, role, years_sel, level, team, ver):
@@ -2435,7 +2440,7 @@ def cb_cluster_split(_clicks, move_only, pitcher, role, years_sel, level, team, 
 # ── AutoCluster: one-at-a-time review of low-confidence pitches ───────────────────────────────────
 @app.callback(Output("cluster-review-area", "children"), Output("cluster-current-uid", "data"),
               Input("retag-version", "data"), Input("player-dd", "value"), Input("cluster-skip", "data"),
-              State("role-tabs", "value"), State("year-check", "value"),
+              State("role", "data"), State("year-check", "value"),
               State("level-dd", "value"), State("team-dd", "value"))
 def cb_cluster_review(_rv, pitcher, skipped, role, years_sel, level, team):
     if role != "pitcher" or not pitcher:
@@ -2497,7 +2502,7 @@ def cb_cluster_rename(_values, pitcher, ver):
 
 @app.callback(Output("cluster-download", "data"), Output("cluster-dl-status", "children"),
               Input("cluster-dl-csv", "n_clicks"), Input("cluster-dl-parquet", "n_clicks"),
-              State("player-dd", "value"), State("role-tabs", "value"),
+              State("player-dd", "value"), State("role", "data"),
               State("year-check", "value"), State("level-dd", "value"), State("team-dd", "value"),
               prevent_initial_call=True)
 def cb_cluster_download(_nc, _np, pitcher, role, years_sel, level, team):
@@ -2746,7 +2751,7 @@ def cb_gr_revert(_ng, _np, uids, player, ver):
     if ctx.triggered_id == "gr-revert-game" and uids:
         data.set_pitch_overrides(uids, None, player)     # drops just this report's pitches' retags
     elif ctx.triggered_id == "gr-revert-pitcher" and player:
-        data.clear_retags(player)                        # every retag under this name, like the Pitchers tab
+        data.clear_retags(player)                        # every retag under this name, like Season Reports
     else:
         raise PreventUpdate
     return (ver or 0) + 1
@@ -3024,8 +3029,9 @@ def cb_pl_open(_clicks, open_uids):
 
 
 @app.callback(Output("pl-sens-graph", "figure"),
-              Input("pl-lab", "data"), Input("pl-sens-pitch", "value"), Input("role-tabs", "value"))
-def cb_pl_sensitivity(lab, uid, role):
+              Input("pl-lab", "data"), Input("pl-sens-pitch", "value"), Input("pl-sens-all", "value"),
+              Input("role-tabs", "value"))
+def cb_pl_sensitivity(lab, uid, all_grades, role):
     if role != "lab" or _PL_REF is None:
         raise PreventUpdate
     model = data._stuff_model()
@@ -3035,7 +3041,7 @@ def cb_pl_sensitivity(lab, uid, role):
     sens, bounds = pitch_lab.sensitivity(lab, uid, model, _PL_REF)
     if sens.height == 0:
         return pitch_lab.empty_fig("Fill in every number for this pitch and the primary fastball.", 960, 560)
-    return pitch_lab.sensitivity_fig(lab, uid, sens, bounds)
+    return pitch_lab.sensitivity_fig(lab, uid, sens, bounds, all_grades="all" in (all_grades or []))
 
 
 def main():

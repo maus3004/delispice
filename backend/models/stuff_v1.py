@@ -89,10 +89,11 @@ LGB_PARAMS = dict(learning_rate=0.05, num_leaves=31, max_depth=6, min_child_samp
 MAX_TREES, PATIENCE, N_FOLDS, SEED = 3000, 50, 5, 42
 K_REF = 10                                   # FB_1 reference: (n·outing + 10·season) / (n + 10)  (F3)
 GAP_MAX, REL_H_MAX, REL_S_MAX = 2, 0.75, 1.0  # pitcher-ID merge, rule C (M2)
-# PR2 (decided 2026-10-16: per pitch): which population sets the Stuff+ scale. "per_pitch" = every graded pitch (10 points = 1 SD
-# of single pitches); "per_pitch_type" = pitch type-seasons with >= MIN_PT pitches (10 points = 1 SD of
-# pitch types). Only the frozen mean/SD change; nothing else in the model does.
-SCALE_METHOD = "per_pitch"
+# PR2: which population sets the Stuff+ scale. "per_pitch" = every graded pitch (10 points = 1 SD of single
+# pitches); "per_pitch_type" = pitch type-seasons with >= MIN_PT pitches (10 points = 1 SD of pitch types,
+# the grades the app's tables show). Decided per pitch 2026-10-16; switched to per pitch type 2026-11-03.
+# Only the frozen mean/SD change; nothing else in the model does (stuff_store --rescale re-maps saved grades).
+SCALE_METHOD = "per_pitch_type"
 MIN_PT = 100
 CHUNK = 120_000                              # pitches per predict call (x 24 contexts)
 GRADE_CHUNK = 500_000                        # pitches per grading block, so grading memory stays flat
@@ -120,10 +121,12 @@ def available_years() -> list[str]:
     return sorted(p.name for p in (PIPELINE / LEVEL).glob("*") if p.is_dir() and p.name.isdigit())
 
 
-def load_pitches(years: list[str] | None = None, with_outcomes: bool = True) -> pl.DataFrame:
+def load_pitches(years: list[str] | None = None, with_outcomes: bool = True,
+                 columns: list[str] | None = None) -> pl.DataFrame:
     """Every D1 pitch of ``years``. Scans both physical partitions and filters on Level, like eye: a
     level's rows are not confined to its own partition. ``with_outcomes`` adds the run-value state
-    and ``is_verified`` (training needs them; grading doesn't)."""
+    and ``is_verified`` (training needs them; grading doesn't). ``columns`` keeps only those (plus
+    PitchUID and Year), for callers that need a few columns of every season."""
     from backend.models import pitch_groups as pg, rv_store
     years = years or available_years()
     files = sorted(f for y in years for f in PIPELINE.glob(f"*/{y}/**/*.parquet"))
@@ -132,7 +135,8 @@ def load_pitches(years: list[str] | None = None, with_outcomes: bool = True) -> 
     lf = pl.scan_parquet([str(f) for f in files])
     names = set(lf.collect_schema().names())
     extra = ([*rv_store.ROW_STATE, "is_verified"] if with_outcomes else [])
-    cols = [c for c in _COLS + extra if c in names]
+    keep = set(columns) | {"PitchUID", "Date", "Level"} if columns else None
+    cols = [c for c in _COLS + extra if c in names and (keep is None or c in keep)]
     raw = (lf.select(cols).filter(pl.col("Level") == LEVEL).drop("Level")
              .with_columns(Year=pl.col("Date").str.slice(0, 4).cast(pl.Int32)).drop("Date")
              .unique(subset=["PitchUID"], keep="first").collect())
@@ -448,16 +452,46 @@ class StuffModel:
             ("contact", "contact_plus", False)]
     SIDE_COLS = [f"{name}_{s}" for _, name, _ in PLUS for s in SIDES]       # stuff_rhb, stuff_lhb, ..., contact_plus_lhb
 
-    def set_scale(self, P: pl.DataFrame, raw: pl.DataFrame):
+    def set_scale(self, P: pl.DataFrame, raw: pl.DataFrame, method: str = SCALE_METHOD):
         """Freeze the per-group mean/SD that define 100 and 10 points (PR2: ``SCALE_METHOD``)."""
         d = P.select("PitchUID", "pid", "Year", "group", "retag").join(raw, on="PitchUID")
-        if SCALE_METHOD == "per_pitch_type":
-            d = (d.group_by("pid", "Year", "retag", "group").agg(pl.len().alias("n"), *[pl.col(c).mean() for c, _, _ in self.PLUS])
+        if method == "per_pitch_type":
+            d = (d.filter(pl.col("pid").is_not_null())
+                  .group_by("pid", "Year", "retag", "group").agg(pl.len().alias("n"), *[pl.col(c).mean() for c, _, _ in self.PLUS])
                   .filter(pl.col("n") >= MIN_PT))
         for g in GROUPS:
             x = d.filter(pl.col("group") == g)
             self.scale[g] = {c: (float(x[c].mean()), float(x[c].std())) for c, _, _ in self.PLUS}
-        self.meta["scale_method"] = SCALE_METHOD
+        self.meta["scale_method"] = method
+
+    def unscale(self, grades: pl.DataFrame, scale: dict | None = None) -> pl.DataFrame:
+        """Saved grades (PitchUID, group, stuff, ...) -> PitchUID + the raw values they were scaled from
+        (runs, whiff, foul, contact). Exact, because each grade is linear in its raw value."""
+        scale = scale or self.scale
+        return grades.select("PitchUID", *[self._by_group(lambda g, c=c, n=n, h=h: scale[g][c][0] + (1 if h else -1)
+                                                          * (pl.col(n) - 100) * scale[g][c][1] / 10).alias(c)
+                                           for c, n, h in self.PLUS])
+
+    def remap(self, grades: pl.DataFrame, old_scale: dict) -> pl.DataFrame:
+        """Saved grades made on ``old_scale`` -> the same grades on this model's scale, blends and platoon
+        splits alike, without re-grading: recover each raw value, then scale it again."""
+        exprs = []
+        for c, name, higher in self.PLUS:
+            s = 1 if higher else -1
+            for col in [name, *[f"{name}_{x}" for x in SIDES]]:
+                if col in grades.columns:
+                    exprs.append(self._by_group(lambda g, c=c, col=col, s=s: 100 + 10 * s * (
+                        old_scale[g][c][0] + s * (pl.col(col) - 100) * old_scale[g][c][1] / 10 - self.scale[g][c][0])
+                        / self.scale[g][c][1]).cast(grades.schema[col]).alias(col))
+        return grades.with_columns(exprs)
+
+    @staticmethod
+    def _by_group(expr_of):
+        """One expression per pitch group, picked by the row's ``group`` (null outside the three)."""
+        e = pl.when(pl.col("group") == GROUPS[0]).then(expr_of(GROUPS[0]))
+        for g in GROUPS[1:]:
+            e = e.when(pl.col("group") == g).then(expr_of(g))
+        return e.otherwise(None)
 
     def grade(self, P: pl.DataFrame) -> pl.DataFrame:
         """PitchUID + Stuff+, Whiff+, Foul+, Contact+, expected runs per swing, runs saved per 100
@@ -478,10 +512,11 @@ class StuffModel:
                            "saved_whiff", "saved_foul", "saved_contact", *self.SIDE_COLS))
 
     # ── persistence: LightGBM text + JSON (no pickle; survives library upgrades, readable) ──
-    def save(self, path):
+    def save(self, path, boosters: bool = True):
+        """``boosters=False`` writes only the JSON (a rescale leaves the 9 LightGBM files as they are)."""
         base = Path(path)
         base.parent.mkdir(parents=True, exist_ok=True)
-        for (g, p), b in self.boosters.items():
+        for (g, p), b in (self.boosters.items() if boosters else ()):
             b.save_model(str(base.with_name(f"{base.name}_{g}_{p}.txt")))
         with open(base.with_name(base.name + ".json"), "w") as f:
             json.dump({"version": MODEL_VERSION, "run_by_group": RUN_BY_GROUP,

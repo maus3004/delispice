@@ -13,6 +13,9 @@ templates and graded.
   * Re-score from the existing model:   python -m backend.models.stuff_store --score-only --years 2026
   * Add the vs-RHB / vs-LHB columns to tables built before they existed, without changing any grade:
     python -m backend.models.stuff_store --add-splits --years 2026
+  * Re-set the frozen scale (PR2) without retraining or re-grading, re-mapping every saved grade:
+    python -m backend.models.stuff_store --rescale              (stuff_v1.SCALE_METHOD; or name one:
+    --rescale per_pitch / per_pitch_type). Then restart the app.
   * Serve: ``load()`` -> StuffModel (or None), ``stuff_lookup(year)`` -> PitchUID -> grades.
 
 P4 pitches are D1 pitches graded by the same model, so the P4 level reads the D1 tables (PR6).
@@ -121,6 +124,39 @@ def add_side_splits(year: str) -> tuple[Path, int, int]:
     return path, out.height, out.height - out["stuff_rhb"].null_count()
 
 
+def rescale(method: str | None = None) -> dict:
+    """Re-set the frozen Stuff+ scale (PR2) without retraining or re-grading. Each grade is linear in the
+    model's raw output, so the raw values are recovered from the saved grades, the new mean/SD are set
+    on them (by pitch type: pitcher x season x pitch, the training pitcher-ID merge), the model's JSON is
+    rewritten (the boosters aren't touched) and every season's table is re-mapped. Running it with the
+    previous method puts the old numbers back."""
+    import copy
+    import time
+    from backend.models import stuff_v1
+    from backend.models.cq_store import _atomic_write
+    method = method or stuff_v1.SCALE_METHOD
+    model = load()
+    if model is None:
+        raise FileNotFoundError("no stuff artifact; train it first: python -m backend.models.stuff_store --train")
+    years = [y for y in stuff_v1.available_years() if _score_path(y).exists()]
+    tables = {y: pl.read_parquet(_score_path(y)) for y in years}
+    G = pl.concat([t.select("PitchUID", "group", "retag", *[n for _, n, _ in model.PLUS])
+                    .with_columns(Year=pl.lit(int(y), pl.Int32)) for y, t in tables.items()])
+    ids, _ = stuff_v1.merge_pitcher_ids(stuff_v1.load_pitches(years, with_outcomes=False, columns=[
+        "PitcherId", "Pitcher", "PitcherThrows", "PitcherTeam", "RelHeight", "RelSide"]))   # the merge's inputs
+    P = G.select("PitchUID", "Year", "group", "retag").join(ids.select("PitchUID", "pid").unique("PitchUID"),
+                                                            on="PitchUID", how="left")
+    old, old_method = copy.deepcopy(model.scale), model.meta.get("scale_method", "per_pitch")
+    model.set_scale(P, model.unscale(G), method)
+    model.meta["rescaled"] = time.strftime("%Y-%m-%d %H:%M")
+    model.meta["previous_scale"] = {"method": old_method, "scale": old}
+    model.save(_base(), boosters=False)
+    for y, t in tables.items():
+        _atomic_write(model.remap(t, old), _score_path(y))
+    return {"method": method, "years": years, "pitches": G.height, "no_pid": int(P["pid"].null_count()),
+            "scale": model.scale}
+
+
 def stuff_lookup(year: str, level: str = "D1") -> pl.DataFrame | None:
     """PitchUID -> grades for one season; None when the table hasn't been built. P4 reads D1."""
     from backend.models import contact_quality as cq
@@ -143,6 +179,9 @@ def main(argv=None):
     p.add_argument("--score-only", action="store_true", help="re-score --years from the existing model")
     p.add_argument("--add-splits", action="store_true",
                    help="add the vs-RHB / vs-LHB columns to --years' existing tables (grades unchanged)")
+    p.add_argument("--rescale", nargs="?", const="", choices=["", "per_pitch", "per_pitch_type"], default=None,
+                   help="re-set the Stuff+ scale and re-map every saved grade, no retraining "
+                        "(default: stuff_v1.SCALE_METHOD)")
     p.add_argument("--years", nargs="*", default=None, help="seasons (default: every season on disk)")
     p.add_argument("--fraction", type=float, default=1.0, help="smoke test: train on this share of pitchers")
     args = p.parse_args(argv)
@@ -163,12 +202,19 @@ def main(argv=None):
                 failed.append(y)
         if failed:
             raise SystemExit(f"stuff: re-score failed for {failed}")
+    elif args.rescale is not None:
+        out = rescale(args.rescale or None)
+        print(f"rescaled to {out['method']}: {out['pitches']:,} pitches in {', '.join(out['years'])} "
+              f"({out['no_pid']:,} without a pitcher ID, left out of the scale)")
+        for g, s in out["scale"].items():
+            print(f"  {g}: " + ", ".join(f"{c} mean {m:+.4f} SD {sd:.4f}" for c, (m, sd) in s.items()))
+        print("restart the app (or HUP it) so it reloads the model and tables", flush=True)
     elif args.add_splits:
         for y in years:
             path, n, k = add_side_splits(y)
             print(f"saved {path.name}: splits on {k:,} of {n:,} pitches ({n - k:,} left blank)", flush=True)
     else:
-        p.error("pass --train, --score-only or --add-splits")
+        p.error("pass --train, --score-only, --add-splits or --rescale")
 
 
 if __name__ == "__main__":

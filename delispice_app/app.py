@@ -1949,8 +1949,9 @@ def _pl_help():
             li("It's the same Stuff+ model as Season Reports. Each pitch is graded against an average D1 hitter "
                "across all 12 counts and both batter sides, weighted the way D1 pitchers of that hand use "
                "pitches of that group."),
-            li("Grades are within a group: 100 is the average D1 fastball, breaking ball or offspeed pitch, and "
-               "10 points is one standard deviation of single pitches. A fastball's 110 is not a slider's 110."),
+            li("Grades are within a group: 100 is the average D1 pitch type in it (one pitcher's fastball, breaking "
+               "ball or offspeed pitch over a season), and 10 points is one standard deviation between those pitch "
+               "types, so a 110 is about a top-16% pitch in any group. Single pitches spread wider."),
             li("Click a pitch in the grades table for vs RHB / vs LHB: the same grades against hitters of one side "
                "only, on the same scale. The overall grade mixes the two the way D1 pitchers of that hand face "
                "each side."),
@@ -2968,7 +2969,7 @@ def _pl_results(lab, graded, open_uids):
     if graded.height == 0:
         return html.Div("Fill in every number for the primary fastball: every grade is measured against it.",
                         style=_UNVERIFIED)
-    out = [_stuff_table_block(pitch_lab.grade_rows(lab, graded), "Grades · 100 = D1 average for the group, 10 = one SD",
+    out = [_stuff_table_block(pitch_lab.grade_rows(lab, graded), "Grades · 100 = average D1 pitch type in the group, 10 = one SD of pitch types",
                               pitch_lab.GRADE_COLS, keep_open=("pl-gopen", set(open_uids or [])))]
     if missing:
         out.append(html.Div("Not graded until every number is filled in: " + ", ".join(nm[u] for u in missing) + ".",

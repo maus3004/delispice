@@ -231,9 +231,10 @@ def _fam_first_cell(name, is_all=False):
 
 
 _ST_W = {"Pitch": 130, "Group": 90, "Stuff+": 76, "Whiff+": 76, "Foul+": 76, "Contact+": 80}
+_ST_TITLE = f"Stuff · {data.STUFF_VIEW_LABEL[data.STUFF_VIEW]}"      # which hitters the site's Stuff+ is graded against
 
 
-def _stuff_table_block(groups, title="Stuff", cols=report.STUFF_TABLE_COLS, keep_open=None):
+def _stuff_table_block(groups, title=_ST_TITLE, cols=report.STUFF_TABLE_COLS, keep_open=None):
     """The Stuff table: Stuff+ and its pieces per pitch type, each row opening (native <details>, like
     the batter pitch table) to the same grades vs RHB and vs LHB. The Pitch Lab passes its own columns,
     and ``keep_open`` = (id type, open keys): each row's summary gets the id {type, uid: the group's key}
@@ -1957,17 +1958,21 @@ def _pl_help():
         html.Summary("How the Pitch Lab grades", style={"cursor": "pointer", "fontWeight": 600, "fontSize": "13px",
                                                         "fontFamily": FONT, "padding": "6px 0"}),
         html.Ul(style={"fontFamily": FONT, "fontSize": "13px", "lineHeight": "1.5", "paddingLeft": "18px"}, children=[
-            li("It's the same Stuff+ model as Season Reports. Each pitch is graded against an average D1 hitter "
-               "across all 12 counts and both batter sides, weighted the way D1 pitchers of that hand use "
-               "pitches of that group."),
-            li("Grades are within a group: 100 is the average D1 pitch type in it (one pitcher's fastball, breaking "
-               "ball or offspeed pitch over a season), and 10 points is one standard deviation between those pitch "
-               "types, so a 110 is about a top-16% pitch in any group. Single pitches spread wider."),
+            li("It's the same Stuff+ model as Season Reports. Each pitch is graded against "
+               + ("P4 hitters" if data.STUFF_VIEW == "P4" else "D1 hitters")
+               + " (16 stand-in hitters with their mix of whiff, foul and contact skill) across all 12 counts and "
+               "both batter sides, weighted the way D1 pitchers of that hand use pitches of that group."),
+            li("Grades are within a group, on the D1 scale: 100 is the average D1 pitch type in it against D1 hitters "
+               "(one pitcher's fastball, breaking ball or offspeed pitch over a season), and 10 points is one standard "
+               "deviation between those pitch types, so a 110 is about a top-16% pitch in any group. "
+               + ("Against P4 hitters the same pitch types average about 91 (fastballs) and 94 (breaking balls and "
+                  "offspeed). " if data.STUFF_VIEW == "P4" else "") + "Single pitches spread wider."),
             li("Click a pitch in the grades table for vs RHB / vs LHB: the same grades against hitters of one side "
                "only, on the same scale. The overall grade mixes the two the way D1 pitchers of that hand face "
                "each side."),
-            li("The D1 average shape grades a little under 100 (the average four-seam is about 94). Real pitches of "
-               "each type do average about 100, but the model rewards standing out, so the average of their grades "
+            li("The D1 average shape grades well under 100 (the average four-seam is about 85 against D1 hitters, "
+               "74 against P4 hitters). Real pitches of "
+               "each type do average about 100 against D1 hitters, but the model rewards standing out, so the average of their grades "
                "is higher than the grade of their average shape."),
             li("Every pitch besides the primary fastball is also graded on its velo, HB and IVB differences from "
                "it, so changing the fastball moves the other grades. Pick the primary fastball in the "
@@ -2721,7 +2726,7 @@ def cb_gr_build(pid, start, end, dh, _rv, _bv, upload_key, re_lvl, re_yr, player
     d1_scale = bool(upload and upload.get("stuff_scale") == "D1")   # a non-D1 / Level-less upload: Stuff+ on D1's scale
     arsenal = html.Div([_scroll(html_table(ars, title=f"Arsenal · {rows.height:,} pitches", full_width=True, compact=True)),
                         _side_by_side(_scroll(html_table(contact, title="Contact")),
-                                      _stuff_table_block(stuff, "Stuff · Stuff+ on the D1 scale" if d1_scale else "Stuff"))])
+                                      _stuff_table_block(stuff, f"{_ST_TITLE} · on the D1 scale" if d1_scale else _ST_TITLE))])
     uids = rows["PitchUID"].to_list()
     retagged = set(uids) & set(data.load_retags()["pitch"])
     info = f"{len(retagged):,} pitch(es) in this report are retagged." if retagged else "No retags in this report."
@@ -3000,7 +3005,8 @@ def _pl_results(lab, graded, open_uids):
     if graded.height == 0:
         return html.Div("Fill in every number for the primary fastball: every grade is measured against it.",
                         style=_UNVERIFIED)
-    out = [_stuff_table_block(pitch_lab.grade_rows(lab, graded), "Grades · 100 = average D1 pitch type in the group, 10 = one SD of pitch types",
+    out = [_stuff_table_block(pitch_lab.grade_rows(lab, graded),
+                              f"Grades {data.STUFF_VIEW_LABEL[data.STUFF_VIEW]} · 100 = average D1 pitch type vs D1 hitters, 10 = one SD of pitch types",
                               pitch_lab.GRADE_COLS, keep_open=("pl-gopen", set(open_uids or [])))]
     if missing:
         out.append(html.Div("Not graded until every number is filled in: " + ", ".join(nm[u] for u in missing) + ".",

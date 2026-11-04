@@ -1,15 +1,18 @@
-"""Artifact store + CLI for Stuff+ v1 (``stuff_v1.py``), the same split as ``eye_store``/``eye_v1``.
+"""Artifact store + CLI for Stuff+ (``stuff_v1.py``, now v1.1), the same split as ``eye_store``/``eye_v1``.
 
 One model covers all of D1 (trained on 2022-26 pooled, not per season), and it is retrained ONCE A
 SEASON with a version bump (PR3). The Stuff+ scale is frozen inside it, so grades don't move between
 retrains. What changes nightly is the score tables: new games get tagged with the frozen pitch-group
 templates and graded.
 
-  * Train offline:   python -m backend.models.stuff_store --train            (about 30 min)
-    Artifacts land in ``pipeline_v2/artifacts/`` as ``stuff_D1_v1_{group}_{piece}.txt`` (9 LightGBM
-    files) + ``stuff_D1_v1.json`` (scale, prices, context weights, templates, ...). Git-ignored;
-    build them on each machine, the data is already there. Training also writes every season's
-    score table.
+  * Train offline:   python -m backend.models.stuff_store --train
+    v1.1 grades every pitch against 16 hitter prototypes (both views at once), so grading is ~16x v1's
+    (about 6 h on the server). Memory peaks at the targets + features step; grading is chunked and flat.
+    Artifacts land in ``pipeline_v2/artifacts/`` as ``stuff_D1_{version}_{group}_{piece}.txt`` (9 LightGBM
+    files) + ``stuff_D1_{version}.json`` (scale, prices, context weights, prototypes, P4 correction,
+    templates, ...) + ``stuff_D1_{version}_pids.parquet`` (the training pitcher-ID merge). Git-ignored.
+    Training also writes every season's score table, ``stuffscore_D1_{version}_{year}.parquet`` (v1's
+    tables have no version in the name, so a v1.1 train never touches what a v1 app is serving).
   * Re-score from the existing model:   python -m backend.models.stuff_store --score-only --years 2026
   * Add the vs-RHB / vs-LHB columns to tables built before they existed, without changing any grade:
     python -m backend.models.stuff_store --add-splits --years 2026
@@ -61,7 +64,8 @@ def load(smoke: bool = False):
 # every grade, so train() rewrites every season's table along with the model.
 def _score_path(year: str, smoke: bool = False) -> Path:
     from backend.models import stuff_v1
-    return ARTIFACT_DIR / f"stuffscore_{stuff_v1.LEVEL}_{year}{'_smoke' if smoke else ''}.parquet"
+    v = "" if stuff_v1.MODEL_VERSION == "v1" else f"{stuff_v1.MODEL_VERSION}_"      # v1's tables predate the version tag
+    return ARTIFACT_DIR / f"stuffscore_{stuff_v1.LEVEL}_{v}{year}{'_smoke' if smoke else ''}.parquet"
 
 
 def score_exists(year: str) -> bool:
@@ -85,6 +89,80 @@ def train(years: list[str] | None = None, fraction: float = 1.0):
     model, scores = stuff_v1.train(years, fraction)
     model.save(_base(smoke))
     return model, _write_scores(scores, smoke)
+
+
+class _Watch:
+    """``--notify``: Discord messages (pipeline_v2.notify, whose webhook lives in pipeline_v2/.env) when training
+    starts, after every step and grading block, and when it finishes or fails, plus a memory watchdog. Every
+    ``every`` seconds it reads this process's memory plus its worker processes' (the tagging pool); each
+    threshold in ``alert_gb`` @-mentions once, and so does the machine's free memory dropping under
+    ``low_avail_gb``. A notification never stops training (``notify.send`` never raises). A process the
+    kernel kills (OOM) can't report itself, so run it under a shell wrapper that posts the exit code."""
+
+    def __init__(self, title: str, alert_gb=(12.0, 13.0), low_avail_gb: float = 1.5, every: int = 30):
+        import threading
+        self.title, self.alert, self.low, self.every = title, sorted(alert_gb), low_avail_gb, every
+        self.fired, self.peak, self.t0 = set(), 0.0, None
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    @staticmethod
+    def _now():
+        import psutil
+        me = psutil.Process()
+        rss = me.memory_info().rss
+        for c in me.children(recursive=True):
+            try:
+                rss += c.memory_info().rss
+            except psutil.Error:
+                pass
+        return rss / 2**30, psutil.virtual_memory().available / 2**30
+
+    def _fields(self, used=None, avail=None):
+        import time
+        if used is None:
+            used, avail = self._now()
+        return {"elapsed": f"{(time.time() - self.t0) / 60:.0f} min", "memory now": f"{used:.1f} GB",
+                "peak so far": f"{max(self.peak, used):.1f} GB", "machine free": f"{avail:.1f} GB"}
+
+    def _run(self):
+        from pipeline_v2 import notify
+        while not self.stop.wait(self.every):
+            try:
+                used, avail = self._now()
+            except Exception:
+                continue
+            self.peak = max(self.peak, used)
+            for gb in self.alert:
+                if used >= gb and gb not in self.fired:
+                    self.fired.add(gb)
+                    notify.send(f"{self.title}: memory at {used:.1f} GB (alert at {gb:g})", "", "warn", self._fields(used, avail))
+            if avail < self.low and "low" not in self.fired:
+                self.fired.add("low")
+                notify.send(f"{self.title}: machine down to {avail:.1f} GB free", "", "warn", self._fields(used, avail))
+
+    def hook(self, msg: str, _elapsed: float):
+        from pipeline_v2 import notify
+        notify.send(f"{self.title}: {msg}"[:250], msg if len(msg) > 200 else "", "info", self._fields())
+
+    def __enter__(self):
+        import time
+        from pipeline_v2 import notify
+        self.t0 = time.time()
+        self.thread.start()
+        notify.send(f"{self.title}: started", "", "info", self._fields())
+        return self
+
+    def __exit__(self, kind, err, tb):
+        import traceback
+        from pipeline_v2 import notify
+        self.stop.set()
+        if kind is None:
+            notify.send(f"{self.title}: done", "", "ok", self._fields())
+        else:
+            tail = "".join(traceback.format_exception(kind, err, tb))[-1500:]
+            notify.send(f"{self.title}: FAILED ({kind.__name__})", f"```{tail}```", "error", self._fields())
+        return False
 
 
 def build_score_cache(year: str) -> tuple[Path, int]:
@@ -174,7 +252,7 @@ def stuff_lookup(year: str, level: str = "D1") -> pl.DataFrame | None:
 
 def main(argv=None):
     print(config.data_mode(), flush=True)
-    p = argparse.ArgumentParser(description="Train / re-score Stuff+ v1 (D1).")
+    p = argparse.ArgumentParser(description="Train / re-score Stuff+ (D1).")
     p.add_argument("--train", action="store_true", help="train the model on --years (default: all) and score them")
     p.add_argument("--score-only", action="store_true", help="re-score --years from the existing model")
     p.add_argument("--add-splits", action="store_true",
@@ -184,13 +262,23 @@ def main(argv=None):
                         "(default: stuff_v1.SCALE_METHOD)")
     p.add_argument("--years", nargs="*", default=None, help="seasons (default: every season on disk)")
     p.add_argument("--fraction", type=float, default=1.0, help="smoke test: train on this share of pitchers")
+    p.add_argument("--notify", action="store_true",
+                   help="--train only: Discord progress + memory alerts (webhook from pipeline_v2/.env)")
+    p.add_argument("--mem-alert", type=float, nargs="+", default=[12.0, 13.0],
+                   help="--notify: GB of memory (this process + its workers) that each trigger one alert")
     args = p.parse_args(argv)
     from backend.models import stuff_v1
     years = args.years or stuff_v1.available_years()
     if args.train:
-        model, n = train(years, args.fraction)
-        print(f"saved {_name(args.fraction < 1)} ({model.meta['n_swings']:,} swings; trees {model.meta['trees']})")
-        print("score tables: " + ", ".join(f"{y}: {k:,}" for y, k in n.items()))
+        import contextlib
+        title = f"Stuff+ {stuff_v1.MODEL_VERSION} train" + (" (smoke)" if args.fraction < 1 else "")
+        watch = _Watch(title, args.mem_alert) if args.notify else contextlib.nullcontext()
+        with watch:
+            if args.notify:
+                stuff_v1.LOG_HOOK = watch.hook
+            model, n = train(years, args.fraction)
+            print(f"saved {_name(args.fraction < 1)} ({model.meta['n_swings']:,} swings; trees {model.meta['trees']})")
+            print("score tables: " + ", ".join(f"{y}: {k:,}" for y, k in n.items()))
     elif args.score_only:
         failed = []
         for y in years:               # one season failing doesn't stop the others

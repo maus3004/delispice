@@ -1,4 +1,15 @@
-"""Stuff+ v1, the production model (Model 2: probability pieces). What a pitch's SHAPE is worth.
+"""Stuff+ v1.1, the production model (Model 2: probability pieces). What a pitch's SHAPE is worth.
+
+**v1.1** (2026-11, ``backend/research/stuff_model/p4_stuff.md``, evidence in ``stuff_v1_1_skills.ipynb``
+and ``stuff_v1_1_p4view.ipynb``): three hitter skills replace ``hitter_oe``, and every pitch has two views.
+- **Skills** (``skill_features``): whiff, foul and contact skill, each built the old ``hitter_oe`` way per
+  channel and shrunk toward the hitter's GROUP average (P4 or not, ``p4_hitters``), in every piece.
+- **Grading against a hitter mix**, not one average hitter: 16 hitter prototypes (k-means cells of the D1
+  hitters' skills). The D1 view weights them by the D1 mix, the P4 view by the P4 hitters' mix. The shared
+  cells miss part of the D1 -> P4 shift, so the P4 view adds one frozen correction per group, measured at
+  training against a 2,048-hitter reference mix. Both views sit on the D1 scale (``*_p4`` columns).
+- Re-scoring reuses the training pitcher-ID merge (``pid_map``), closing the 0.08% re-score gap.
+The text below describes v1, and still holds except where these replace it.
 
 Ported from ``backend/research/stuff_model/stuff_v1_model2.ipynb`` and the shared steps of
 ``stuff_v1.ipynb``. The decisions behind every choice are in ``stuff_decisions.md`` in that folder.
@@ -52,7 +63,7 @@ from pipeline_v2 import config
 
 PIPELINE = config.PITCHES_DIR
 LEVEL = "D1"
-MODEL_VERSION = "v1"
+MODEL_VERSION = "v1.1"
 GROUPS = ["FB", "BB", "OS"]
 PIECES = ["whiff", "foul", "contact"]
 SWING_CALLS = ["StrikeSwinging", "InPlay", "FoulBall", "FoulBallFieldable", "FoulBallNotFieldable"]
@@ -62,7 +73,8 @@ FOULS = ["FoulBall", "FoulBallFieldable", "FoulBallNotFieldable"]
 RAW = {"movement": ["RelSpeed", "IVB", "HB", "SpinRate", "RelHeight", "RelSideM"],
        "acceleration": ["RelSpeed", "acc_v", "acc_h", "SpinRate", "RelHeight", "RelSideM"]}
 DIFFS = ["dVelo", "dHB", "dIVB"]
-CONTEXT = ["Balls", "Strikes", "same", "hitter_oe"]
+SKILL_COLS = ["whiff_skill", "foul_skill", "contact_skill"]                 # v1.1: in place of hitter_oe (P4S4)
+CONTEXT = ["Balls", "Strikes", "same", *SKILL_COLS]
 RUN_BY_GROUP = {"FB": "movement", "BB": "acceleration", "OS": "movement"}      # PR1
 SHAPE_ALL = sorted(set(RAW["movement"]) | set(RAW["acceleration"]))
 STAGE1_FEATS = RAW["movement"] + DIFFS + ["Balls", "Strikes", "same"]         # no hitter feature (C3)
@@ -95,8 +107,16 @@ GAP_MAX, REL_H_MAX, REL_S_MAX = 2, 0.75, 1.0  # pitcher-ID merge, rule C (M2)
 # Only the frozen mean/SD change; nothing else in the model does (stuff_store --rescale re-maps saved grades).
 SCALE_METHOD = "per_pitch_type"
 MIN_PT = 100
-CHUNK = 120_000                              # pitches per predict call (x 24 contexts)
+CHUNK = 120_000                              # pitches x hitter points per predict call (x 24 contexts): ~2.9M rows
 GRADE_CHUNK = 500_000                        # pitches per grading block, so grading memory stays flat
+# v1.1 hitter mixes (P4S1-P4S3, P4S6). P4 hitter = team -> home-game conference table (PAC-12 counts
+# through 2024); team-seasons with < MIN_HOME tracked home games fall back to >= P4_SHARE of swings in P4 games.
+PAC12_LAST, MIN_HOME, P4_SHARE = 2024, 5, 0.70
+N_PROTO = 16                                 # shared hitter prototypes (P4S2): 16 points per pitch for both views
+MIX_SAMPLE = 200_000                         # swings sampled per hitter mix (k-means and the reference)
+REF_CELLS, REF_DRAWS = 256, 4                # the P4-shift reference: 4 random hitters from each of 256 cells per mix
+REF_FIT = 400                                # pitches per group the P4-view correction is measured on
+AVG_SAMPLE = 20_000                          # pitches per group for the average pieces (the run breakdown)
 # The columns grading needs (the boosters' shape features + the labels and keys the outputs carry).
 GRADE_COLS = ["PitchUID", "pid", "Year", "group", "retag", "type", "PitcherThrows", *SHAPE_ALL, *DIFFS]
 # Raw columns a pitch needs to be graded (the tagger's shape + the sources of SHAPE_ALL), plus a pitcher hand.
@@ -143,6 +163,42 @@ def load_pitches(years: list[str] | None = None, with_outcomes: bool = True,
     if with_outcomes and "is_verified" not in raw.columns:
         raw = raw.with_columns(is_verified=pl.lit(True))
     return pg.fill_pitcher_ids(raw)
+
+
+def p4_hitters(years: list[str]) -> pl.DataFrame:
+    """v1.1 (P4S1): BatterId, Year, P4h for every hitter-season with a D1 swing. A hitter is P4 when his most
+    common team plays its home games in a P4 conference that season (``League`` is the home team's
+    conference; PAC-12 counts through 2024). A team-season with fewer than MIN_HOME tracked home games isn't
+    in that table, and its hitters fall back to their own share of swings in P4-conference games (>= P4_SHARE).
+    It reads the team columns training doesn't load, in a short-lived child process: the operating system takes
+    all of its memory back before training loads every pitch (measured: in-process, polars kept ~3 GB of it)."""
+    import concurrent.futures as cf
+    import multiprocessing as mp
+    try:
+        with cf.ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as ex:
+            return ex.submit(_p4_hitters_table, years).result()
+    except (OSError, cf.process.BrokenProcessPool):          # no child processes here: same result, in-process
+        return _p4_hitters_table(years)
+
+
+def _p4_hitters_table(years: list[str]) -> pl.DataFrame:
+    from backend.models import contact_quality as cq
+    files = sorted(f for y in years for f in PIPELINE.glob(f"*/{y}/**/*.parquet"))
+    p4 = lambda c: (pl.col(c).is_in(cq.P4_LEAGUES) | ((pl.col(c) == "PAC12") & (pl.col("Year") <= PAC12_LAST))).fill_null(False)
+    sw = (pl.scan_parquet([str(f) for f in files])
+            .select("PitchUID", "Date", "Level", "League", "BatterId", "BatterTeam", "HomeTeam", "GameID", "PitchCall")
+            .filter(pl.col("Level") == LEVEL, pl.col("PitchCall").is_in(SWING_CALLS), pl.col("BatterId").is_not_null())
+            .unique(subset=["PitchUID"], keep="first")
+            .with_columns(Year=pl.col("Date").str.slice(0, 4).cast(pl.Int32))
+            .select("BatterId", "Year", "GameID", "League", "BatterTeam", "HomeTeam").collect(engine="streaming"))
+    home = (sw.unique("GameID").filter(pl.col("HomeTeam").is_not_null())
+              .group_by(pl.col("HomeTeam").alias("team"), "Year")
+              .agg(conf=pl.col("League").drop_nulls().mode().sort().first(), home_games=pl.len()))
+    return (sw.with_columns(P4g=p4("League"))
+              .group_by("BatterId", "Year").agg(share=pl.col("P4g").mean(), team=pl.col("BatterTeam").drop_nulls().mode().sort().first())
+              .join(home, on=["team", "Year"], how="left")
+              .select("BatterId", "Year", P4h=pl.when((pl.col("home_games") >= MIN_HOME).fill_null(False)).then(p4("conf"))
+                                                .otherwise(pl.col("share") >= P4_SHARE)))
 
 
 # ── One ID per pitcher (M2) ──────────────────────────────────────────────────────────────────────
@@ -348,8 +404,55 @@ def _assign_folds(train: pl.DataFrame) -> pl.DataFrame:
     return train.join(pids, on="pid", how="left")
 
 
+_SKILL_DEFS = {"whiff_skill": ("is_whiff", pl.lit(True), "binary"),                       # per swing
+               "foul_skill": ("is_foul", pl.col("is_foul").is_not_null(), "binary"),       # per contact swing
+               "contact_skill": ("contact_value", pl.col("contact_value").is_not_null(), "regression")}   # per BIP
+
+
+def skill_features(train: pl.DataFrame) -> tuple[pl.DataFrame, dict]:
+    """v1.1 (P3, P4S4, P4S6): the three hitter skills that replace ``hitter_oe``, each the C3 way for its
+    own channel: a stage-1 model with no hitter input, cross-fit by pitcher fold; each swing's residual;
+    each hitter-season's residuals from his OTHER games, shrunk toward his group's average (P4 or not,
+    ``P4h``) with the within-group k: (sum + k·group mean) / (n + k). One-game hitters and swings with no
+    BatterId stay missing. ``train`` needs fold, es, group, P4h, BatterId, GameID and the stage-1 features."""
+    keys = train.select("PitchUID", "BatterId", "Year", "GameID", "P4h")
+    out, info = keys.select("PitchUID"), {}
+    for name, (label, keep, objective) in _SKILL_DEFS.items():
+        res = []
+        for g in GROUPS:
+            dg = train.filter(pl.col("group") == g, keep)
+            for f in range(N_FOLDS):
+                m = _fit(dg.filter(pl.col("fold") != f), STAGE1_FEATS, label, objective)
+                ho = dg.filter(pl.col("fold") == f)
+                p = m.predict(_X(ho, STAGE1_FEATS), num_iteration=m.best_iteration)
+                res.append(ho.select("PitchUID").with_columns(pl.Series("res", ho[label].cast(pl.Float64).to_numpy() - p)))
+        r = pl.concat(res).join(keys, on="PitchUID").filter(pl.col("BatterId").is_not_null())
+        mu = r.group_by("P4h").agg(mu=pl.col("res").mean())
+        bs = (r.group_by("BatterId", "Year", "P4h").agg(n=pl.len(), s=pl.col("res").sum(), ss=(pl.col("res") ** 2).sum())
+                .with_columns(m=pl.col("s") / pl.col("n")).join(mu, on="P4h"))
+        b = bs.filter(pl.col("n") >= 30)
+        b = b if b.height >= 100 else bs.filter(pl.col("n") >= 2)       # smoke tests: few hitters reach 30
+        noise = (b["ss"] - b["n"] * b["m"] ** 2).sum() / (b["n"] - 1).sum()
+        true = (b["m"] - b["mu"]).var() - noise * (1 / b["n"]).mean()
+        k = noise / true if true > 0 else 1e4
+        bg = r.group_by("BatterId", "Year", "GameID").agg(n_g=pl.len(), s_g=pl.col("res").sum())
+        sk = (keys.join(bs.select("BatterId", "Year", "n", "s", "mu"), on=["BatterId", "Year"], how="left")
+                  .join(bg, on=["BatterId", "Year", "GameID"], how="left")
+                  .with_columns(pl.col("n_g", "s_g").fill_null(0))
+                  .with_columns(n_o=pl.col("n") - pl.col("n_g"), s_o=pl.col("s") - pl.col("s_g"))
+                  .select("PitchUID", pl.when(pl.col("n_o") > 0).then((pl.col("s_o") + k * pl.col("mu")) / (pl.col("n_o") + k)).alias(name)))
+        out = out.join(sk, on="PitchUID", how="left")
+        mus = dict(zip(mu["P4h"].to_list(), mu["mu"].to_list()))
+        info[name] = {"k": float(k), "mean_p4": float(mus.get(True, float("nan"))), "mean_other": float(mus.get(False, float("nan")))}
+        del r, res, bs, bg, sk
+    train = train.join(out, on="PitchUID", how="left")
+    info["missing_swings"] = {c: int(train[c].null_count()) for c in SKILL_COLS}
+    return train, info
+
+
 def hitter_feature(train: pl.DataFrame) -> tuple[pl.DataFrame, dict]:
-    """C3: stage-1 held-out predictions (no hitter feature) → each hitter's swing value over expected,
+    """v1's hitter number (C3), kept for the research notebooks; v1.1 trains on ``skill_features``.
+    Stage-1 held-out predictions (no hitter feature) → each hitter's swing value over expected,
     leaving out the current game, shrunk by n/(n+k). One-game hitters stay missing (never 0)."""
     preds = []
     for g in GROUPS:
@@ -379,78 +482,115 @@ def hitter_feature(train: pl.DataFrame) -> tuple[pl.DataFrame, dict]:
 
 
 # ── The model ────────────────────────────────────────────────────────────────────────────────────
+RAW4 = ("runs", "whiff", "foul", "contact")
+VIEWS = {"D1": "", "P4": "_p4"}                 # view -> column suffix
+
+
 class StuffModel:
     """The 9 boosters (3 groups x 3 pieces) plus everything grading needs, frozen together: the
-    package A context weights, the averaged price list, HIT_AVG, the groups' average pieces (for the
-    run breakdown), the Stuff+ scale and the pitch-group templates."""
+    package A context weights, the averaged price list, the hitter prototypes and each view's weights
+    over them, the P4-view correction, the groups' average pieces (for the run breakdown), the Stuff+
+    scale, the pitch-group templates and the training pitcher-ID merge."""
 
     def __init__(self):
         self.boosters, self.weights, self.avg_pieces, self.scale, self.meta = {}, {}, {}, {}, {}
         self.prices = None          # 24-row arrays: whiff price, foul price, shift
-        self.hit_avg = 0.0
+        self.points = None          # N_PROTO x 3 hitter prototypes (SKILL_COLS), shared by both views (P4S2)
+        self.pop = {}               # view -> weights over the points: the D1 hitter mix / the P4 hitters' mix
+        self.p4_fix = {}            # group -> raw value ("runs", "whiff_rhb", ...) -> frozen P4-view correction
         self.templates = None
+        self.pid_map = None         # PitcherId -> pid of the training merge (re-scores reuse it)
 
-    # pieces at the 24 contexts, for a block of pitches of one group
-    def _pieces(self, g: str, d: pl.DataFrame):
+    def _pieces(self, g: str, d: pl.DataFrame, points: np.ndarray):
+        """The three pieces for a block of one group's pitches at every (hitter point, context): arrays of
+        shape (pitches, points, 24). Each predict call is at most CHUNK x 24 rows, whatever the number of
+        points, so memory doesn't grow with them."""
         feats = feats_for(g)
-        fixed = {"Balls": 0.0, "Strikes": 0.0, "same": 0.0, "hitter_oe": self.hit_avg}
-        base = d.select([pl.lit(fixed[c]).alias(c) if c in fixed else pl.col(c) for c in feats]).to_numpy().astype(np.float32)
-        ci, ctx = [feats.index(c) for c in ("Balls", "Strikes", "same")], np.array(CTX, dtype=np.float32)
-        for a in range(0, len(base), CHUNK):
-            B = base[a:a + CHUNK]
-            Xr = np.repeat(B, len(CTX), axis=0)
-            Xr[:, ci] = np.tile(ctx, (len(B), 1))
-            yield a, len(B), [self.boosters[(g, p)].predict(Xr).reshape(len(B), len(CTX)) for p in PIECES]
+        K, nc = len(points), len(CTX)
+        lit = ("Balls", "Strikes", "same", *SKILL_COLS)
+        base = d.select([pl.lit(0.0).alias(c) if c in lit else pl.col(c) for c in feats]).to_numpy().astype(np.float32)
+        ci, hi = [feats.index(c) for c in ("Balls", "Strikes", "same")], [feats.index(c) for c in SKILL_COLS]
+        ctx_k = np.tile(np.array(CTX, dtype=np.float32), (K, 1))                 # point 0's 24 contexts, then point 1's, ...
+        pts_k = np.repeat(np.asarray(points, dtype=np.float32), nc, axis=0)
+        step = max(1, CHUNK // K)
+        for a in range(0, len(base), step):
+            B = base[a:a + step]
+            n = len(B)
+            Xr = np.repeat(B, K * nc, axis=0)
+            Xr[:, ci] = np.tile(ctx_k, (n, 1))
+            Xr[:, hi] = np.tile(pts_k, (n, 1))
+            yield a, n, [self.boosters[(g, p)].predict(Xr).reshape(n, K, nc) for p in PIECES]
+            del Xr
 
     def _value(self, w, f, v):
         WP, FP, SH = self.prices
         return w * WP + (1 - w) * (f * FP + (1 - f) * (v - SH))
 
-    def set_average_pieces(self, P: pl.DataFrame, n_sample: int = 200_000):
+    def set_average_pieces(self, P: pl.DataFrame, n_sample: int = AVG_SAMPLE):
+        """Each group's average pieces at every (point, context), the run breakdown's baseline."""
         P = P.select("group", *SHAPE_ALL, *DIFFS)
         for g in GROUPS:
             d = P.filter(pl.col("group") == g)
             d = d.sample(min(n_sample, d.height), seed=SEED)
-            sums, cnt = [np.zeros(len(CTX)) for _ in PIECES], 0
-            for _, n, arrs in self._pieces(g, d):
+            sums, cnt = [np.zeros((len(self.points), len(CTX))) for _ in PIECES], 0
+            for _, n, arrs in self._pieces(g, d, self.points):
                 for k, arr in enumerate(arrs):
                     sums[k] += arr.sum(0)
                 cnt += n
             self.avg_pieces[g] = [s / cnt for s in sums]
 
     def raw_grades(self, P: pl.DataFrame) -> pl.DataFrame:
-        """PitchUID + runs (expected runs per swing), the context-averaged pieces and the run breakdown
-        (``d_*``, runs vs. a pitch with the group's average pieces). ``P`` = gradeable pitches, graded
-        ``GRADE_CHUNK`` at a time (each pitch's grade depends only on its own row)."""
+        """PitchUID + runs (expected runs per swing), the averaged pieces, the run breakdown (``d_*``, runs
+        vs. a pitch with the group's average pieces, D1 view) and the platoon splits, for both views (the P4
+        view as ``*_p4``). ``P`` = gradeable pitches, graded ``GRADE_CHUNK`` at a time (each pitch's grade
+        depends only on its own row)."""
         if P.height <= GRADE_CHUNK:
             return self._raw_grades_block(P)
         return pl.concat([self._raw_grades_block(P.slice(a, GRADE_CHUNK)) for a in range(0, P.height, GRADE_CHUNK)])
 
     def _raw_grades_block(self, P: pl.DataFrame) -> pl.DataFrame:
-        keys = ["runs", "whiff", "foul", "contact", "d_whiff", "d_foul", "d_contact",
-                *[f"{k}_{s}" for s in SIDES for k in ("runs", "whiff", "foul", "contact")]]
+        out = self._grade_block(P, self.points, self.pop, fix=True, breakdown=True)
+        return P.select("PitchUID").with_columns(**{k: pl.Series(v) for k, v in out.items()})
+
+    def _grade_block(self, P: pl.DataFrame, points, pop: dict, fix: bool, breakdown: bool) -> dict:
+        """Raw values per pitch for each view in ``pop`` (view -> weights over ``points``): every point x context
+        prediction averaged with the context weights x the view's point weights. ``fix`` adds the frozen P4
+        correction; ``breakdown`` adds the D1 view's run breakdown (needs the average pieces)."""
+        keys = [f"{k}{VIEWS[v]}{'_' + s if s else ''}" for v in pop for s in ("", *SIDES) for k in RAW4]
+        keys += ["d_whiff", "d_foul", "d_contact"] if breakdown else []
         out = {k: np.full(P.height, np.nan) for k in keys}
         fr = P.select("group", "PitcherThrows", *SHAPE_ALL, *DIFFS).with_row_index("_i")
+        pis = {v: np.asarray(w, dtype=float) for v, w in pop.items()}
         for (g, hand), d in fr.partition_by(["group", "PitcherThrows"], as_dict=True).items():
             if g not in GROUPS or hand not in self.weights.get(g, {}):
                 continue
-            w, (wb, fb, vb), idx = self.weights[g][hand], self.avg_pieces[g], d["_i"].to_numpy()
-            ws = side_weights(w, hand)
-            V0 = self._value(wb, fb, vb)
-            for a, n, (pw, pf, pv) in self._pieces(g, d):
-                V, V1, V2 = self._value(pw, pf, pv), self._value(pw, fb, vb), self._value(pw, pf, vb)
+            w, idx = self.weights[g][hand], d["_i"].to_numpy()
+            ctx_w = {"": w, **side_weights(w, hand)}
+            J = {(v, s): np.outer(pis[v], cw) for v in pis for s, cw in ctx_w.items()}      # joint (point, context) weights
+            if breakdown:
+                wb, fb, vb = self.avg_pieces[g]
+                V0 = self._value(wb, fb, vb)
+            for a, n, (pw, pf, pv) in self._pieces(g, d, points):
+                V = self._value(pw, pf, pv)
                 sl = idx[a:a + n]
-                out["runs"][sl], out["whiff"][sl], out["foul"][sl], out["contact"][sl] = V @ w, pw @ w, pf @ w, pv @ w
-                out["d_whiff"][sl], out["d_foul"][sl], out["d_contact"][sl] = (V1 - V0) @ w, (V2 - V1) @ w, (V - V2) @ w
-                for s, wsd in ws.items():
-                    out[f"runs_{s}"][sl], out[f"whiff_{s}"][sl] = V @ wsd, pw @ wsd
-                    out[f"foul_{s}"][sl], out[f"contact_{s}"][sl] = pf @ wsd, pv @ wsd
-        return P.select("PitchUID").with_columns(**{k: pl.Series(v) for k, v in out.items()})
+                for (v, s), Jw in J.items():
+                    for k, arr in zip(RAW4, (V, pw, pf, pv)):
+                        col = f"{k}{'_' + s if s else ''}"
+                        corr = self.p4_fix[g][col] if fix and v == "P4" else 0.0
+                        out[f"{k}{VIEWS[v]}{'_' + s if s else ''}"][sl] = np.einsum("nkc,kc->n", arr, Jw) + corr
+                if breakdown:
+                    J1 = J[("D1", "")]
+                    V1, V2 = self._value(pw, fb, vb), self._value(pw, pf, vb)
+                    out["d_whiff"][sl] = np.einsum("nkc,kc->n", V1 - V0, J1)
+                    out["d_foul"][sl] = np.einsum("nkc,kc->n", V2 - V1, J1)
+                    out["d_contact"][sl] = np.einsum("nkc,kc->n", V - V2, J1)
+        return out
 
     # (column, output name, higher raw value is better for the pitcher)
     PLUS = [("runs", "stuff", False), ("whiff", "whiff_plus", True), ("foul", "foul_plus", True),
             ("contact", "contact_plus", False)]
     SIDE_COLS = [f"{name}_{s}" for _, name, _ in PLUS for s in SIDES]       # stuff_rhb, stuff_lhb, ..., contact_plus_lhb
+    P4_COLS = [f"{name}_p4{'_' + s if s else ''}" for _, name, _ in PLUS for s in ("", *SIDES)]   # stuff_p4, stuff_p4_rhb, ...
 
     def set_scale(self, P: pl.DataFrame, raw: pl.DataFrame, method: str = SCALE_METHOD):
         """Freeze the per-group mean/SD that define 100 and 10 points (PR2: ``SCALE_METHOD``)."""
@@ -478,7 +618,7 @@ class StuffModel:
         exprs = []
         for c, name, higher in self.PLUS:
             s = 1 if higher else -1
-            for col in [name, *[f"{name}_{x}" for x in SIDES]]:
+            for col in [f"{name}{view}{'_' + x if x else ''}" for view in VIEWS.values() for x in ("", *SIDES)]:
                 if col in grades.columns:
                     exprs.append(self._by_group(lambda g, c=c, col=col, s=s: 100 + 10 * s * (
                         old_scale[g][c][0] + s * (pl.col(col) - 100) * old_scale[g][c][1] / 10 - self.scale[g][c][0])
@@ -504,12 +644,13 @@ class StuffModel:
         for c, name, higher in self.PLUS:
             mu = pl.col("group").replace_strict({g: self.scale[g][c][0] for g in GROUPS}, default=None)
             sd = pl.col("group").replace_strict({g: self.scale[g][c][1] for g in GROUPS}, default=None)
-            for suf in ("", *[f"_{s}" for s in SIDES]):       # the splits use the blended grade's scale
+            # the splits and the P4 view all use the blended D1 grade's scale (P4S7: the P4 view reads as a shift)
+            for suf in [f"{view}{'_' + s if s else ''}" for view in VIEWS.values() for s in ("", *SIDES)]:
                 exprs.append((100 + 10 * (1 if higher else -1) * (pl.col(c + suf) - mu) / sd).alias(name + suf))
         return (raw.with_columns(exprs)
                    .with_columns(*[(-100 * pl.col(f"d_{p}")).alias(f"saved_{p}") for p in PIECES])
                    .select("PitchUID", "stuff", "whiff_plus", "foul_plus", "contact_plus", "runs",
-                           "saved_whiff", "saved_foul", "saved_contact", *self.SIDE_COLS))
+                           "saved_whiff", "saved_foul", "saved_contact", *self.SIDE_COLS, "runs_p4", *self.P4_COLS))
 
     # ── persistence: LightGBM text + JSON (no pickle; survives library upgrades, readable) ──
     def save(self, path, boosters: bool = True):
@@ -518,11 +659,15 @@ class StuffModel:
         base.parent.mkdir(parents=True, exist_ok=True)
         for (g, p), b in (self.boosters.items() if boosters else ()):
             b.save_model(str(base.with_name(f"{base.name}_{g}_{p}.txt")))
+        if boosters and self.pid_map is not None:
+            self.pid_map.write_parquet(base.with_name(base.name + "_pids.parquet"))
         with open(base.with_name(base.name + ".json"), "w") as f:
             json.dump({"version": MODEL_VERSION, "run_by_group": RUN_BY_GROUP,
                        "feats": {g: feats_for(g) for g in GROUPS}, "ctx": CTX,
                        "weights": {g: {h: w.tolist() for h, w in hw.items()} for g, hw in self.weights.items()},
-                       "prices": [a.tolist() for a in self.prices], "hit_avg": self.hit_avg,
+                       "prices": [a.tolist() for a in self.prices],
+                       "points": np.asarray(self.points).tolist(), "pop": {v: np.asarray(w).tolist() for v, w in self.pop.items()},
+                       "p4_fix": self.p4_fix,
                        "avg_pieces": {g: [a.tolist() for a in v] for g, v in self.avg_pieces.items()},
                        "scale": self.scale, "templates": self.templates.to_dict(), "meta": self.meta}, f, indent=1)
         return base
@@ -541,9 +686,12 @@ class StuffModel:
                 m.boosters[(g, p)] = lgb.Booster(model_file=str(base.with_name(f"{base.name}_{g}_{p}.txt")))
         m.weights = {g: {h: np.array(w) for h, w in hw.items()} for g, hw in cfg["weights"].items()}
         m.prices = tuple(np.array(a) for a in cfg["prices"])
-        m.hit_avg, m.scale, m.meta = cfg["hit_avg"], {g: {c: tuple(v) for c, v in s.items()} for g, s in cfg["scale"].items()}, cfg["meta"]
+        m.points, m.pop, m.p4_fix = np.array(cfg["points"]), {v: np.array(w) for v, w in cfg["pop"].items()}, cfg["p4_fix"]
+        m.scale, m.meta = {g: {c: tuple(v) for c, v in s.items()} for g, s in cfg["scale"].items()}, cfg["meta"]
         m.avg_pieces = {g: [np.array(a) for a in v] for g, v in cfg["avg_pieces"].items()}
         m.templates = pg.Templates.from_dict(cfg["templates"])
+        pids = base.with_name(base.name + "_pids.parquet")
+        m.pid_map = pl.read_parquet(pids) if pids.exists() else None
         return m
 
 
@@ -570,34 +718,112 @@ def _peak_gb() -> float:
     return r / 2**30 if sys.platform == "darwin" else r / 2**20
 
 
+LOG_HOOK = None          # stuff_store --notify sets this: called with (message, seconds elapsed) for every log line
+
+
 def _log(msg, t0):
     print(f"  {msg} ({time.time() - t0:.0f}s, peak {_peak_gb():.1f} GB)", flush=True)
+    if LOG_HOOK is not None:
+        LOG_HOOK(msg, time.time() - t0)
+
+
+# Training swings keep only what the fits, the skills and the mixes read (memory).
+TRAIN_COLS = ["PitchUID", "pid", "Year", "GameID", "BatterId", "group", "PitcherThrows",
+              *SHAPE_ALL, *DIFFS, "Balls", "Strikes", "same", "y", "is_whiff", "is_foul", "contact_value"]
+
+
+def _mix(train: pl.DataFrame, keep: pl.Expr) -> np.ndarray:
+    """A hitter mix (P4S3: pooled seasons, weighted by swings): the skills of MIX_SAMPLE random training swings
+    with all three skills (one-game hitters are left out, as hitter_oe's average left them out)."""
+    d = train.filter(keep, pl.all_horizontal(pl.col(SKILL_COLS).is_not_null())).select(SKILL_COLS)
+    return d.sample(min(MIX_SAMPLE, d.height), seed=SEED).to_numpy()
+
+
+def _prototypes(Z1: np.ndarray, Z4: np.ndarray, K: int = N_PROTO) -> tuple[np.ndarray, dict]:
+    """P4S2: K shared prototypes, k-means cells of the D1 mix (skills standardized by the D1 mix's SD), each
+    cell's mean as its point. The D1 view weights cells by D1 swings, the P4 view by P4 hitters' swings."""
+    from sklearn.cluster import KMeans
+    sd = Z1.std(0)
+    km = KMeans(n_clusters=K, n_init=4, random_state=SEED).fit(Z1 / sd)
+    return km.cluster_centers_ * sd, {"D1": np.bincount(km.labels_, minlength=K) / len(Z1),
+                                      "P4": np.bincount(km.predict(Z4 / sd), minlength=K) / len(Z4)}
+
+
+def _reference(Z1: np.ndarray, Z4: np.ndarray) -> tuple[np.ndarray, dict]:
+    """The stand-in for the full hitter mix: per mix, REF_CELLS k-means cells and REF_DRAWS random hitters from
+    each, weighted by cell share / REF_DRAWS. Random draws within cells are unbiased for the mix, where cell
+    means aren't (a grade is a step function of the skills)."""
+    from sklearn.cluster import KMeans
+    rng = np.random.default_rng(SEED)
+    sd, blocks = Z1.std(0), []
+    for Z in (Z1, Z4):
+        k = min(REF_CELLS, len(Z) // (2 * REF_DRAWS))
+        lab = KMeans(n_clusters=k, n_init=1, random_state=SEED).fit(Z / sd).labels_
+        pick = np.stack([rng.choice(np.flatnonzero(lab == c), size=REF_DRAWS, replace=True) for c in range(k)])
+        blocks.append((Z[pick.ravel()], np.repeat(np.bincount(lab, minlength=k) / len(Z), REF_DRAWS) / REF_DRAWS))
+    (p1, w1), (p4, w4) = blocks
+    return np.vstack([p1, p4]), {"D1": np.r_[w1, np.zeros(len(p4))], "P4": np.r_[np.zeros(len(p1)), w4]}
+
+
+def _p4_correction(model: StuffModel, P: pl.DataFrame, Z1: np.ndarray, Z4: np.ndarray) -> dict:
+    """The shared cells miss part of the D1 -> P4 shift: P4 hitters sit higher INSIDE each D1 cell, which
+    reweighting cells can't see. On REF_FIT random pitches per group, per raw value (blend and each side):
+    the reference mix's average shift minus the prototypes'. The miss is near-constant across pitch types
+    (stuff_v1_1_p4view.ipynb §10: shared 16 + this correction is within 0.11-0.20 of the reference by pitch type)."""
+    fit = pl.concat([(d := P.filter(pl.col("group") == g)).sample(min(REF_FIT, d.height), seed=SEED) for g in GROUPS])
+    ref = model._grade_block(fit, *_reference(Z1, Z4), fix=False, breakdown=False)
+    pro = model._grade_block(fit, model.points, model.pop, fix=False, breakdown=False)
+    grp = fit["group"].to_numpy()
+    out = {}
+    for g in GROUPS:
+        m = grp == g
+        out[g] = {}
+        for s in ("", *SIDES):
+            for k in RAW4:
+                col, col4 = f"{k}{'_' + s if s else ''}", f"{k}_p4{'_' + s if s else ''}"
+                out[g][col] = float(np.nanmean(ref[col4][m] - ref[col][m]) - np.nanmean(pro[col4][m] - pro[col][m]))
+    return out
 
 
 def train(years: list[str] | None = None, fraction: float = 1.0) -> tuple[StuffModel, pl.DataFrame]:
-    """Fit the production model on every pitcher of ``years`` (verified games), then grade every pitch.
-    Returns (model, PitchUID -> grades + labels). ``fraction`` < 1 keeps a slice of pitchers (smoke tests)."""
+    """Fit the production model on every pitcher of ``years`` (verified games), then grade every pitch in
+    both views. Returns (model, PitchUID -> grades + labels). ``fraction`` < 1 keeps a slice of pitchers
+    (smoke tests). Peak memory is the targets + features step; every grading pass after it is chunked."""
     t0 = time.time()
     years = years or available_years()
+    p4 = p4_hitters(years)
+    _log(f"P4 hitters: {p4.height:,} hitter-seasons, {p4['P4h'].sum():,} P4", t0)
     raw = load_pitches(years)
     _log(f"loaded {raw.height:,} pitches, {years[0]}-{years[-1]}", t0)
     raw, merged = merge_pitcher_ids(raw)
+    pid_map = raw.select("PitcherId", "pid").unique("PitcherId").sort("PitcherId")
     _log(f"pitcher ids merged: {merged}", t0)
     if fraction < 1:                         # smoke test: a slice of pitchers (tagging included)
         raw = raw.filter((pl.col("pid").hash(SEED) % 10_000) < int(fraction * 10_000))
     raw, templates = add_labels(raw)
+    raw = raw.drop("pFB", "pBB", "pOS", "tag_group", strict=False)     # memory: nothing after tagging reads them
     _log("pitch groups tagged", t0)
     season = season_prices(years)
-    P = add_features(add_targets(raw, season)).filter(pl.col("gradeable"))
-    del raw                                  # memory: from here on only P and the swings are needed
-    train_ = _assign_folds(P.filter(pl.col("is_verified"), pl.col("y").is_not_null(), pl.col("same").is_not_null()))
-    P = P.select(GRADE_COLS)
-    _log(f"{train_.height:,} training swings, {P.height:,} gradeable pitches", t0)
-    train_, hit = hitter_feature(train_)
-    _log(f"hitter feature: {hit}", t0)
+    # Memory (the old peak step, 13.0 GB on the server): targets and features one season at a time, keeping only
+    # the slim columns grading and training read, so the full wide frame is never built. Every target and
+    # feature is per season already (each season's RE288, the FB_1 reference per pitcher-season), so nothing changes.
+    P_parts, T_parts = [], []
+    for yr in sorted(raw["Year"].unique().to_list()):
+        d = add_features(add_targets(raw.filter(pl.col("Year") == yr), season)).filter(pl.col("gradeable"))
+        T_parts.append(d.filter(pl.col("is_verified"), pl.col("y").is_not_null(), pl.col("same").is_not_null()).select(TRAIN_COLS))
+        P_parts.append(d.select(GRADE_COLS))
+        del d
+        _log(f"{yr}: targets + features", t0)
+    del raw
+    P, train_ = pl.concat(P_parts), pl.concat(T_parts)
+    del P_parts, T_parts
+    train_ = _assign_folds(train_.join(p4, on=["BatterId", "Year"], how="left").with_columns(pl.col("P4h").fill_null(False)))
+    _log(f"{train_.height:,} training swings ({train_['P4h'].mean():.1%} by P4 hitters), {P.height:,} gradeable pitches", t0)
+    train_, skills = skill_features(train_)
+    _log(f"hitter skills: {skills}", t0)
 
     model = StuffModel()
-    model.templates, model.hit_avg = templates, hit["hit_avg"]
+    model.templates, model.pid_map = templates, pid_map
     avg = averaged_prices(season, train_)
     model.prices = tuple(np.array([dict(zip(zip(avg["Balls"], avg["Strikes"]), avg[c]))[(b, s)] for b, s, _ in CTX])
                          for c in ("whiff_price", "foul_price", "shift"))
@@ -612,15 +838,29 @@ def train(years: list[str] | None = None, fraction: float = 1.0) -> tuple[StuffM
             model.boosters[(g, p)] = b = _fit(dg.filter(keep), feats_for(g), label, objective, refit_all=True)
             trees[f"{g}_{p}"] = b.num_trees()
     _log(f"pieces fitted: {trees}", t0)
-    n_swings = train_.height
-    del train_, dg                           # memory: grading needs only the boosters and P
+    Z1, Z4 = _mix(train_, pl.lit(True)), _mix(train_, pl.col("P4h"))
+    n_swings, p4_share = train_.height, float(train_["P4h"].mean())
+    del train_, dg                           # memory: grading needs only the boosters, the mixes and P
+    model.points, model.pop = _prototypes(Z1, Z4)
+    model.p4_fix = _p4_correction(model, P, Z1, Z4)
+    _log(f"{N_PROTO} prototypes; P4-view correction (runs): " + ", ".join(f"{g} {model.p4_fix[g]['runs']:+.4f}" for g in GROUPS), t0)
     model.set_average_pieces(P)
-    raw_g = model.raw_grades(P)
+    _log("average pieces set; grading every pitch against the prototypes", t0)
+    parts = []                               # raw_grades' blocks, one log line each (grading is most of the run)
+    for a in range(0, P.height, GRADE_CHUNK):
+        parts.append(model._raw_grades_block(P.slice(a, GRADE_CHUNK)))
+        _log(f"graded {min(a + GRADE_CHUNK, P.height):,} of {P.height:,} pitches", t0)
+    raw_g = pl.concat(parts)
+    del parts
     model.set_scale(P, raw_g)
     grades = model.apply_scale(raw_g, P)
-    _log(f"graded {grades.height:,} pitches", t0)
+    del raw_g
+    _log(f"graded {grades.height:,} pitches (both views)", t0)
     model.meta = {**model.meta, "version": MODEL_VERSION, "level": LEVEL, "years": years, "fraction": fraction,
-                  "n_swings": n_swings, "n_pitches": P.height, "trees": trees, **merged, **hit,
+                  "n_swings": n_swings, "p4_swing_share": p4_share, "n_pitches": P.height, "trees": trees, **merged,
+                  "skills": skills, "prototypes": N_PROTO, "reference": [REF_CELLS, REF_DRAWS, REF_FIT],
+                  "p4_rule": f"team home-game conference (PAC-12 through {PAC12_LAST}), < {MIN_HOME} home games -> "
+                             f">= {P4_SHARE:.0%} of swings in P4 games",
                   "trained": time.strftime("%Y-%m-%d %H:%M")}
     return model, _with_labels(grades, P)
 
@@ -636,8 +876,23 @@ def prepare(raw: pl.DataFrame, model: StuffModel, n_jobs: int = -1) -> pl.DataFr
     from backend.models import pitch_groups as pg
     raw = pg.fill_pitcher_ids(raw)
     raw, _ = merge_pitcher_ids(raw)
+    if getattr(model, "pid_map", None) is not None:
+        raw = _training_pids(raw, model.pid_map)
     raw, _ = add_labels(raw, model.templates, n_jobs=n_jobs)
     return add_features(raw).filter(pl.col("gradeable"))
+
+
+def _training_pids(raw: pl.DataFrame, pid_map: pl.DataFrame) -> pl.DataFrame:
+    """A one-season merge can group a few PitcherIds differently from training's all-season merge, which
+    re-tags their pitches (the old 0.08% re-score gap). Ids the model was trained on keep their training
+    pid; an id new to the model takes the training pid of a known id in the same one-season cluster, else
+    keeps its one-season pid."""
+    m = (raw.select("PitcherId", "pid").unique("PitcherId")
+            .join(pid_map.rename({"pid": "pid_t"}), on="PitcherId", how="left"))
+    cl = m.filter(pl.col("pid_t").is_not_null()).group_by("pid").agg(pid_c=pl.col("pid_t").mode().sort().first())
+    m = m.join(cl, on="pid", how="left").select("PitcherId", pid_new=pl.coalesce("pid_t", "pid_c", "pid"))
+    return (raw.join(m, on="PitcherId", how="left")
+               .with_columns(pid=pl.coalesce("pid_new", "pid")).drop("pid_new"))
 
 
 def score(raw: pl.DataFrame, model: StuffModel, n_jobs: int = -1) -> pl.DataFrame:

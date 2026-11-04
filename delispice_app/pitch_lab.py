@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import copy
 import functools
+import itertools
 import json
 import math
 import time
@@ -377,6 +378,207 @@ def sensitivity(lab: dict, uid: str, model, ref: dict, n: int = 25) -> tuple[pl.
     return g.select("field", "x", "uid", *GRADES).sort("field", "uid", "x"), bounds
 
 
+# ── Target Stuff+: the smallest change to one pitch's shape that reaches a grade ────────────────────
+# Only the pitch's own velo / IVB / HB / spin move: the primary fastball and the release stay as they are
+# (changing the fastball moves every grade in the arsenal). "Smallest" is measured in spreads: each input's
+# change divided by how much D1 pitches of the type spread on it (its SD), so 1 SD of velo costs the same
+# as 1 SD of HB, and the cost of a route is the length of that vector. Every candidate stays inside the
+# warning range (the 1st-99th percentile of the group, differentials vs. the fastball included), so a route
+# never trades the grade for a shape the model has barely seen.
+SOLVE_FIELDS = ("velo", "ivb", "hb", "spin")
+SOLVE_MAX_SD = 3.0          # the farthest a combined route may go, in spreads
+_Z98 = 4.653                # the 1st-99th percentile of a normal distribution spans 4.65 SD
+_BATCH = 800                # candidates graded per model call while the search widens
+
+
+def solve_spread(ref: dict, ptype: str) -> dict:
+    """field -> the D1 SD of the input for this pitch type (model units). An older reference has no
+    ``spread``; then the group's 1st-99th range / 4.65 stands in (wider for movement, since a group mixes types)."""
+    sp = (ref.get("spread") or {}).get(ptype)
+    if sp:
+        return {f: float(sp[COL[f]]) for f in SOLVE_FIELDS}
+    rng = ref["ranges"][TYPE_GROUP[ptype]]
+    return {f: (rng[COL[f]][1] - rng[COL[f]][0]) / _Z98 for f in SOLVE_FIELDS}
+
+
+def solve(lab: dict, uid: str, target: float, model, ref: dict, free=SOLVE_FIELDS) -> dict | None:
+    """The changes to pitch ``uid`` (not the primary) that bring its Stuff+ to ``target``.
+
+    Returns None when the pitch can't be graded, else a dict (display units, TrackMan signs):
+      now      its Stuff+ now;  target, up (True = the target is above it), done (it's already there)
+      best     the smallest change of the ``free`` inputs together that gets there, or None
+      singles  per free input: the smallest change of that input alone, or {"field", "none", "limit"}
+               (limit = the closest it gets to the target inside the range)
+      most     when nothing gets there: the closest grade found, and its change
+    A route is {"values", "deltas", "stuff", "sd"}: the pitch's new numbers (snapped to the sliders'
+    steps), the changes, the grade at exactly those numbers, and the cost in spreads. "Gets there" means
+    the grade shows as the target or past it once rounded.
+    """
+    p = next((q for q in lab["pitches"] if q["uid"] == uid), None)
+    if p is None or p["type"] == PRIMARY or uid in incomplete(lab) or lab["pitches"][0]["uid"] in incomplete(lab):
+        return None
+    fr = _frame([dict(lab, pitches=[lab["pitches"][0], p])], ref)
+    base = fr.filter(pl.col("uid") == uid)
+    if base.height == 0:
+        return None
+    b, s, conv = base.row(0, named=True), _sign(lab["hand"]), ref["conversion"]
+    rng = ref["ranges"][TYPE_GROUP[p["type"]]]
+    fb = {c: b[c] - b[d] for c, d in (("RelSpeed", "dVelo"), ("HB", "dHB"), ("IVB", "dIVB"))}
+    free = [f for f in SOLVE_FIELDS if f in (free or ())]
+    spread = solve_spread(ref, p["type"])
+    cur = np.array([b[COL[f]] for f in free])                 # model units (HB + = arm side)
+    sd = np.array([spread[f] for f in free])
+    # the box each input may move in: its warning range (stretched to the current value if that's outside),
+    # and the same for its differential vs. the fastball
+    lo, hi = [], []
+    for f in free:
+        a, z = rng[COL[f]]
+        if f in DIFF_FIELDS:
+            c = COL[f]
+            da, dz = rng[DIFF_FIELDS[f]]
+            a, z = max(a, fb[c] + min(da, b[DIFF_FIELDS[f]])), min(z, fb[c] + max(dz, b[DIFF_FIELDS[f]]))
+        lo.append(min(a, b[COL[f]]))
+        hi.append(max(z, b[COL[f]]))
+    lo_u, hi_u = (np.array(lo) - cur) / sd, (np.array(hi) - cur) / sd
+
+    fixed = base.drop("PitchUID", *[COL[f] for f in free], "dVelo", "dHB", "dIVB", "acc_v", "acc_h")
+
+    def grade_u(U: np.ndarray) -> np.ndarray:
+        """Stuff+ of the pitch moved by U (rows of changes in spreads, one column per free input)."""
+        X = cur + np.atleast_2d(U) * sd
+        moved = pl.DataFrame({"PitchUID": [str(i) for i in range(len(X))],
+                              **{COL[f]: X[:, j] for j, f in enumerate(free)}})
+        d = moved.join(fixed, how="cross")
+        av, ah = acc_from_movement(pl.col("RelSpeed"), pl.col("IVB"), pl.col("HB"), conv)
+        d = d.with_columns(dVelo=pl.col("RelSpeed") - fb["RelSpeed"], dHB=pl.col("HB") - fb["HB"],
+                           dIVB=pl.col("IVB") - fb["IVB"], acc_v=av, acc_h=ah)
+        g = model.grade(d).select("PitchUID", "stuff")
+        return d.select("PitchUID").join(g, on="PitchUID", how="left")["stuff"].to_numpy()
+
+    def display(u: np.ndarray) -> dict:
+        """Changes in spreads -> the pitch's new numbers on the sliders' steps (display units)."""
+        out = {f: p[f] for f in SOLVE_FIELDS}
+        for j, f in enumerate(free):
+            if u[j] != 0:
+                out[f] = _rounded(f, (s if f in MIRRORED else 1) * (cur[j] + u[j] * sd[j]))
+        return out
+
+    def snapped_u(vals: dict) -> np.ndarray:
+        return np.array([((s if f in MIRRORED else 1) * vals[f] - cur[j]) / sd[j] for j, f in enumerate(free)])
+
+    def route(u: np.ndarray, need_hit: bool = True) -> dict:
+        """The route on the sliders' steps. A smallest change sits right at a tree's split, so rounding to
+        the nearest step can fall back across it: when the route must reach the target, each change is also
+        tried rounded away from the current value and one step past that, and the smallest snapped version
+        that still gets there wins (the nearest rounding if none does)."""
+        tries = [display(u)]
+        if need_hit:
+            opts = []
+            for j, f in enumerate(free):
+                d = (s if f in MIRRORED else 1) * u[j] * sd[j]             # the change in display units
+                if u[j] == 0 or d == 0:
+                    opts.append([p[f]])
+                    continue
+                away = p[f] + math.copysign(math.ceil(abs(d) / STEP[f] - 1e-9) * STEP[f], d)
+                opts.append([_rounded(f, away), _rounded(f, away + math.copysign(STEP[f], d))])
+            for combo in itertools.product(*opts):
+                tries.append({**{f: p[f] for f in SOLVE_FIELDS}, **dict(zip(free, combo))})
+        U = np.array([snapped_u(v) for v in tries])
+        g = grade_u(U)
+        inside = np.all((U >= lo_u - 1e-9) & (U <= hi_u + 1e-9), axis=1)
+        ok = np.flatnonzero(np.array([hit(x) for x in g]) & inside) if need_hit else np.array([], int)
+        k = ok[np.argmin(np.linalg.norm(U[ok], axis=1))] if ok.size else 0
+        vals = tries[k]
+        return {"values": vals, "stuff": float(g[k]), "sd": float(np.linalg.norm(U[k])),
+                "deltas": {f: _rounded(f, vals[f] - p[f]) for f in SOLVE_FIELDS if vals[f] != p[f]}}
+
+    now = float(model.grade(base)["stuff"][0])
+    target = float(target)
+    up = target > now
+    # shows as the target once rounded (0.499: a grade of exactly x.5 can round either way)
+    hit = (lambda g: g >= target - 0.499) if up else (lambda g: g <= target + 0.499)
+    closer = (lambda g: g) if up else (lambda g: -g)          # bigger = closer to a target in that direction
+    res = {"now": now, "target": target, "up": up, "done": round(now) == round(target), "free": free,
+           "best": None, "singles": [], "most": None}
+    if res["done"] or not free:
+        return res
+
+    # 1. one input at a time: a fine sweep of each across its box (0.05 spreads)
+    lines, owner = [], []
+    for j in range(len(free)):
+        xs = np.unique(np.r_[np.arange(0, lo_u[j] - 1e-9, -0.05), np.arange(0, hi_u[j] + 1e-9, 0.05)])
+        U = np.zeros((len(xs), len(free)))
+        U[:, j] = xs
+        lines.append(U)
+        owner += [j] * len(xs)
+    U1, owner = np.vstack(lines), np.array(owner)
+    g1 = grade_u(U1)
+    seen_U, seen_g = [U1], [g1]
+    best_u, best_sd = None, np.inf
+    for j, f in enumerate(free):
+        m = owner == j
+        u_j, g_j = U1[m, j], g1[m]
+        ok = np.flatnonzero([hit(g) for g in g_j])
+        if ok.size:
+            k = ok[np.argmin(np.abs(u_j[ok]))]
+            u = np.zeros(len(free))
+            u[j] = u_j[k]
+            res["singles"].append({"field": f, **route(u)})
+            if abs(u_j[k]) < best_sd:
+                best_u, best_sd = u, abs(u_j[k])
+        else:
+            res["singles"].append({"field": f, "none": True, "limit": float(g_j[np.argmax(closer(g_j))])})
+
+    # 2. all the free inputs together: a 0.5-spread lattice, nearest candidates first, only as far as the
+    #    best single-input route (anything farther can't beat it), then two finer passes around the winner
+    if len(free) > 1:
+        R = min(SOLVE_MAX_SD, best_sd)
+        axis = np.arange(-SOLVE_MAX_SD, SOLVE_MAX_SD + 1e-9, 0.5)
+        L = np.stack(np.meshgrid(*[axis] * len(free), indexing="ij"), -1).reshape(-1, len(free))
+        n = np.linalg.norm(L, axis=1)
+        keep = (n > 0) & (n < R - 1e-9) & np.all((L >= lo_u) & (L <= hi_u), axis=1)
+        L = L[keep][np.argsort(n[keep], kind="stable")]
+        for a in range(0, len(L), _BATCH):
+            U = L[a:a + _BATCH]
+            g = grade_u(U)
+            seen_U.append(U)
+            seen_g.append(g)
+            ok = np.flatnonzero([hit(x) for x in g])
+            if ok.size:
+                k = ok[np.argmin(np.linalg.norm(U[ok], axis=1))]
+                best_u, best_sd = U[k], float(np.linalg.norm(U[k]))
+                break
+        if best_u is not None:
+            for step, reach in ((0.25, 0.5), (0.125, 0.25)):
+                off = np.arange(-reach, reach + 1e-9, step)
+                O = np.stack(np.meshgrid(*[off] * len(free), indexing="ij"), -1).reshape(-1, len(free))
+                C = best_u + O
+                C = C[(np.linalg.norm(C, axis=1) < best_sd - 1e-9) & np.all((C >= lo_u) & (C <= hi_u), axis=1)]
+                if len(C) == 0:
+                    continue
+                g = grade_u(C)
+                ok = np.flatnonzero([hit(x) for x in g])
+                if ok.size:
+                    k = ok[np.argmin(np.linalg.norm(C[ok], axis=1))]
+                    best_u, best_sd = C[k], float(np.linalg.norm(C[k]))
+
+    if best_u is None:
+        U, g = np.vstack(seen_U), np.concatenate(seen_g)
+        k = int(np.argmax(closer(g)))
+        res["most"] = route(U[k], need_hit=False)
+        return res
+    # tidy: drop any change the target doesn't need (the trees are flat in places), smallest first
+    u = best_u.copy()
+    for j in np.argsort(np.abs(u)):
+        if u[j] != 0:
+            trial = u.copy()
+            trial[j] = 0
+            if hit(grade_u(trial)[0]):
+                u = trial
+    res["best"] = route(u)
+    return res
+
+
 # ── Figures ──────────────────────────────────────────────────────────────────────────────────────
 def empty_fig(msg: str = "", width=460, height=450) -> go.Figure:
     fig = go.Figure()
@@ -541,6 +743,8 @@ def build_reference(years: list[str] | None = None, keep_every: int = 4) -> dict
                   for c in shape + list(stuff_v1.DIFFS)} for g in stuff_v1.GROUPS}
     limits = {g: {c: [float(P.filter(pl.col("group") == g)[c].quantile(q)) for q in SLIDER_Q] for c in shape}
               for g in stuff_v1.GROUPS}
+    # each input's SD per pitch type (the target-Stuff+ search measures a change in these)
+    spread = {t: {c: float(P.filter(pl.col("type") == t)[c].std()) for c in shape} for t in TYPES}
     conv = fit_conversion(P)
     print(f"  conversion fit: {conv} ({time.time() - t0:.0f}s)", flush=True)
     check = check_conversion(P, conv, model)
@@ -549,6 +753,7 @@ def build_reference(years: list[str] | None = None, keep_every: int = 4) -> dict
            "built": time.strftime("%Y-%m-%d %H:%M"), "years": years, "keep_every": keep_every, "n": P.height,
            "conversion": conv, "check": check, "defaults": defaults,
            "release": {c: defaults["FS"][c] for c in ("RelHeight", "RelSideM")}, "ranges": ranges, "limits": limits,
+           "spread": spread,
            # sign check: a right-hander's primary fastball should have + TrackMan HorzBreak (arm side)
            "rhp_fb_horzbreak": float(rhp["HorzBreak"].mean())}
     _path().write_text(json.dumps(ref, indent=1))

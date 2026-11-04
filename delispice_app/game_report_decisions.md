@@ -223,11 +223,11 @@ Still with Matt: the practice exports' column names (section 3).
 
 - **Stuff+ waits:** it exists only in the research notebooks so far (`backend/research/stuff_model/`); Matt is writing the production module.
 - **Always two tables** (decided 2026-10-16; revisit once it's built): the pitch data first, then a second table underneath with just the model numbers (RV/100, xRV/BBE, Stuff+). The screen and the PDF match.
-- **Small samples:** the pitch count always shows; rates (zone %, whiff %, hard-hit %, RV/100, xRV/BBE) are blank for a pitch type thrown fewer than 5 times.
+- **Small samples:** every pitch type shows its rates, however few it threw. *(Changed 2026-10-31, Matt: relievers often throw a pitch type fewer than 5 times. Before, rates were blank under 5 pitches of a type.)*
 - **Zone-Pre2S%, Chase% and IZ-Whiff% per pitch type** (added 2026-10-28):
   - **Definitions:** the same as in the line table above.
   - **Columns:** Zone-Pre2S% and Chase% come after Zone %, and IZ-Whiff% after WHIFF %.
-  - **Small samples:** like the other rates, they're blank for a pitch type thrown fewer than 5 times. They're also blank when nothing qualifies, e.g. IZ-Whiff% with no swings in the zone.
+  - **Small samples:** like the other rates, they show for any pitch count (since 2026-10-31). They're blank only when nothing qualifies, e.g. IZ-Whiff% with no swings in the zone.
   - **Pitchers tab:** these are Game Reports only; the Pitchers tab's arsenal is unchanged.
 - **Column order and release point** (2026-10-28, Matt's request):
   - **Order** (`game_report.ARSENAL_COLS`): Pitch · Count (%) · Avg Velo · Max Velo · Avg Spin · Vert Break · Horz Break · Tilt · Extension · Arm Angle · Rel Height · Rel Side · Strike % · Zone % · Zone-Pre2S% · Chase% · WHIFF % · IZ-Whiff% · RV/100. The shape and release columns now come right after Avg Spin.
@@ -270,7 +270,7 @@ Not built yet: the batter report (the toggle shows a note), uploads (section 3),
 8. **Balls in play:** hits filled, outs hollow; exit velocity, launch angle and result on hover.
 9. **Arsenal:** always two tables; revisit once built.
 10. **PDF:** decided after building it locally.
-11. **Small samples:** rates blank under 5 pitches of a type; the count always shows.
+11. **Small samples:** rates show for every pitch type, however few it threw. *(Changed 2026-10-31: they were blank under 5 pitches.)*
 12. **Comparisons** (section 5): added later as the report grows.
 
 ---

@@ -12,6 +12,7 @@ server in a native pop-up window via pywebview.
 from __future__ import annotations
 
 import base64
+import functools
 import importlib
 import io
 import json
@@ -1903,9 +1904,18 @@ def _pl_slider(uid, f, value, ptype, hand):
 def _pl_card(lab, p, nm, col):
     uid, primary = p["uid"], p["type"] == pitch_lab.PRIMARY
     own = pitch_lab.own_release(p)
+    # a secondary's target Stuff+: type a grade and the card lists the changes that reach it (cb_pl_target)
+    target = [] if primary else [
+        html.Span("→", style={"color": "#999", "fontSize": "12px"}),
+        # dcc.Input takes no title, so the tooltip sits on a wrapper
+        html.Span(dcc.Input(id={"type": "pl-target", "uid": uid}, type="number", value=p.get("target"), debounce=True,
+                            min=0, max=250, step=1, placeholder="goal",
+                            style={"width": "52px", "fontSize": "12px", "padding": "1px 4px"}),
+                  title="Type a Stuff+ to reach: the lab finds the smallest change to this pitch that gets there")]
     head = html.Div([
         html.Span("●", style={"color": col[uid]}), html.Span(nm[uid], style={"fontWeight": 600}),
         html.Span(id={"type": "pl-badge", "uid": uid}, style={"marginLeft": "auto"}),     # Stuff+, from cb_pl_results
+        *target,
         html.Div() if primary else html.Button("✕", id={"type": "pl-del", "uid": uid}, n_clicks=0,
                                                title="Remove this pitch", style={**_BTN, "color": MAROON}),
     ], style={"display": "flex", "alignItems": "center", "gap": "6px", "marginBottom": "4px", "minHeight": "24px"})
@@ -1915,6 +1925,7 @@ def _pl_card(lab, p, nm, col):
                       options=[{"label": " Own release point (otherwise the arm slot)", "value": "own"}],
                       style={"fontSize": "12px", "color": "#555", "margin": "4px 0 2px"}),
         *([_pl_slider(uid, f, p[f], p["type"], lab["hand"]) for f in ("rel_h", "rel_s")] if own else []),
+        *([] if primary else [html.Div(id={"type": "pl-route", "uid": uid})]),
     ], style=_PL_CARD)
 
 
@@ -1961,6 +1972,13 @@ def _pl_help():
             li("Every pitch besides the primary fastball is also graded on its velo, HB and IVB differences from "
                "it, so changing the fastball moves the other grades. Pick the primary fastball in the "
                "sensitivity chart to see how much."),
+            li("Type a Stuff+ in the box next to a pitch's grade (not the primary fastball's) and the card lists "
+               "how to get there by changing only that pitch's velo, IVB, HB and spin: the smallest change of "
+               "them together, then each one alone. \"Smallest\" counts each change in the D1 spread of that "
+               "pitch type (for sliders, one SD is about 3.8 mph of velo, 5 to 6 in of break or 270 rpm of spin), "
+               "and every suggestion stays inside the range of 98% of D1 pitches of the group, so it never sets "
+               "off a warning. Untick an input to keep it as it is (a pitcher who can't throw harder, say). "
+               "Apply moves the sliders there. The fastball and the release stay as they are."),
             li("The breaking-ball model reads spin-induced acceleration, not movement. The lab rebuilds it from "
                "your movement and velo with physics (break = ½·a·t², the flight time t coming from velo) plus a "
                "small offset fit on D1 breaking balls." + acc),
@@ -1978,6 +1996,7 @@ lab_panel = html.Div(id="lab-panel", style={"display": "none"}, children=[
     dcc.Store(id="pl-lab", storage_type="session", data=pitch_lab.default_lab(_PL_REF) if _PL_REF else None),
     dcc.Store(id="pl-known", storage_type="memory"),     # the arsenal the form currently shows
     dcc.Store(id="pl-open", storage_type="memory", data=[]),   # uids whose vs RHB / vs LHB rows are open
+    dcc.Store(id="pl-routes", storage_type="memory", data={}),  # uid -> the target routes' numbers, for Apply
     html.Div("Pitch Lab", style={"fontSize": "20px", "fontWeight": 700, "fontFamily": FONT, "marginBottom": "10px"}),
     html.Div([html.Span("Add a pitch", style=LABEL),
               dcc.Dropdown(id="pl-add-type", options=_PL_TYPE_OPTS, value="SL", clearable=False,
@@ -2933,13 +2952,20 @@ def cb_pl_render(_ts, lab, known):
               Input({"type": "pl-hand", "i": ALLPM}, "value"),
               Input({"type": "pl-own", "uid": ALLPM}, "value"),
               Input({"type": "pl-f", "uid": ALLPM, "f": ALLPM}, "value"),
-              State("pl-add-type", "value"), State("pl-known", "data"),
+              Input({"type": "pl-target", "uid": ALLPM}, "value"),
+              Input({"type": "pl-free", "uid": ALLPM}, "value"),
+              Input({"type": "pl-apply", "uid": ALLPM, "r": ALLPM}, "n_clicks"),
+              State("pl-add-type", "value"), State("pl-known", "data"), State("pl-routes", "data"),
               prevent_initial_call=True)
-def cb_pl_edit(_add, _reset, _dels, hands, _owns, _vals, add_type, known):
+def cb_pl_edit(_add, _reset, _dels, hands, _owns, _vals, _targets, _frees, _applies, add_type, known, routes):
     if known is None:
         raise PreventUpdate
-    # Every structural change starts from the form as it is now, including a value typed in a slider's box.
-    cur = pitch_lab.overlay(known, {(i["id"]["uid"], i["id"]["f"]): i["value"] for i in ctx.inputs_list[5]})
+    # Every structural change starts from the form as it is now, including a value typed in a slider's box,
+    # a target Stuff+ and which inputs the target search may change.
+    vals = {(i["id"]["uid"], i["id"]["f"]): i["value"] for i in ctx.inputs_list[5]}
+    vals |= {(i["id"]["uid"], "target"): _pl_target_value(i["value"]) for i in ctx.inputs_list[6]}
+    vals |= {(i["id"]["uid"], "free"): _pl_free_value(i["value"]) for i in ctx.inputs_list[7]}
+    cur = pitch_lab.overlay(known, vals)
     # Every trigger, not just ctx.triggered_id (the first): a click right after typing in a slider's box
     # arrives together with the box's blur, and the click must win.
     fired = {t["prop_id"]: t["value"] for t in ctx.triggered}
@@ -2949,6 +2975,11 @@ def cb_pl_edit(_add, _reset, _dels, hands, _owns, _vals, add_type, known):
         # A pitch only leaves on a real click: the pattern Input also fires when the form re-renders.
         if isinstance(tid, dict) and tid.get("type") == "pl-del" and fired.get(pid):
             return pitch_lab.remove_pitch(cur, tid["uid"]), no_update
+        # Apply: the route's numbers onto the pitch's sliders (a re-render, since the form must show them)
+        if isinstance(tid, dict) and tid.get("type") == "pl-apply" and fired.get(pid):
+            new = ((routes or {}).get(tid["uid"]) or [])[tid["r"]:tid["r"] + 1]
+            if new:
+                return pitch_lab.overlay(cur, {(tid["uid"], f): v for f, v in new[0].items()}), no_update
     if "pl-add.n_clicks" in fired:
         return pitch_lab.add_pitch(cur, add_type, _PL_REF), no_update
     if hands and hands[0] != cur["hand"]:
@@ -3043,6 +3074,126 @@ def cb_pl_sensitivity(lab, uid, all_grades, role):
     if sens.height == 0:
         return pitch_lab.empty_fig("Fill in every number for this pitch and the primary fastball.", 960, 560)
     return pitch_lab.sensitivity_fig(lab, uid, sens, bounds, all_grades="all" in (all_grades or []))
+
+
+# ── Pitch Lab: target Stuff+ (pitch_lab.solve) ──
+def _pl_target_value(v):
+    """The target box's number as stored: blank -> None, else clamped to the box's 0-250."""
+    if v is None:
+        return None
+    v = min(max(float(v), 0.0), 250.0)
+    return int(v) if v.is_integer() else round(v, 1)
+
+
+def _pl_free_value(v):
+    """The inputs the search may change, stored as None when all of them are (the default)."""
+    v = [f for f in pitch_lab.SOLVE_FIELDS if f in (v or [])]
+    return None if len(v) == len(pitch_lab.SOLVE_FIELDS) else v
+
+
+@functools.lru_cache(maxsize=64)
+def _pl_solve_cached(key: str):
+    k = json.loads(key)
+    lab = {"v": pitch_lab.LAB_VERSION, "hand": k["hand"], "rel_h": k["rel_h"], "rel_s": k["rel_s"], "next": 0,
+           "pitches": [k["fb"], k["p"]]}
+    free = k["p"].get("free")
+    return pitch_lab.solve(lab, k["p"]["uid"], k["p"]["target"], data._stuff_model(), _PL_REF,
+                           pitch_lab.SOLVE_FIELDS if free is None else free)
+
+
+def _pl_solve(lab, p):
+    """Cached on what the pitch's grade depends on (the hand, the arm slot, the primary and the pitch), so
+    moving another pitch's slider doesn't search again."""
+    return _pl_solve_cached(json.dumps({"hand": lab["hand"], "rel_h": lab["rel_h"], "rel_s": lab["rel_s"],
+                                        "fb": lab["pitches"][0], "p": p}, sort_keys=True))
+
+
+_PL_WORDS = {"velo": ("harder", "softer"), "ivb": ("more lift", "more drop")}
+_PL_APPLY = {**_BTN, "fontSize": "11px", "padding": "0 6px", "marginLeft": "6px"}
+
+
+def _pl_change(f, d, hand):
+    """One change in words: 'HB −2.4 in (more glove side)'."""
+    dec = pitch_lab.DECIMALS[f]
+    num = f"{'+' if d > 0 else '−'}{abs(d):,.{dec}f}"
+    if f == "hb":
+        word = "more arm side" if d * (-1 if hand == "Left" else 1) > 0 else "more glove side"
+    else:
+        word = _PL_WORDS.get(f, ("", ""))[0 if d > 0 else 1]
+    return f"{pitch_lab.LABEL[f]} {num} {pitch_lab.UNIT[f]}" + (f" ({word})" if word else "")
+
+
+def _pl_route_view(lab, p, res):
+    """The card's target section: which inputs may change, then the routes. Returns (children, the routes'
+    numbers in Apply-button order)."""
+    uid, hand = p["uid"], lab["hand"]
+    free = list(pitch_lab.SOLVE_FIELDS) if p.get("free") is None else p["free"]
+    note = {"fontSize": "12px", "color": "#555", "margin": "2px 0"}
+    lock = html.Div([html.Span("Can change", style={**_PL_ROWLAB, "width": "auto", "marginRight": "6px"}),
+                     dcc.Checklist(id={"type": "pl-free", "uid": uid}, value=free, inline=True,
+                                   options=[{"label": f" {_PL_SHORT[f]}", "value": f} for f in pitch_lab.SOLVE_FIELDS],
+                                   inputStyle={"marginLeft": "6px"}, style={"fontSize": "12px"})],
+                    style={"display": "flex", "alignItems": "center", "margin": "2px 0"})
+    vals, rows = [], []
+
+    def line(label, r, star=False):
+        rows.append(html.Div([
+            html.Span(label, style={"color": "#888", "marginRight": "4px"}) if label else None,
+            html.Span(" · ".join(_pl_change(f, d, hand) for f, d in r["deltas"].items())),
+            html.Span(f" → {r['stuff']:.0f}", style={"fontWeight": 600, "color": MAROON}),
+            html.Span(" smallest", style={"color": "#888", "fontSize": "11px"}) if star else None,
+            html.Button("Apply", id={"type": "pl-apply", "uid": uid, "r": len(vals)}, n_clicks=0, style=_PL_APPLY,
+                        title="Move this pitch's sliders to these numbers")], style=note))
+        vals.append(r["values"])
+
+    if res is None:
+        rows.append(html.Div("Fill in every number for this pitch and the primary fastball.", style=note))
+    elif not free:
+        rows.append(html.Div("Tick at least one input to change.", style=note))
+    elif res["done"]:
+        rows.append(html.Div(f"Already at {res['target']:.0f}.", style=note))
+    else:
+        rows.append(html.Div(f"To get to {res['target']:.0f} (now {res['now']:.0f}), changing only this pitch:",
+                             style={**note, "fontWeight": 600, "color": "#333"}))
+        best = res["best"]
+        one = best is not None and len(best["deltas"]) == 1     # the smallest change is a single input's
+        if best is not None and not one:
+            line("Smallest change:", best)
+        if res["singles"] and len(free) > 1:
+            rows.append(html.Div("One at a time:", style={**note, "color": "#888"}))
+        for s in res["singles"]:
+            if s.get("none"):
+                rows.append(html.Div(f"{pitch_lab.LABEL[s['field']]} alone can't, inside the D1 range "
+                                     f"(closest {s['limit']:.0f})", style={**note, "color": "#999"}))
+            else:
+                line("", s, star=one and set(s["deltas"]) == set(best["deltas"]))
+        if res["most"] is not None:
+            rows.append(html.Div(f"Out of reach inside the D1 range. The closest grade found:", style={**note, "color": "#7a4b00"}))
+            line("", res["most"])
+    return html.Div([lock, *rows], style={"borderTop": "1px dashed #e2c9cc", "marginTop": "6px", "paddingTop": "4px"}), vals
+
+
+# `pl-known` is an Input too: after a re-render it fills the new cards' target sections.
+@app.callback(Output({"type": "pl-route", "uid": ALLPM}, "children"), Output("pl-routes", "data"),
+              Input("pl-lab", "data"), Input("pl-known", "data"), Input("role-tabs", "value"))
+def cb_pl_target(lab, _known, role):
+    if role != "lab" or _PL_REF is None:
+        raise PreventUpdate
+    slots = ctx.outputs_list[0]              # the cards on screen now, which can lag the store by a render
+    model = data._stuff_model()
+    if model is None:
+        return [None] * len(slots), {}
+    lab = _pl_lab(lab)
+    by_uid = {p["uid"]: p for p in lab["pitches"]}
+    views, routes = [], {}
+    for slot in slots:
+        p = by_uid.get(slot["id"]["uid"])
+        if p is None or p.get("target") is None:
+            views.append(None)
+            continue
+        view, routes[p["uid"]] = _pl_route_view(lab, p, _pl_solve(lab, p))
+        views.append(view)
+    return views, routes
 
 
 def main():

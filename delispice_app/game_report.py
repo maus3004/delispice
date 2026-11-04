@@ -31,7 +31,6 @@ import polars as pl
 from . import data, report
 
 ALL = data.ALL
-SMALL_SAMPLE = 5          # a pitch type thrown fewer times than this gets blank rates in the arsenal tables
 BOTH = "both"             # the doubleheader pick that reports both games
 
 ID_COL = {"pitcher": "PitcherId", "batter": "BatterId"}          # TrackMan's player ID per role
@@ -348,22 +347,6 @@ def per_game_table(rows: pl.DataFrame, games: pl.DataFrame, present: set[str] | 
     return _blank_missing(pl.DataFrame(out).cast(pl.Utf8), present, LINE_NEEDS) if out else pl.DataFrame()
 
 
-def _pitch_counts(rows: pl.DataFrame) -> dict[str, int]:
-    """Display pitch name -> pitches thrown (the arsenal's rows)."""
-    t = rows.filter(pl.col("TaggedPitchType").is_not_null() & ~pl.col("TaggedPitchType").is_in(report.NON_PITCHES))
-    return {report.PITCH_NAMES.get(k, k): n for k, n in t.group_by("TaggedPitchType").len().iter_rows()}
-
-
-def _blank_small(df: pl.DataFrame, counts: dict[str, int], cols: list[str]) -> pl.DataFrame:
-    """Blank the rate columns of pitch types thrown fewer than SMALL_SAMPLE times."""
-    small = [p for p, n in counts.items() if n < SMALL_SAMPLE]
-    cols = [c for c in cols if c in df.columns]
-    if not small or not cols:
-        return df
-    return df.with_columns([pl.when(pl.col("Pitch").is_in(small)).then(pl.lit("")).otherwise(pl.col(c)).alias(c)
-                            for c in cols])
-
-
 def arm_angles(rows: pl.DataFrame, height_in: int | None) -> dict[str, float]:
     """Display pitch name -> average arm angle (degrees from horizontal) of its pitches, the same
     estimate as the release chart: shoulder at 70% of height, atan(rise above it / |RelSide|)."""
@@ -398,9 +381,8 @@ ARSENAL_COLS = ["Pitch", "Count (%)", "Avg Velo", "Max Velo", "Avg Spin",
 def arsenal_tables(rows: pl.DataFrame, height_in: int | None,
                    present: set[str] | None = None) -> tuple[pl.DataFrame, pl.DataFrame, list[dict]]:
     """(arsenal, Contact table, Stuff rows), same rows as the Pitchers tab's: the arsenal in ARSENAL_COLS
-    order, with the Arm Angle, Rel Height / Rel Side and the zone rates added; rates blank for pitch
-    types under SMALL_SAMPLE pitches."""
-    counts = _pitch_counts(rows)
+    order, with the Arm Angle, Rel Height / Rel Side and the zone rates added. Every pitch type gets its
+    rates, however few it threw (a reliever often throws a pitch under 5 times; that rule went 2026-10-31)."""
     ars = report.build_arsenal(rows)
     if ars.height:
         arms, ex = arm_angles(rows, height_in), type_extras(rows)
@@ -413,10 +395,8 @@ def arsenal_tables(rows: pl.DataFrame, height_in: int | None,
                                            return_dtype=pl.Utf8).alias(k) for k in REL_COLS])
         # a column report.build_arsenal adds later still shows, at the end
         ars = ars.select([c for c in ARSENAL_COLS if c in ars.columns] + [c for c in ars.columns if c not in ARSENAL_COLS])
-        ars = _blank_missing(_blank_small(ars, counts, ["Strike %", "Zone %", "WHIFF %", "RV/100", *ZONE_RATES]),
-                             present, ARSENAL_NEEDS)
-    contact = _blank_missing(_blank_small(report.build_contact_table(rows), counts, ["Hard Hit %", "xRV/BBE"]),
-                             present, CONTACT_NEEDS)
+        ars = _blank_missing(ars, present, ARSENAL_NEEDS)
+    contact = _blank_missing(report.build_contact_table(rows), present, CONTACT_NEEDS)
     return ars, contact, report.build_stuff_rows(rows)
 
 

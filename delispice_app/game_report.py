@@ -480,14 +480,16 @@ def stuff_dist_fig(rows: pl.DataFrame, pitcher: str, hand: str) -> go.Figure:
     """Each pitch's Stuff+, drawn like the Pitchers tab's velocity chart (report.distribution_fig): one
     usage-weighted curve per pitch type and a dashed total. A pitch type keeps only the pitches graded in
     its majority Stuff+ group, the ones the Stuff table averages: a grade means something only within its
-    group (a fastball's 110 is not a slider's 110). The dotted line is 100, the D1 average for a group."""
+    group (a fastball's 110 is not a slider's 110). The dotted line is 100, the D1 average for a group (vs D1
+    hitters); the grades themselves are data.STUFF_VIEW's (vs P4 hitters by default)."""
     tag = pl.col("TaggedPitchType")
     main_group = pl.col("StuffGroup").drop_nulls().mode().sort().first().over("TaggedPitchType")
     d = (rows.filter(tag.is_not_null() & ~tag.is_in(report.NON_PITCHES) & pl.col("Stuff").is_not_null())
              .filter(pl.col("StuffGroup") == main_group)
              .with_columns(tag.replace(report.PITCH_NAMES).alias("PT")))
     fig = report.distribution_fig(d, "Stuff", f"{pitcher} ({hand}) — Frequency of Pitches by Stuff+",
-                                  "Stuff+ (100 = D1 average for the pitch's group)", "Frequency of Stuff+", pad=10)
+                                  f"Stuff+ {data.STUFF_VIEW_LABEL[data.STUFF_VIEW]} (100 = D1 average for the pitch's group)",
+                                  "Frequency of Stuff+", pad=10)
     if len(fig.data):
         fig.add_vline(x=100, line=dict(color="#999", width=1, dash="dot"), annotation_text="D1 avg",
                       annotation_position="top", annotation_font=dict(size=10, color="#888"))

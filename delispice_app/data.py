@@ -581,14 +581,18 @@ def _with_eye(df: pl.DataFrame, sel_level: str = ALL) -> pl.DataFrame:
                .with_columns(pl.col("Eye_new").cast(pl.Float64).alias("Eye")).drop("Eye_new"))
 
 
-# ── Stuff+ (v1) — what a pitch's SHAPE is worth, per pitch ───────────────────────────────────────
+# ── Stuff+ (v1.1) — what a pitch's SHAPE is worth, per pitch ─────────────────────────────────────
 # One model for all of D1 (P4 games are D1 rows), retrained once a season with its scale frozen inside
 # it (backend/models/stuff_v1). Score tables are built offline per season —
 # `python -m backend.models.stuff_store` — and a night's new games miss the table and are graded live.
-# A grade doesn't depend on the count, batter or result (it's graded against an average hitter across
-# all 24 count x side contexts), so the report's filters change which pitches are averaged, not a grade.
-# The same four grades vs RHB / vs LHB only (StuffRHB, ..., ContactPlusLHB) are the platoon splits; a
-# table built before they existed has none, and they stay blank until `--add-splits` fills it.
+# A grade doesn't depend on the count, batter or result (it's graded against a mix of hitters across all
+# 24 count x side contexts), so the report's filters change which pitches are averaged, not a grade.
+# The same four grades vs RHB / vs LHB only (StuffRHB, ..., ContactPlusLHB) are the platoon splits.
+# Every pitch has two views (stuff_v1 v1.1): graded against P4 hitters (``*_p4``) or against all D1 hitters,
+# both on the D1 scale (100 = the average D1 pitch type vs D1 hitters). STUFF_VIEW picks the one the whole
+# site shows under the plain names (Stuff, WhiffPlus, ...); a toggle can flip it later.
+STUFF_VIEW = "P4"
+STUFF_VIEW_LABEL = {"P4": "vs P4 hitters", "D1": "vs D1 hitters"}
 _STUFF_BASE = {"stuff": "Stuff", "whiff_plus": "WhiffPlus", "foul_plus": "FoulPlus", "contact_plus": "ContactPlus"}
 STUFF_COLS = {**_STUFF_BASE, **{f"{k}_{s}": f"{v}{s.upper()}" for s in ("rhb", "lhb") for k, v in _STUFF_BASE.items()}}
 _STUFF_RAW = ["PitchUID", "GameID", "PitcherId", "Pitcher", "PitcherThrows", "PitcherTeam", "TaggedPitchType",
@@ -596,10 +600,46 @@ _STUFF_RAW = ["PitchUID", "GameID", "PitcherId", "Pitcher", "PitcherThrows", "Pi
               "BatterSide"]
 
 
+def _stuff_src(key: str, view: str | None = None) -> str:
+    """The score-table / grade() column behind a STUFF_COLS key in a view: stuff -> stuff_p4, stuff_rhb -> stuff_p4_rhb."""
+    if (view or STUFF_VIEW) == "D1":
+        return key
+    for s in ("rhb", "lhb"):
+        if key.endswith(f"_{s}"):
+            return f"{key[:-len(s) - 1]}_p4_{s}"
+    return f"{key}_p4"
+
+
+def _stuff_view(g: pl.DataFrame) -> pl.DataFrame:
+    """Grades (a score table or grade()'s output) with STUFF_VIEW's columns under the plain names."""
+    if STUFF_VIEW == "D1":
+        return g
+    have = set(g.columns)
+    return g.with_columns(*[(pl.col(_stuff_src(k)) if _stuff_src(k) in have else pl.lit(None, dtype=pl.Float32)).alias(k)
+                            for k in STUFF_COLS],
+                          *([pl.col("runs_p4").alias("runs")] if "runs_p4" in have else []))
+
+
+class _StuffView:
+    """The app's handle on the Stuff+ model: ``grade()`` returns STUFF_VIEW's grades under the plain names,
+    so the Pitch Lab (cards, sensitivity, target search) and every live grade show the same view as the
+    score tables. Everything else passes straight through to the StuffModel."""
+
+    def __init__(self, model):
+        self._model = model
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+    def grade(self, P: pl.DataFrame) -> pl.DataFrame:
+        return _stuff_view(self._model.grade(P))
+
+
 @functools.lru_cache(maxsize=1)
 def _stuff_model():
     from backend.models import stuff_store
-    return stuff_store.load()
+    m = stuff_store.load()
+    return _StuffView(m) if m is not None else None
 
 
 @functools.lru_cache(maxsize=4)
@@ -622,7 +662,8 @@ def _stuff_for(df: pl.DataFrame) -> pl.DataFrame:
     for (yr,), grp in df.partition_by("Year", as_dict=True).items():
         uids = grp.select("PitchUID").unique()
         cache = _stuff_cache(str(yr))
-        if cache is not None:                  # an older table without the platoon splits: blank splits
+        if cache is not None:                  # the site's view under the plain names (a missing column: blank)
+            cache = _stuff_view(cache)
             cache = cache.with_columns(pl.lit(None, dtype=pl.Float32).alias(c) for c in STUFF_COLS if c not in cache.columns)
         got = (uids.join(cache.select("PitchUID", *cols), on="PitchUID", how="left") if cache is not None
                else uids.with_columns(pl.lit(None, dtype=pl.String).alias("group"),

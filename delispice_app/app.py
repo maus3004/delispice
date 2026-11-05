@@ -3006,7 +3006,7 @@ def _pl_results(lab, graded, open_uids):
         return html.Div("Fill in every number for the primary fastball: every grade is measured against it.",
                         style=_UNVERIFIED)
     out = [_stuff_table_block(pitch_lab.grade_rows(lab, graded),
-                              f"Grades {data.STUFF_VIEW_LABEL[data.STUFF_VIEW]} · 100 = average D1 pitch type vs D1 hitters, 10 = one SD of pitch types",
+                              f"Projected Grades {data.STUFF_VIEW_LABEL[data.STUFF_VIEW]}",
                               pitch_lab.GRADE_COLS, keep_open=("pl-gopen", set(open_uids or [])))]
     if missing:
         out.append(html.Div("Not graded until every number is filled in: " + ", ".join(nm[u] for u in missing) + ".",

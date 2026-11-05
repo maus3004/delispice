@@ -1962,18 +1962,20 @@ def _pl_help():
                + ("P4 hitters" if data.STUFF_VIEW == "P4" else "D1 hitters")
                + " (16 stand-in hitters with their mix of whiff, foul and contact skill) across all 12 counts and "
                "both batter sides, weighted the way D1 pitchers of that hand use pitches of that group."),
-            li("Grades are within a group, on the D1 scale: 100 is the average D1 pitch type in it against D1 hitters "
-               "(one pitcher's fastball, breaking ball or offspeed pitch over a season), and 10 points is one standard "
-               "deviation between those pitch types, so a 110 is about a top-16% pitch in any group. "
-               + ("Against P4 hitters the same pitch types average about 91 (fastballs) and 94 (breaking balls and "
-                  "offspeed). " if data.STUFF_VIEW == "P4" else "") + "Single pitches spread wider."),
+            li(f"Grades are within a group: 100 is {data.STUFF_100[data.STUFF_VIEW]} type in it "
+               f"{data.STUFF_VIEW_LABEL[data.STUFF_VIEW]} (one pitcher's fastball, breaking ball or offspeed pitch over "
+               "a season, 2022-26), and 10 points is about one standard deviation between pitch types, "
+               + ("so about one in six P4 arms' pitch types grades 110 or better. " if data.STUFF_VIEW == "P4"
+                  else "so a 110 is about a top-16% pitch in any group. ")
+               + "Single pitches spread wider."),
             li("Click a pitch in the grades table for vs RHB / vs LHB: the same grades against hitters of one side "
                "only, on the same scale. The overall grade mixes the two the way D1 pitchers of that hand face "
                "each side."),
             li("The D1 average shape grades well under 100 (the average four-seam is about 85 against D1 hitters, "
-               "74 against P4 hitters). Real pitches of "
-               "each type do average about 100 against D1 hitters, but the model rewards standing out, so the average of their grades "
-               "is higher than the grade of their average shape."),
+               "80 against P4 hitters). "
+               + ("P4 arms' real pitches" if data.STUFF_VIEW == "P4" else "Real pitches")
+               + " of each type do average about 100, but the model rewards standing out, so the average of their "
+               "grades is higher than the grade of their average shape."),
             li("Every pitch besides the primary fastball is also graded on its velo, HB and IVB differences from "
                "it, so changing the fastball moves the other grades. Pick the primary fastball in the "
                "sensitivity chart to see how much."),

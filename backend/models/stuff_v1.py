@@ -7,7 +7,9 @@ and ``stuff_v1_1_p4view.ipynb``): three hitter skills replace ``hitter_oe``, and
 - **Grading against a hitter mix**, not one average hitter: 16 hitter prototypes (k-means cells of the D1
   hitters' skills). The D1 view weights them by the D1 mix, the P4 view by the P4 hitters' mix. The shared
   cells miss part of the D1 -> P4 shift, so the P4 view adds one frozen correction per group, measured at
-  training against a 2,048-hitter reference mix. Both views sit on the D1 scale (``*_p4`` columns).
+  training against a 2,048-hitter reference mix. 100 in the D1 view is the average D1 pitch type vs D1 hitters;
+  100 in the P4 view (``*_p4`` columns) is the average P4 arm's pitch type vs P4 hitters (``P4_CENTER``). Both use
+  the D1 view's SD, so a point means the same in both, and the views differ by a near-constant offset per group.
 - Re-scoring reuses the training pitcher-ID merge (``pid_map``), closing the 0.08% re-score gap.
 The text below describes v1, and still holds except where these replace it.
 
@@ -106,6 +108,13 @@ GAP_MAX, REL_H_MAX, REL_S_MAX = 2, 0.75, 1.0  # pitcher-ID merge, rule C (M2)
 # the grades the app's tables show). Decided per pitch 2026-10-16; switched to per pitch type 2026-11-03.
 # Only the frozen mean/SD change; nothing else in the model does (stuff_store --rescale re-maps saved grades).
 SCALE_METHOD = "per_pitch_type"
+# P4S7: what 100 means in the P4 view. "p4_arms" = the average P4 arm's pitch type vs P4 hitters (``p4_arms``);
+# "own_mean" = the average D1 pitch type vs P4 hitters; "d1_mean" = the average D1 pitch type vs D1 hitters, so the
+# P4 view reads as a drop from the D1 view. The SD is the D1 view's in all three, so ranks and the gaps between pitches
+# don't depend on this. Decided d1_mean 2026-11-03; switched to p4_arms 2026-11-05: the view answers where a pitcher
+# stands among P4 arms facing P4 hitters (under d1_mean an average pitch read Contact+ 80). stuff_store --rescale
+# re-maps saved grades.
+P4_CENTER = "p4_arms"
 MIN_PT = 100
 CHUNK = 120_000                              # pitches x hitter points per predict call (x 24 contexts): ~2.9M rows
 GRADE_CHUNK = 500_000                        # pitches per grading block, so grading memory stays flat
@@ -170,21 +179,61 @@ def p4_hitters(years: list[str]) -> pl.DataFrame:
     common team plays its home games in a P4 conference that season (``League`` is the home team's
     conference; PAC-12 counts through 2024). A team-season with fewer than MIN_HOME tracked home games isn't
     in that table, and its hitters fall back to their own share of swings in P4-conference games (>= P4_SHARE).
-    It reads the team columns training doesn't load, in a short-lived child process: the operating system takes
-    all of its memory back before training loads every pitch (measured: in-process, polars kept ~3 GB of it)."""
+    It reads the team columns training doesn't load, in a short-lived child process."""
+    return _in_child(_p4_hitters_table, years)
+
+
+def _in_child(fn, years: list[str]) -> pl.DataFrame:
+    """``fn(years)`` in a short-lived child process: the operating system takes all of its memory back before
+    training loads every pitch (measured: in-process, polars kept ~3 GB of it)."""
     import concurrent.futures as cf
     import multiprocessing as mp
     try:
         with cf.ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn")) as ex:
-            return ex.submit(_p4_hitters_table, years).result()
+            return ex.submit(fn, years).result()
     except (OSError, cf.process.BrokenProcessPool):          # no child processes here: same result, in-process
-        return _p4_hitters_table(years)
+        return fn(years)
+
+
+def _is_p4_conf(c: str) -> pl.Expr:
+    """Is conference column ``c`` a P4 conference that season? PAC-12 counts through 2024. Needs ``Year``."""
+    from backend.models import contact_quality as cq
+    return (pl.col(c).is_in(cq.P4_LEAGUES) | ((pl.col(c) == "PAC12") & (pl.col("Year") <= PAC12_LAST))).fill_null(False)
+
+
+def team_home_conf(years: list[str]) -> pl.DataFrame:
+    """team, Year, conf, home_games: each team-season's most common home-game conference (``League`` is the
+    home team's conference), in a short-lived child process."""
+    return _in_child(_team_home_conf, years)
+
+
+def _team_home_conf(years: list[str]) -> pl.DataFrame:
+    files = sorted(f for y in years for f in PIPELINE.glob(f"*/{y}/**/*.parquet"))
+    return (pl.scan_parquet([str(f) for f in files])
+              .select("GameID", "Date", "Level", "League", "HomeTeam")
+              .filter(pl.col("Level") == LEVEL, pl.col("HomeTeam").is_not_null())
+              .unique(subset=["GameID"], keep="first")
+              .with_columns(Year=pl.col("Date").str.slice(0, 4).cast(pl.Int32))
+              .group_by(pl.col("HomeTeam").alias("team"), "Year")
+              .agg(conf=pl.col("League").drop_nulls().mode().sort().first(), home_games=pl.len())
+              .collect(engine="streaming"))
+
+
+def p4_arms(raw: pl.DataFrame, home: pl.DataFrame) -> pl.DataFrame:
+    """P4S7: pid, Year, P4a for every pitcher-season, by the P4 hitters' rule. A pitcher is P4 when his most common
+    team plays its home games in a P4 conference that season; a team-season with fewer than MIN_HOME tracked home
+    games falls back to his own share of pitches in P4-conference games (>= P4_SHARE). ``raw`` needs pid, Year,
+    PitcherTeam and League; ``home`` is ``team_home_conf``."""
+    return (raw.with_columns(P4g=_is_p4_conf("League"))
+               .group_by("pid", "Year").agg(share=pl.col("P4g").mean(), team=pl.col("PitcherTeam").drop_nulls().mode().sort().first())
+               .join(home, on=["team", "Year"], how="left")
+               .select("pid", "Year", P4a=pl.when((pl.col("home_games") >= MIN_HOME).fill_null(False)).then(_is_p4_conf("conf"))
+                                            .otherwise(pl.col("share") >= P4_SHARE)))
 
 
 def _p4_hitters_table(years: list[str]) -> pl.DataFrame:
-    from backend.models import contact_quality as cq
     files = sorted(f for y in years for f in PIPELINE.glob(f"*/{y}/**/*.parquet"))
-    p4 = lambda c: (pl.col(c).is_in(cq.P4_LEAGUES) | ((pl.col(c) == "PAC12") & (pl.col("Year") <= PAC12_LAST))).fill_null(False)
+    p4 = _is_p4_conf
     sw = (pl.scan_parquet([str(f) for f in files])
             .select("PitchUID", "Date", "Level", "League", "BatterId", "BatterTeam", "HomeTeam", "GameID", "PitchCall")
             .filter(pl.col("Level") == LEVEL, pl.col("PitchCall").is_in(SWING_CALLS), pl.col("BatterId").is_not_null())
@@ -498,6 +547,7 @@ class StuffModel:
         self.points = None          # N_PROTO x 3 hitter prototypes (SKILL_COLS), shared by both views (P4S2)
         self.pop = {}               # view -> weights over the points: the D1 hitter mix / the P4 hitters' mix
         self.p4_fix = {}            # group -> raw value ("runs", "whiff_rhb", ...) -> frozen P4-view correction
+        self.p4_center = {}         # group -> raw value ("runs", ...) -> the mean that reads 100 in the P4 view (P4_CENTER)
         self.templates = None
         self.pid_map = None         # PitcherId -> pid of the training merge (re-scores reuse it)
 
@@ -592,37 +642,55 @@ class StuffModel:
     SIDE_COLS = [f"{name}_{s}" for _, name, _ in PLUS for s in SIDES]       # stuff_rhb, stuff_lhb, ..., contact_plus_lhb
     P4_COLS = [f"{name}_p4{'_' + s if s else ''}" for _, name, _ in PLUS for s in ("", *SIDES)]   # stuff_p4, stuff_p4_rhb, ...
 
-    def set_scale(self, P: pl.DataFrame, raw: pl.DataFrame, method: str = SCALE_METHOD):
-        """Freeze the per-group mean/SD that define 100 and 10 points (PR2: ``SCALE_METHOD``)."""
+    def set_scale(self, P: pl.DataFrame, raw: pl.DataFrame, method: str = SCALE_METHOD, arms: pl.DataFrame | None = None):
+        """Freeze the per-group mean/SD that define 100 and 10 points (PR2: ``SCALE_METHOD``) and, over the
+        same pitches or pitch types, the mean that reads 100 in the P4 view (``P4_CENTER``). ``arms`` is
+        ``p4_arms``; only ``P4_CENTER = "p4_arms"`` needs it."""
+        if P4_CENTER == "p4_arms" and arms is None:
+            raise ValueError('P4_CENTER = "p4_arms" needs arms (stuff_v1.p4_arms)')
+        raws = [c for c, _, _ in self.PLUS]
+        p4 = [f"{c}_p4" for c in raws]
         d = P.select("PitchUID", "pid", "Year", "group", "retag").join(raw, on="PitchUID")
+        if arms is not None:
+            d = d.join(arms, on=["pid", "Year"], how="left").with_columns(pl.col("P4a").fill_null(False))
+        else:
+            d = d.with_columns(P4a=pl.lit(False))
         if method == "per_pitch_type":
             d = (d.filter(pl.col("pid").is_not_null())
-                  .group_by("pid", "Year", "retag", "group").agg(pl.len().alias("n"), *[pl.col(c).mean() for c, _, _ in self.PLUS])
+                  .group_by("pid", "Year", "retag", "group", "P4a").agg(pl.len().alias("n"), *[pl.col(c).mean() for c in (*raws, *p4)])
                   .filter(pl.col("n") >= MIN_PT))
         for g in GROUPS:
             x = d.filter(pl.col("group") == g)
-            self.scale[g] = {c: (float(x[c].mean()), float(x[c].std())) for c, _, _ in self.PLUS}
-        self.meta["scale_method"] = method
+            self.scale[g] = {c: (float(x[c].mean()), float(x[c].std())) for c in raws}
+            rows = x.filter(pl.col("P4a")) if P4_CENTER == "p4_arms" else x
+            self.p4_center[g] = {c: self.scale[g][c][0] if P4_CENTER == "d1_mean" else float(rows[f"{c}_p4"].mean()) for c in raws}
+        self.meta["scale_method"], self.meta["p4_center"] = method, P4_CENTER
 
-    def unscale(self, grades: pl.DataFrame, scale: dict | None = None) -> pl.DataFrame:
-        """Saved grades (PitchUID, group, stuff, ...) -> PitchUID + the raw values they were scaled from
-        (runs, whiff, foul, contact). Exact, because each grade is linear in its raw value."""
-        scale = scale or self.scale
-        return grades.select("PitchUID", *[self._by_group(lambda g, c=c, n=n, h=h: scale[g][c][0] + (1 if h else -1)
-                                                          * (pl.col(n) - 100) * scale[g][c][1] / 10).alias(c)
-                                           for c, n, h in self.PLUS])
+    def _center(self, view: str, g: str, c: str) -> float:
+        """The raw value that reads 100 in a view."""
+        return self.p4_center[g][c] if view == "P4" else self.scale[g][c][0]
 
-    def remap(self, grades: pl.DataFrame, old_scale: dict) -> pl.DataFrame:
-        """Saved grades made on ``old_scale`` -> the same grades on this model's scale, blends and platoon
-        splits alike, without re-grading: recover each raw value, then scale it again."""
+    def unscale(self, grades: pl.DataFrame) -> pl.DataFrame:
+        """Saved grades (PitchUID, group, stuff, stuff_p4, ...) -> PitchUID + the raw values they were scaled from
+        (runs, whiff, foul, contact, and the same with ``_p4``). Exact, because each grade is linear in its raw value."""
+        return grades.select("PitchUID", *[
+            self._by_group(lambda g, c=c, n=n, h=h, v=v, suf=suf: self._center(v, g, c) + (1 if h else -1)
+                           * (pl.col(n + suf) - 100) * self.scale[g][c][1] / 10).alias(c + suf)
+            for c, n, h in self.PLUS for v, suf in VIEWS.items()])
+
+    def remap(self, grades: pl.DataFrame, old_scale: dict, old_center: dict) -> pl.DataFrame:
+        """Saved grades made on ``old_scale`` and ``old_center`` -> the same grades on this model's scale, both
+        views, blends and platoon splits alike, without re-grading: recover each raw value, then scale it again."""
         exprs = []
         for c, name, higher in self.PLUS:
             s = 1 if higher else -1
-            for col in [f"{name}{view}{'_' + x if x else ''}" for view in VIEWS.values() for x in ("", *SIDES)]:
-                if col in grades.columns:
-                    exprs.append(self._by_group(lambda g, c=c, col=col, s=s: 100 + 10 * s * (
-                        old_scale[g][c][0] + s * (pl.col(col) - 100) * old_scale[g][c][1] / 10 - self.scale[g][c][0])
-                        / self.scale[g][c][1]).cast(grades.schema[col]).alias(col))
+            for v, suf in VIEWS.items():
+                old_mu = {g: old_center[g][c] if v == "P4" else old_scale[g][c][0] for g in GROUPS}
+                for col in [f"{name}{suf}{'_' + x if x else ''}" for x in ("", *SIDES)]:
+                    if col in grades.columns:
+                        exprs.append(self._by_group(lambda g, c=c, col=col, s=s, v=v, old_mu=old_mu: 100 + 10 * s * (
+                            old_mu[g] + s * (pl.col(col) - 100) * old_scale[g][c][1] / 10 - self._center(v, g, c))
+                            / self.scale[g][c][1]).cast(grades.schema[col]).alias(col))
         return grades.with_columns(exprs)
 
     @staticmethod
@@ -642,11 +710,13 @@ class StuffModel:
         raw = raw.join(P.select("PitchUID", "group"), on="PitchUID")
         exprs = []
         for c, name, higher in self.PLUS:
-            mu = pl.col("group").replace_strict({g: self.scale[g][c][0] for g in GROUPS}, default=None)
             sd = pl.col("group").replace_strict({g: self.scale[g][c][1] for g in GROUPS}, default=None)
-            # the splits and the P4 view all use the blended D1 grade's scale (P4S7: the P4 view reads as a shift)
-            for suf in [f"{view}{'_' + s if s else ''}" for view in VIEWS.values() for s in ("", *SIDES)]:
-                exprs.append((100 + 10 * (1 if higher else -1) * (pl.col(c + suf) - mu) / sd).alias(name + suf))
+            # each view's splits use that view's blended center, so a vs-RHB 110 and a blended 110 mean the same;
+            # every grade uses the D1 SD, so a point means the same in both views (P4S7)
+            for v, view in VIEWS.items():
+                mu = pl.col("group").replace_strict({g: self._center(v, g, c) for g in GROUPS}, default=None)
+                for suf in [f"{view}{'_' + s if s else ''}" for s in ("", *SIDES)]:
+                    exprs.append((100 + 10 * (1 if higher else -1) * (pl.col(c + suf) - mu) / sd).alias(name + suf))
         return (raw.with_columns(exprs)
                    .with_columns(*[(-100 * pl.col(f"d_{p}")).alias(f"saved_{p}") for p in PIECES])
                    .select("PitchUID", "stuff", "whiff_plus", "foul_plus", "contact_plus", "runs",
@@ -669,7 +739,8 @@ class StuffModel:
                        "points": np.asarray(self.points).tolist(), "pop": {v: np.asarray(w).tolist() for v, w in self.pop.items()},
                        "p4_fix": self.p4_fix,
                        "avg_pieces": {g: [a.tolist() for a in v] for g, v in self.avg_pieces.items()},
-                       "scale": self.scale, "templates": self.templates.to_dict(), "meta": self.meta}, f, indent=1)
+                       "scale": self.scale, "p4_center": self.p4_center,
+                       "templates": self.templates.to_dict(), "meta": self.meta}, f, indent=1)
         return base
 
     @classmethod
@@ -688,6 +759,8 @@ class StuffModel:
         m.prices = tuple(np.array(a) for a in cfg["prices"])
         m.points, m.pop, m.p4_fix = np.array(cfg["points"]), {v: np.array(w) for v, w in cfg["pop"].items()}, cfg["p4_fix"]
         m.scale, m.meta = {g: {c: tuple(v) for c, v in s.items()} for g, s in cfg["scale"].items()}, cfg["meta"]
+        # a model saved before P4_CENTER existed: its P4 grades are on the D1 mean, until --rescale re-maps them
+        m.p4_center = cfg.get("p4_center") or {g: {c: v[0] for c, v in s.items()} for g, s in m.scale.items()}
         m.avg_pieces = {g: [np.array(a) for a in v] for g, v in cfg["avg_pieces"].items()}
         m.templates = pg.Templates.from_dict(cfg["templates"])
         pids = base.with_name(base.name + "_pids.parquet")
@@ -793,11 +866,13 @@ def train(years: list[str] | None = None, fraction: float = 1.0) -> tuple[StuffM
     years = years or available_years()
     p4 = p4_hitters(years)
     _log(f"P4 hitters: {p4.height:,} hitter-seasons, {p4['P4h'].sum():,} P4", t0)
+    home = team_home_conf(years)
     raw = load_pitches(years)
     _log(f"loaded {raw.height:,} pitches, {years[0]}-{years[-1]}", t0)
     raw, merged = merge_pitcher_ids(raw)
     pid_map = raw.select("PitcherId", "pid").unique("PitcherId").sort("PitcherId")
-    _log(f"pitcher ids merged: {merged}", t0)
+    arms = p4_arms(raw, home)
+    _log(f"pitcher ids merged: {merged}; {arms['P4a'].sum():,} of {arms.height:,} pitcher-seasons P4", t0)
     if fraction < 1:                         # smoke test: a slice of pitchers (tagging included)
         raw = raw.filter((pl.col("pid").hash(SEED) % 10_000) < int(fraction * 10_000))
     raw, templates = add_labels(raw)
@@ -852,7 +927,7 @@ def train(years: list[str] | None = None, fraction: float = 1.0) -> tuple[StuffM
         _log(f"graded {min(a + GRADE_CHUNK, P.height):,} of {P.height:,} pitches", t0)
     raw_g = pl.concat(parts)
     del parts
-    model.set_scale(P, raw_g)
+    model.set_scale(P, raw_g, arms=arms)
     grades = model.apply_scale(raw_g, P)
     del raw_g
     _log(f"graded {grades.height:,} pitches (both views)", t0)

@@ -588,11 +588,13 @@ def _with_eye(df: pl.DataFrame, sel_level: str = ALL) -> pl.DataFrame:
 # A grade doesn't depend on the count, batter or result (it's graded against a mix of hitters across all
 # 24 count x side contexts), so the report's filters change which pitches are averaged, not a grade.
 # The same four grades vs RHB / vs LHB only (StuffRHB, ..., ContactPlusLHB) are the platoon splits.
-# Every pitch has two views (stuff_v1 v1.1): graded against P4 hitters (``*_p4``) or against all D1 hitters,
-# both on the D1 scale (100 = the average D1 pitch type vs D1 hitters). STUFF_VIEW picks the one the whole
-# site shows under the plain names (Stuff, WhiffPlus, ...); a toggle can flip it later.
+# Every pitch has two views (stuff_v1 v1.1): graded against P4 hitters (``*_p4``) or against all D1 hitters.
+# 100 is the average P4 arm's pitch type vs P4 hitters in the first and the average D1 pitch type vs D1 hitters in the
+# second, and a point means the same in both (stuff_v1.P4_CENTER). STUFF_VIEW picks the one the whole site shows
+# under the plain names (Stuff, WhiffPlus, ...); a toggle can flip it later.
 STUFF_VIEW = "P4"
 STUFF_VIEW_LABEL = {"P4": "vs P4 hitters", "D1": "vs D1 hitters"}
+STUFF_100 = {"P4": "the average P4 arm's pitch", "D1": "the average D1 pitch"}     # what 100 means in each view
 _STUFF_BASE = {"stuff": "Stuff", "whiff_plus": "WhiffPlus", "foul_plus": "FoulPlus", "contact_plus": "ContactPlus"}
 STUFF_COLS = {**_STUFF_BASE, **{f"{k}_{s}": f"{v}{s.upper()}" for s in ("rhb", "lhb") for k, v in _STUFF_BASE.items()}}
 _STUFF_RAW = ["PitchUID", "GameID", "PitcherId", "Pitcher", "PitcherThrows", "PitcherTeam", "TaggedPitchType",

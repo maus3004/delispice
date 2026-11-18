@@ -168,6 +168,28 @@ Run that once at deploy, and again whenever a season's data grows (new games) â€
 retraining refreshes the model's reference set. Reports render fine without
 artifacts; the xRV cells are just blank until the level+year is trained.
 
+## Sign-in and tab access
+
+The site has one owner, who signs in and sees every tab. Everyone else is a guest and sees only the guest
+tabs (`delispice_app/auth.py`). Until you pick them, guests see the standard tabs on the tab bar, and the
+machine-local tabs (USC, MAC) and the retired ones are closed to them.
+
+```bash
+cd ~/delispice                                                    # as your own user, never sudo
+.venv/bin/python -m delispice_app.auth owner matt                 # set the username + password (asks twice)
+.venv/bin/python -m delispice_app.auth guests about season game   # the tabs guests see
+.venv/bin/python -m delispice_app.auth guests --none              # guests see nothing: sign-in only
+.venv/bin/python -m delispice_app.auth guests --default           # back to the standard tabs
+.venv/bin/python -m delispice_app.auth show                       # owner, every tab, and what guests see
+```
+
+- The owner, the hashed password and the guest tabs live in `delispice_app/state/auth.json`; the cookie key
+  is `state/auth_secret`. Both are machine-local and git-ignored. Changes apply at once, with no restart.
+- Running `owner` again (new password or new name) signs every browser out. So does deleting `auth_secret`
+  and restarting.
+- `DELISPICE_AUTH=off` turns sign-in off. The desktop launcher sets it; never set it on the server.
+- A new tab's panel must be listed in `TAB_BLOCKS` in `app.py`, or the app refuses to start.
+
 ## Updating after you push new code
 
 ```bash

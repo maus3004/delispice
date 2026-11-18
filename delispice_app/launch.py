@@ -19,7 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # ensure repo roo
 
 import webview                                                  # noqa: E402
 
-from delispice_app.app import app                                 # noqa: E402  (import builds the index once)
+os.environ.setdefault("DELISPICE_AUTH", "off")                  # desktop window: one person on their own machine, no sign-in
+
+from delispice_app.app import app                                # noqa: E402  (import builds the index once)
 
 HOST = "127.0.0.1"
 

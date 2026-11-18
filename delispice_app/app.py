@@ -26,7 +26,7 @@ import plotly.graph_objects as go
 from dash import ALL as ALLPM, Dash, Input, Output, Patch, State, ctx, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
-from . import data, game_report, leaderboard, pitch_by_pitch, pitch_lab, report, scouting
+from . import auth, data, game_report, leaderboard, pitch_by_pitch, pitch_lab, report, scouting
 
 # Machine-local tabs: delispice_app/local_tabs.py is untracked, so a machine without it (the server) runs
 # without them. It provides TABS [(label, value)] and panels(app_module) -> [panel], which also registers
@@ -493,13 +493,21 @@ def _dropdown(did, options, value, width=None):
 RETIRED_TABS = {"lookup", "shortlist"}
 # Season Reports holds the pitcher and batter reports (one tab each until 2026-11-02); its own toggle picks
 # which, and the `role` store carries that pick to every role-aware callback (cb_role).
-_TABS = [("About", "about"), ("Lookup", "lookup"), ("Season Reports", "season"),
-         ("Game Reports", "game"), ("Pitch Lab", "lab"), ("Shortlist", "shortlist")]
-_TABS = [(label, value) for label, value in _TABS if value not in RETIRED_TABS]
-_TABS += local_tabs.TABS if local_tabs else []
-role_tabs = dcc.Tabs(id="role-tabs", value="about", style={"width": f"{125 * len(_TABS)}px", "marginBottom": "10px"},
-                     colors={"primary": MAROON, "background": "#faf7f7", "border": "#e2c9cc"},
-                     children=[dcc.Tab(label=label, value=value) for label, value in _TABS])
+_CORE_TABS = [("About", "about"), ("Lookup", "lookup"), ("Season Reports", "season"),
+              ("Game Reports", "game"), ("Pitch Lab", "lab"), ("Shortlist", "shortlist")]
+_LOCAL_TABS = local_tabs.TABS if local_tabs else []
+_TABS = [(label, value) for label, value in _CORE_TABS if value not in RETIRED_TABS] + _LOCAL_TABS
+
+
+def _tab_bar(tabs):
+    """The tab bar holding ``tabs`` [(label, value)]. _page() builds one per visitor, from the tabs they may open."""
+    first = "about" if not tabs or any(value == "about" for _, value in tabs) else tabs[0][1]
+    return dcc.Tabs(id="role-tabs", value=first, style={"width": f"{125 * len(tabs)}px", "marginBottom": "10px"},
+                    colors={"primary": MAROON, "background": "#faf7f7", "border": "#e2c9cc"},
+                    children=[dcc.Tab(label=label, value=value) for label, value in tabs])
+
+
+role_tabs = _tab_bar(_TABS)
 
 # Run-Expectancy (xRV) model picker. "Auto" scores each ball against its own (level, year) model;
 # any explicit pick re-scores every ball against that one trained RE matrix. Only (level, year) pairs
@@ -2030,15 +2038,44 @@ lab_panel = html.Div(id="lab-panel", style={"display": "none"}, children=[
 
 local_panels = local_tabs.panels(sys.modules[__name__]) if local_tabs else []   # this module, as __main__ or not
 
-app.layout = html.Div([dcc.Store(id="retag-version", data=0),
-                       dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
-                       dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
-                       dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"),
-                       dcc.Store(id="role", data="about"),      # "pitcher" / "batter" on Season Reports (cb_role)
-                       selection,
-                       html.Div([about_panel, lookup_panel, shortlist_panel, pitcher_report,
-                                 batter_report, game_panel, lab_panel, *local_panels], style={"padding": "12px 16px"})],
+# Stores that only Season Reports' callbacks use. They sit in a block of their own, so the page of a visitor
+# without that tab carries none of them.
+season_stores = html.Div(id="season-stores", children=[
+    dcc.Store(id="retag-version", data=0),
+    dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
+    dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
+    dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"),
+    dcc.Store(id="role", data="about")])                 # "pitcher" / "batter" on Season Reports (cb_role)
+_PANELS = [about_panel, lookup_panel, shortlist_panel, pitcher_report, batter_report, game_panel, lab_panel,
+           *local_panels]
+_FULL_PAGE = html.Div([season_stores, selection, html.Div(_PANELS, style={"padding": "12px 16px"})],
                       style={"fontFamily": FONT})
+
+# ── Sign-in and per-tab access (auth.py) ─────────────────────────────────────────────────────────
+# Which tab each block of the page belongs to. auth.py reads this twice: to leave a closed tab's contents out
+# of the page, and to refuse its callbacks. Every component must sit inside one of these blocks (the tab bar
+# is the one exception), so a new tab needs its panel listed here; a local tab's panel is "<value>-panel".
+TAB_BLOCKS = {"about-panel": "about", "lookup-panel": "lookup", "shortlist-panel": "shortlist",
+              "season-stores": "season", "picker-controls": "season", "report": "season", "batter-report": "season",
+              "gr-controls": "game", "game-panel": "game", "lab-panel": "lab",
+              **{f"{value}-panel": value for _, value in _LOCAL_TABS}}
+if _unplaced := [p.id for p in _PANELS if p.id not in TAB_BLOCKS]:
+    raise RuntimeError(f"These panels aren't assigned to a tab in TAB_BLOCKS, so anyone could open them: {_unplaced}")
+# Guests get the standard tabs on the bar until `python -m delispice_app.auth guests ...` picks others. The owner
+# gets every tab, the retired ones included.
+auth.setup(app, layout=_FULL_PAGE, blocks=TAB_BLOCKS, shared={"role-tabs"},
+           guests=[value for _, value in _CORE_TABS if value not in RETIRED_TABS],
+           tabs=_CORE_TABS + _LOCAL_TABS, retired=RETIRED_TABS)
+
+
+def _page():
+    """The page for whoever is asking: their tabs on the bar, and only their tabs' contents underneath."""
+    allowed = auth.allowed_tabs()                         # None = every tab (auth off, or the owner)
+    bar = _tab_bar([t for t in _TABS if allowed is None or t[1] in allowed])
+    return html.Div([auth.badge(), auth.prune(_FULL_PAGE, allowed, swap={"role-tabs": bar})], style={"fontFamily": FONT})
+
+
+app.layout = _page
 
 
 # ── Season Reports: which report the shared picker serves ────────────────────────────────────────

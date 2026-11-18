@@ -2072,7 +2072,9 @@ def _page():
     """The page for whoever is asking: their tabs on the bar, and only their tabs' contents underneath."""
     allowed = auth.allowed_tabs()                         # None = every tab (auth off, or the owner)
     bar = _tab_bar([t for t in _TABS if allowed is None or t[1] in allowed])
-    return html.Div([auth.badge(), auth.prune(_FULL_PAGE, allowed, swap={"role-tabs": bar})], style={"fontFamily": FONT})
+    # The sign-in line sits on the same light-red band as the tab bar (`selection`), so the top reads as one strip.
+    badge = auth.badge(style={"background": "#faf7f7", "padding": "6px 16px 0"})
+    return html.Div([badge, auth.prune(_FULL_PAGE, allowed, swap={"role-tabs": bar})], style={"fontFamily": FONT})
 
 
 app.layout = _page

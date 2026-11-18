@@ -209,15 +209,16 @@ def prune(node, allowed, swap=None):
     return go(node)
 
 
-def badge():
-    """The small sign-in line across the top of the page. None when auth is off."""
+def badge(style=None):
+    """The small sign-in line across the top of the page, with ``style`` laid over its own. None when auth is off."""
     if not ENABLED:
         return None
     link = {"color": "#8a1520", "textDecoration": "none"}
     user = current_user()
     line = ([f"Signed in as {user} · ", html.A("Sign out", href="/logout", style=link)] if user
             else [html.A("Sign in", href="/login", style=link)])
-    return html.Div(line, style={"textAlign": "right", "padding": "4px 16px 0", "fontSize": "12px", "color": "#666"})
+    return html.Div(line, style={"textAlign": "right", "padding": "4px 16px 0", "fontSize": "12px", "color": "#666",
+                                 **(style or {})})
 
 
 # ── The Flask side: session cookie, /login, /logout, and the gate in front of every callback ─────

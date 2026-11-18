@@ -1,5 +1,7 @@
 # Game Reports: decisions
 
+> **2026-11-17:** Game Reports is no longer its own tab. Season reports, game reports and uploaded files share one **Reports** tab, with every filter in a sidebar on the left that folds away (the user's pick of three layouts). The sidebar's **Report on** (Season / Game / Upload a file) replaces this tab's "Data" toggle, and **For** (Pitcher / Batter) replaces "Report for"; both set the old controls (`gr-source`, `gr-role`), which now sit hidden, so everything below still holds. The report itself is unchanged.
+
 A new **Game Reports** tab: pick a player and one of their games, and see that player's report for the game (a pitcher's outing or a batter's game). This file records each decision before we build, one question at a time. Nothing is built yet.
 
 Context (2026-10-16): Lookup and Shortlist are retired from the tab bar (`RETIRED_TABS` in `app.py`). Their code is kept, so either can come back by removing it from that set.

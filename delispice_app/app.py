@@ -1,7 +1,7 @@
 """Dash UI for delispice_app (pitcher/batter reports) — a single Python program, no external API.
 
-The Season Reports tab's Pitcher / Batter toggle switches what the shared cascading picker looks up and
-which report renders below:
+The Reports tab's filter sidebar picks the source (Season, Game or Upload a file) and Pitcher / Batter. For
+season reports, Pitcher / Batter switches what the shared cascading picker looks up and which report renders:
   * Pitcher — summary, Batter + Count split checkboxes that drive the arsenal table AND the location
     heatmap, plus movement / heatmap / velocity charts.
   * Batter — batting-line summary + a spray chart (a starting scaffold; more tables/charts to come).
@@ -491,10 +491,12 @@ def _dropdown(did, options, value, width=None):
 # Retired tabs are off the tab bar, but their panels and callbacks stay in the code (hidden), so
 # bringing one back is removing it from this set. Lookup and Shortlist retired 2026-10-16.
 RETIRED_TABS = {"lookup", "shortlist"}
-# Season Reports holds the pitcher and batter reports (one tab each until 2026-11-02); its own toggle picks
-# which, and the `role` store carries that pick to every role-aware callback (cb_role).
-_CORE_TABS = [("About", "about"), ("Lookup", "lookup"), ("Season Reports", "season"),
-              ("Game Reports", "game"), ("Pitch Lab", "lab"), ("Shortlist", "shortlist")]
+# Reports holds the season reports (pitcher and batter), the game reports and uploaded files, one tab since
+# 2026-11-17 (Season Reports and Game Reports before). Its sidebar's "Report on" and "For" pick which, and the
+# `role` store carries that pick to every role-aware callback (cb_role).
+_CORE_TABS = [("About", "about"), ("Lookup", "lookup"), ("Reports", "reports"), ("Pitch Lab", "lab"),
+              ("Shortlist", "shortlist")]
+RENAMED_TABS = {"season": "reports", "game": "reports"}   # old tab names a saved guest list may still use
 _LOCAL_TABS = local_tabs.TABS if local_tabs else []
 _TABS = [(label, value) for label, value in _CORE_TABS if value not in RETIRED_TABS] + _LOCAL_TABS
 
@@ -555,9 +557,6 @@ def _re_env_control(prefix):
     ])
 
 
-# Game Reports picker (game_report_decisions.md §2): Level -> Conference -> Team -> date -> player. Its own
-# controls, because the player tabs' Year checkboxes don't apply here: the typed date (or date range) picks
-# the season and narrows the player list to who played then.
 def _date_field(did):
     # Dash's picker draws a white box as wide as its container, so the fixed width goes on a wrapper.
     return html.Div(dcc.DatePickerSingle(id=did, display_format="MM/DD/YYYY", placeholder="MM/DD/YYYY",
@@ -566,83 +565,114 @@ def _date_field(did):
 
 
 _GR_RADIO = {"fontFamily": FONT, "fontSize": "13px", "display": "inline-block"}
-_SCOPE_ROW = {"display": "flex", "gap": "18px", "flexWrap": "wrap", "alignItems": "center"}
 _UPLOAD_BOX = {"width": "460px", "padding": "10px", "border": f"1px dashed {MAROON}", "borderRadius": "4px",
                "textAlign": "center", "fontSize": "13px", "fontFamily": FONT, "background": "#fff", "cursor": "pointer"}
-gr_controls = html.Div(id="gr-controls", style={"display": "none"}, children=[
+# ── Reports tab: the filter sidebar ──────────────────────────────────────────────────────────────
+# Season reports, game reports and uploaded files share one tab. Their filters sit in a sidebar on the left that
+# folds to a thin rail (the report then gets the whole width); the report fills the rest. "Report on" picks the
+# source and "For" picks Pitcher / Batter. Both fan out (cb_rp_role, cb_rp_source) to the controls the reports
+# have always read, sr-role for the season picker and gr-role / gr-source for the game picker, which now sit
+# hidden, so every report callback keeps its inputs.
+_HIDDEN = {"display": "none"}
+_PITCHER_BATTER = [{"label": "Pitcher", "value": "pitcher"}, {"label": "Batter", "value": "batter"}]
+_LEVEL_OPTS = [{"label": ALL, "value": ALL}] + [{"label": l, "value": l} for l in data.levels()]
+_SIDE_W = 250
+_SIDE_OPEN = {"flex": f"0 0 {_SIDE_W}px", "width": f"{_SIDE_W}px", "boxSizing": "border-box", "padding": "10px 12px 14px",
+              "background": "#faf7f7", "border": "1px solid #e2c9cc", "borderRadius": "6px", "fontFamily": FONT}
+_SIDE_FOLDED = {**_SIDE_OPEN, "flex": "0 0 34px", "width": "34px", "padding": "8px 0"}
+_SIDE_BTN = {"fontSize": "12px", "cursor": "pointer", "padding": "2px 8px", "color": MAROON, "background": "#fff",
+             "border": "1px solid #e2c9cc", "borderRadius": "4px", "fontFamily": FONT}
+
+
+def _field(label, control, label_id=None):
+    """One sidebar filter: its label on a line of its own, the control full width under it."""
+    head = {"style": {**LABEL, "marginBottom": "3px"}, **({"id": label_id} if label_id else {})}
+    return html.Div([html.Div(label, **head), control], style={"marginTop": "10px"})
+
+
+def _side_dd(did, options, value):
+    return _dropdown(did, options, value, width="100%")
+
+
+def _player_dd(did):
+    return dcc.Dropdown(id=did, options=[], value=None, placeholder="Type a name to search…",
+                        style={"width": "100%", "fontSize": "13px"})
+
+
+# Game reports and uploads (game_report_decisions.md §2): Level -> Conference -> Team -> date -> player. Their own
+# controls, because the season picker's Year checkboxes don't apply here: the typed date (or date range) picks
+# the season and narrows the player list to who played then.
+gr_controls = html.Div(id="gr-controls", style=_HIDDEN, children=[
     dcc.Store(id="gr-upload-id", storage_type="memory"),     # this browser session's upload (kept server-side)
-    html.Div([html.Span("Report for", style=LABEL),
-              dcc.RadioItems(id="gr-role", value="pitcher", inline=True, style=_GR_RADIO,
-                             inputStyle={"marginRight": "4px", "marginLeft": "10px"},
-                             options=[{"label": "Pitcher", "value": "pitcher"}, {"label": "Batter", "value": "batter"}]),
-              html.Span("Data", style={**LABEL, "marginLeft": "24px"}),
-              dcc.RadioItems(id="gr-source", value="data", inline=True, style=_GR_RADIO,
-                             inputStyle={"marginRight": "4px", "marginLeft": "10px"},
-                             options=[{"label": "Database games", "value": "data"},
-                                      {"label": "Upload a file", "value": "upload"}])],
-             style={"marginBottom": "8px"}),
+    html.Div([dcc.RadioItems(id="gr-role", value="pitcher", options=_PITCHER_BATTER),        # set by "For"
+              dcc.RadioItems(id="gr-source", value="data", options=[{"label": "Database games", "value": "data"},
+                                                                   {"label": "Upload a file", "value": "upload"}])],
+             style=_HIDDEN),                                                                # set by "Report on"
     # Upload (game_report_decisions.md §3): kept for this browser session only, never saved or shared.
-    html.Div(id="gr-upload-wrap", style={"display": "none"}, children=[
+    html.Div(id="gr-upload-wrap", style=_HIDDEN, children=[
         dcc.Upload(id="gr-upload", accept=".csv,.parquet", multiple=False, max_size=game_report.UPLOAD_MAX_BYTES,
-                   style=_UPLOAD_BOX,
+                   style={**_UPLOAD_BOX, "width": "100%", "boxSizing": "border-box"},
                    children=html.Div(["Drag a TrackMan CSV or parquet file here, or ", html.A("choose one"),
                                       html.Div(f"Up to {game_report.UPLOAD_MAX_MB} MB · kept only for this "
                                                "browser session", style={"color": "#888", "fontSize": "11px"})])),
-        html.Div(id="gr-upload-info", style={"fontSize": "12px", "marginTop": "6px", "maxWidth": "900px"}),
+        html.Div(id="gr-upload-info", style={"fontSize": "12px", "marginTop": "6px"}),
     ]),
     html.Div(id="gr-scope-row", children=[
-        html.Div([html.Span("Level", style=LABEL),
-                  _dropdown("gr-level", [{"label": ALL, "value": ALL}] + [{"label": l, "value": l} for l in data.levels()], _default_level)]),
-        html.Div([html.Span("Conference", style=LABEL), _dropdown("gr-conf", [{"label": ALL, "value": ALL}], ALL, width="150px")]),
-        html.Div([html.Span("Team", style=LABEL), _dropdown("gr-team", [{"label": ALL, "value": ALL}], ALL, width="320px")]),
-    ], style=_SCOPE_ROW),
-    html.Div([html.Span("Start", style=LABEL), _date_field("gr-start"),
-              html.Span("End (optional)", style={**LABEL, "marginLeft": "14px"}), _date_field("gr-end")],
-             style={"marginTop": "10px", "display": "flex", "alignItems": "center", "gap": "4px", "flexWrap": "wrap"}),
-    html.Div([html.Span("Pitcher", id="gr-player-label", style=LABEL),
-              dcc.Dropdown(id="gr-player", options=[], value=None, placeholder="Type a name to search…",
-                           style={"width": "460px", "fontSize": "13px"})],
-             style={"marginTop": "10px", "display": "flex", "alignItems": "center"}),
+        _field("Level", _side_dd("gr-level", _LEVEL_OPTS, _default_level)),
+        _field("Conference", _side_dd("gr-conf", [{"label": ALL, "value": ALL}], ALL)),
+        _field("Team", _side_dd("gr-team", [{"label": ALL, "value": ALL}], ALL)),
+    ]),
+    _field("Start", _date_field("gr-start")),
+    _field("End (optional)", _date_field("gr-end")),
+    _field("Pitcher", _player_dd("gr-player"), label_id="gr-player-label"),
     # Shown only when the name belongs to more than one TrackMan player ("Lynch, Ryan" is three).
-    html.Div(id="gr-pid-wrap", style={"display": "none"}, children=[
+    html.Div(id="gr-pid-wrap", style=_HIDDEN, children=[
         html.Span("Which player?", style=LABEL),
         dcc.RadioItems(id="gr-pid", options=[], value=None, inputStyle={"marginRight": "6px"},
                        style={"fontFamily": FONT, "fontSize": "13px", "marginTop": "4px"})]),
     # Shown only for a single date with two games (a doubleheader): G1, G2 or both.
-    html.Div(id="gr-dh-wrap", style={"display": "none"}, children=[
+    html.Div(id="gr-dh-wrap", style=_HIDDEN, children=[
         html.Span("Game", style=LABEL),
         dcc.RadioItems(id="gr-dh", options=[], value=None, inline=True, style=_GR_RADIO,
                        inputStyle={"marginRight": "4px", "marginLeft": "10px"})]),
     html.Div(id="gr-status", style={"color": "#666", "fontSize": "12px", "marginTop": "10px"}),
 ])
 
+# Season reports: Year(s) -> Level -> Conference -> Team -> player.
+season_controls = html.Div(id="picker-controls", children=[
+    dcc.RadioItems(id="sr-role", value="pitcher", options=_PITCHER_BATTER, style=_HIDDEN),      # set by "For"
+    _field(["Year(s) ", html.Span("none = all years", style={"color": "#888", "fontSize": "11px", "fontWeight": 400})],
+           _checklist("year-check", data.years())),
+    _field("Level", _side_dd("level-dd", _LEVEL_OPTS, _default_level)),
+    _field("Conference", _side_dd("conf-dd", [{"label": ALL, "value": ALL}], ALL)),
+    _field("Team", _side_dd("team-dd", [{"label": ALL, "value": ALL}], ALL)),
+    _field("Pitcher", _player_dd("player-dd"), label_id="player-label"),
+    html.Div(html.Span(id="pick-status", style={"color": "#666", "fontSize": "12px"}), style={"marginTop": "10px"}),
+])
 
-selection = html.Div([
-    role_tabs,
-    html.Div(id="picker-controls", style={"display": "none"}, children=[
-    html.Div([html.Span("Report for", style=LABEL),
-              dcc.RadioItems(id="sr-role", value="pitcher", inline=True, style=_GR_RADIO,
-                             inputStyle={"marginRight": "4px", "marginLeft": "10px"},
-                             options=[{"label": "Pitcher", "value": "pitcher"}, {"label": "Batter", "value": "batter"}])],
-             style={"marginBottom": "8px"}),
-    html.Div([html.Span("Year(s):", style=LABEL), _checklist("year-check", data.years()),
-              html.Span("  (none = All years)", style={"color": "#888", "fontSize": "12px"})],
-             style={"marginBottom": "8px"}),
-    html.Div([
-        html.Div([html.Span("Level", style=LABEL),
-                  _dropdown("level-dd", [{"label": ALL, "value": ALL}] + [{"label": l, "value": l} for l in data.levels()], _default_level)]),
-        html.Div([html.Span("Conference", style=LABEL), _dropdown("conf-dd", [{"label": ALL, "value": ALL}], ALL, width="150px")]),
-        html.Div([html.Span("Team", style=LABEL), _dropdown("team-dd", [{"label": ALL, "value": ALL}], ALL, width="320px")]),
-    ], style={"display": "flex", "gap": "18px", "flexWrap": "wrap", "alignItems": "center"}),
-    html.Div([html.Span("Pitcher", id="player-label", style=LABEL),
-              dcc.Dropdown(id="player-dd", options=[], value=None, placeholder="Type a name to search…",
-                           style={"width": "460px", "fontSize": "13px"})],
-             style={"marginTop": "10px", "display": "flex", "alignItems": "center"}),
-    html.Div([html.Span(id="pick-status", style={"color": "#666", "fontSize": "12px"})],
-             style={"marginTop": "10px"}),
+reports_sidebar = html.Div(id="rp-side-wrap", style=_SIDE_OPEN, children=[
+    dcc.Store(id="rp-side", data=True, storage_type="local"),   # open or folded, remembered by this browser
+    html.Div(id="rp-side-head", style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"},
+             children=[html.Span("Filters", id="rp-side-title", style={"fontWeight": 700, "fontSize": "14px", "color": MAROON}),
+                       html.Button("‹ Hide", id="rp-side-btn", n_clicks=0, title="Hide the filters", style=_SIDE_BTN)]),
+    html.Div(id="rp-side-body", children=[
+        _field("Report on", dcc.RadioItems(
+            id="rp-source", value="season", inputStyle={"marginRight": "6px"},
+            labelStyle={"display": "block", "marginBottom": "2px"}, style={"fontFamily": FONT, "fontSize": "13px"},
+            options=[{"label": "Season", "value": "season"}, {"label": "Game", "value": "game"},
+                     {"label": "Upload a file", "value": "upload"}])),
+        _field("For", dcc.RadioItems(id="rp-role", value="pitcher", options=_PITCHER_BATTER, inline=True,
+                                     inputStyle={"marginRight": "4px"}, labelStyle={"marginRight": "14px"},
+                                     style={"fontFamily": FONT, "fontSize": "13px"})),
+        html.Hr(style={"border": 0, "borderTop": "1px solid #e2c9cc", "margin": "12px 0 0"}),
+        season_controls,
+        gr_controls,
     ]),
-    gr_controls,
-], style={"padding": "14px 16px", "background": "#faf7f7", "borderBottom": f"2px solid {MAROON}"})
+])
+
+# The band under the page header: just the tab bar (each tab carries its own controls).
+selection = html.Div([role_tabs], style={"padding": "14px 16px", "background": "#faf7f7",
+                                         "borderBottom": f"2px solid {MAROON}"})
 
 def _splits_label(batter, count):
     """Summary text for the collapsed splits control — shows the active split so a filter stays
@@ -816,9 +846,9 @@ about_panel = html.Div(id="about-panel", style={"padding": "8px 4px"}, children=
             "gap":"12px",
         },
     ),
-    html.P(["Open ", html.B("Season Reports"), " above and pick ", html.B("Pitcher"), " or ", html.B("Batter"),
-            " to begin. Filter by year, level, conference, and team, then choose a "
-            "player to build their report."],
+    html.P(["Open ", html.B("Reports"), " above. In the filters on the left, pick ", html.B("Season"), ", ",
+            html.B("Game"), " or ", html.B("Upload a file"), " and ", html.B("Pitcher"), " or ", html.B("Batter"),
+            ", narrow by year or date, level, conference, and team, then choose a player to build their report."],
            style={"fontFamily": FONT, "fontSize": "14px", "maxWidth": "680px", "lineHeight": "1.5"}),
 
     *([] if "shortlist" in RETIRED_TABS else [html.P(
@@ -1785,7 +1815,7 @@ gr_retag_panel = html.Details(open=False, style={"margin": "6px 0", "background"
                   html.Button("Revert this game", id="gr-revert-game", n_clicks=0, style=_BTN),
                   html.Button("Revert this pitcher", id="gr-revert-pitcher", n_clicks=0, style=_BTN)],
                  style=_ROW),
-        html.Div("Retags are saved for everyone and shared with Season Reports; TrackMan's data itself is "
+        html.Div("Retags are saved for everyone and shared with season reports; TrackMan's data itself is "
                  "never changed, and reverting brings the original pitch types back. Pitches from unverified "
                  "games can't be retagged (their IDs can change when the verified file arrives).",
                  style={"fontSize": "11px", "color": "#888", "marginBottom": "4px"}),
@@ -1966,7 +1996,7 @@ def _pl_help():
         html.Summary("How the Pitch Lab grades", style={"cursor": "pointer", "fontWeight": 600, "fontSize": "13px",
                                                         "fontFamily": FONT, "padding": "6px 0"}),
         html.Ul(style={"fontFamily": FONT, "fontSize": "13px", "lineHeight": "1.5", "paddingLeft": "18px"}, children=[
-            li("It's the same Stuff+ model as Season Reports. Each pitch is graded against "
+            li("It's the same Stuff+ model as the season reports. Each pitch is graded against "
                + ("P4 hitters" if data.STUFF_VIEW == "P4" else "D1 hitters")
                + " (16 stand-in hitters with their mix of whiff, foul and contact skill) across all 12 counts and "
                "both batter sides, weighted the way D1 pitchers of that hand use pitches of that group."),
@@ -2038,16 +2068,20 @@ lab_panel = html.Div(id="lab-panel", style={"display": "none"}, children=[
 
 local_panels = local_tabs.panels(sys.modules[__name__]) if local_tabs else []   # this module, as __main__ or not
 
-# Stores that only Season Reports' callbacks use. They sit in a block of their own, so the page of a visitor
-# without that tab carries none of them.
+# Stores that only the season reports' callbacks use. They sit in a block of their own, so the page of a visitor
+# without the Reports tab carries none of them.
 season_stores = html.Div(id="season-stores", children=[
     dcc.Store(id="retag-version", data=0),
     dcc.Store(id="cluster-skip", data=[]), dcc.Store(id="cluster-current-uid"),
     dcc.Store(id="bio-version", data=0), dcc.Store(id="bio-target"),
     dcc.Store(id="bbio-version", data=0), dcc.Store(id="bbio-target"),
-    dcc.Store(id="role", data="about")])                 # "pitcher" / "batter" on Season Reports (cb_role)
-_PANELS = [about_panel, lookup_panel, shortlist_panel, pitcher_report, batter_report, game_panel, lab_panel,
-           *local_panels]
+    dcc.Store(id="role", data="about")])                 # "pitcher" / "batter" for season reports (cb_role)
+# Reports: the filter sidebar, and the report area (season pitcher / batter reports and the game report) beside it.
+reports_panel = html.Div(id="reports-panel", style=_HIDDEN, children=[
+    reports_sidebar,
+    html.Div(id="rp-main", children=[pitcher_report, batter_report, game_panel], style={"flex": "1 1 auto", "minWidth": 0}),
+])
+_PANELS = [about_panel, lookup_panel, shortlist_panel, reports_panel, lab_panel, *local_panels]
 _FULL_PAGE = html.Div([season_stores, selection, html.Div(_PANELS, style={"padding": "12px 16px"})],
                       style={"fontFamily": FONT})
 
@@ -2056,8 +2090,7 @@ _FULL_PAGE = html.Div([season_stores, selection, html.Div(_PANELS, style={"paddi
 # of the page, and to refuse its callbacks. Every component must sit inside one of these blocks (the tab bar
 # is the one exception), so a new tab needs its panel listed here; a local tab's panel is "<value>-panel".
 TAB_BLOCKS = {"about-panel": "about", "lookup-panel": "lookup", "shortlist-panel": "shortlist",
-              "season-stores": "season", "picker-controls": "season", "report": "season", "batter-report": "season",
-              "gr-controls": "game", "game-panel": "game", "lab-panel": "lab",
+              "season-stores": "reports", "reports-panel": "reports", "lab-panel": "lab",
               **{f"{value}-panel": value for _, value in _LOCAL_TABS}}
 if _unplaced := [p.id for p in _PANELS if p.id not in TAB_BLOCKS]:
     raise RuntimeError(f"These panels aren't assigned to a tab in TAB_BLOCKS, so anyone could open them: {_unplaced}")
@@ -2065,7 +2098,7 @@ if _unplaced := [p.id for p in _PANELS if p.id not in TAB_BLOCKS]:
 # gets every tab, the retired ones included.
 auth.setup(app, layout=_FULL_PAGE, blocks=TAB_BLOCKS, shared={"role-tabs"},
            guests=[value for _, value in _CORE_TABS if value not in RETIRED_TABS],
-           tabs=_CORE_TABS + _LOCAL_TABS, retired=RETIRED_TABS)
+           tabs=_CORE_TABS + _LOCAL_TABS, retired=RETIRED_TABS, renamed=RENAMED_TABS)
 
 
 def _page():
@@ -2080,12 +2113,15 @@ def _page():
 app.layout = _page
 
 
-# ── Season Reports: which report the shared picker serves ────────────────────────────────────────
-# `role` = the Pitcher / Batter toggle on Season Reports, the tab's own value anywhere else. Leaving the tab
-# changes it too, which resets the picker and hides the reports, as switching tabs always has.
-@app.callback(Output("role", "data"), Input("role-tabs", "value"), Input("sr-role", "value"))
-def cb_role(tab, who):
-    return who if tab == "season" else tab
+# ── Season reports: which report the shared picker serves ────────────────────────────────────────
+# `role` = "pitcher" / "batter" while Reports shows season reports; the source ("game" / "upload") on the other
+# two, and the tab's own value anywhere else. Leaving season reports changes it, which resets the season picker
+# and hides its report, as switching tabs always has.
+@app.callback(Output("role", "data"), Input("role-tabs", "value"), Input("sr-role", "value"), Input("rp-source", "value"))
+def cb_role(tab, who, source):
+    if tab != "reports":
+        return tab
+    return who if source == "season" else source
 
 
 # ── Player-role label ────────────────────────────────────────────────────────────────────────────
@@ -2094,20 +2130,52 @@ def cb_label(role):
     return "Batter" if role == "batter" else "Pitcher"
 
 
-# ── About tab: show the About panel, hide the picker controls (reports hide via the player reset) ──
-@app.callback(Output("about-panel", "style"), Output("picker-controls", "style"),
-              Output("shortlist-panel", "style"), Output("lookup-panel", "style"),
-              Output("gr-controls", "style"), Output("game-panel", "style"), Output("lab-panel", "style"),
-              Input("role-tabs", "value"))
-def cb_about_toggle(role):
-    about = {"padding": "8px 4px"} if role == "about" else {"display": "none"}
-    shortlist = {"padding": "8px 4px"} if role == "shortlist" else {"display": "none"}
-    lookup = {"padding": "8px 4px"} if role == "lookup" else {"display": "none"}
-    game = {"display": "block"} if role == "game" else {"display": "none"}
-    lab = {"padding": "8px 4px"} if role == "lab" else {"display": "none"}
-    # Only Season Reports uses the shared player picker; every other tab carries its own controls (or none).
-    picker = {"display": "block"} if role == "season" else {"display": "none"}
-    return about, picker, shortlist, lookup, game, game, lab
+# ── Tabs: show the open tab's panel ──────────────────────────────────────────────────────────────
+@app.callback(Output("about-panel", "style"), Output("shortlist-panel", "style"), Output("lookup-panel", "style"),
+              Output("reports-panel", "style"), Output("lab-panel", "style"), Input("role-tabs", "value"))
+def cb_tab_toggle(tab):
+    pad = {"padding": "8px 4px"}
+    reports = {"display": "flex", "gap": "16px", "alignItems": "flex-start", "padding": "4px 0"}
+    return tuple(style if tab == name else _HIDDEN for name, style in
+                 (("about", pad), ("shortlist", pad), ("lookup", pad), ("reports", reports), ("lab", pad)))
+
+
+# ── Reports: the sidebar's source and Pitcher / Batter, and folding it away ───────────────────────
+@app.callback(Output("picker-controls", "style"), Output("gr-controls", "style"), Output("game-panel", "style"),
+              Input("rp-source", "value"))
+def cb_rp_panels(source):
+    season = source == "season"
+    return ({} if season else _HIDDEN), (_HIDDEN if season else {}), (_HIDDEN if season else {"display": "block"})
+
+
+@app.callback(Output("sr-role", "value"), Output("gr-role", "value"), Input("rp-role", "value"), prevent_initial_call=True)
+def cb_rp_role(who):
+    return who, who
+
+
+@app.callback(Output("gr-source", "value"), Input("rp-source", "value"), prevent_initial_call=True)
+def cb_rp_source(source):
+    if source == "season":
+        raise PreventUpdate                                # the game picker keeps its last source while hidden
+    return "upload" if source == "upload" else "data"
+
+
+@app.callback(Output("rp-side", "data"), Input("rp-side-btn", "n_clicks"), State("rp-side", "data"),
+              prevent_initial_call=True)
+def cb_rp_fold(_n, is_open):
+    return is_open is False                                # open -> folded, folded -> open
+
+
+@app.callback(Output("rp-side-wrap", "style"), Output("rp-side-body", "style"), Output("rp-side-head", "style"),
+              Output("rp-side-title", "style"), Output("rp-side-btn", "children"), Output("rp-side-btn", "title"),
+              Input("rp-side", "data"))
+def cb_rp_side(is_open):
+    title = {"fontWeight": 700, "fontSize": "14px", "color": MAROON}
+    if is_open is not False:
+        return (_SIDE_OPEN, {}, {"display": "flex", "justifyContent": "space-between", "alignItems": "center"},
+                title, "‹ Hide", "Hide the filters")
+    return (_SIDE_FOLDED, _HIDDEN, {"display": "flex", "flexDirection": "column", "alignItems": "center", "gap": "10px"},
+            {**title, "writingMode": "vertical-rl", "fontSize": "13px"}, "›", "Show the filters")
 
 
 # ── Cascading pickers (role-aware; all off the small in-memory index) ─────────────────────────────
@@ -2593,7 +2661,7 @@ def cb_cluster_download(_nc, _np, pitcher, role, years_sel, level, team):
 @app.callback(Output("gr-scope-row", "style"), Output("gr-upload-wrap", "style"), Input("gr-source", "value"))
 def cb_gr_source(source):
     upload = source == "upload"
-    return ({"display": "none"} if upload else _SCOPE_ROW), ({"marginBottom": "8px"} if upload else {"display": "none"})
+    return (_HIDDEN if upload else {}), ({"marginTop": "10px"} if upload else _HIDDEN)
 
 
 @app.callback(Output("gr-upload-id", "data"), Output("gr-upload-info", "children"),

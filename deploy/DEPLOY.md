@@ -177,7 +177,7 @@ machine-local tabs (USC, MAC) and the retired ones are closed to them.
 ```bash
 cd ~/delispice                                                    # as your own user, never sudo
 .venv/bin/python -m delispice_app.auth owner matt                 # set the username + password (asks twice)
-.venv/bin/python -m delispice_app.auth guests about season game   # the tabs guests see
+.venv/bin/python -m delispice_app.auth guests about reports lab   # the tabs guests see
 .venv/bin/python -m delispice_app.auth guests --none              # guests see nothing: sign-in only
 .venv/bin/python -m delispice_app.auth guests --default           # back to the standard tabs
 .venv/bin/python -m delispice_app.auth show                       # owner, every tab, and what guests see

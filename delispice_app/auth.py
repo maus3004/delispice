@@ -108,7 +108,10 @@ def current_user() -> str | None:
 def guest_tabs() -> frozenset:
     """The tabs a guest may open: the file's list, or the default from setup() when the file has none."""
     tabs = load().get("guest_tabs")
-    return _cfg.get("guests", frozenset()) if tabs is None else frozenset(tabs)
+    if tabs is None:
+        return _cfg.get("guests", frozenset())
+    renamed = _cfg.get("renamed", {})                   # a list saved before a tab was renamed still opens it
+    return frozenset(renamed.get(t, t) for t in tabs)
 
 
 def allowed_tabs() -> frozenset | None:
@@ -326,13 +329,13 @@ def _no_store(response):
     return response
 
 
-def setup(dash_app, *, layout, blocks: dict, shared=(), guests=(), tabs=(), retired=()) -> None:
+def setup(dash_app, *, layout, blocks: dict, shared=(), guests=(), tabs=(), retired=(), renamed=None) -> None:
     """Hook auth into the app. ``layout`` is the full page, ``blocks`` {block id: tab} says which part of it is
     which tab, ``shared`` are the ids that belong to no tab, ``guests`` the tabs a guest gets when the file
-    doesn't say, and ``tabs`` [(label, value)] (with ``retired``, the ones off the tab bar) is every tab, for
-    the command line."""
+    doesn't say, ``tabs`` [(label, value)] (with ``retired``, the ones off the tab bar) is every tab, for the
+    command line, and ``renamed`` {old tab: new tab} keeps a guest list saved under old names working."""
     _cfg.update(app=dash_app, layout=layout, blocks=dict(blocks), shared=frozenset(shared),
-                guests=frozenset(guests), tabs=list(tabs), retired=frozenset(retired))
+                guests=frozenset(guests), tabs=list(tabs), retired=frozenset(retired), renamed=dict(renamed or {}))
     _plan.cache_clear()
     if not ENABLED:
         return
@@ -370,7 +373,7 @@ def main(argv=None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("owner", help="set the owner's username and password (asks for the password; "
                                  "signs every browser out)").add_argument("name")
-    g = sub.add_parser("guests", help="set the tabs guests see, e.g.  guests about season game lab")
+    g = sub.add_parser("guests", help="set the tabs guests see, e.g.  guests about reports lab")
     g.add_argument("tabs", nargs="*")
     which = g.add_mutually_exclusive_group()
     which.add_argument("--none", action="store_true", help="guests see nothing: the whole site needs a sign-in")

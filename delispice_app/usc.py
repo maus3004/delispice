@@ -1,8 +1,8 @@
 """USC tab logic (the layout and callbacks are in local_tabs.py, the decisions in usc_decisions.md). On the site,
 only the signed-in owner sees the tab.
 
-A chart file is a hand-charted CSV (ChartPitcher, ChartBatter, ChartPitchType, PitchCall, IntendedLocation,
-PlayResult, Notes, ...) kept alongside a TrackMan file (a practice export or a game). The two should line up
+A chart file is a hand-charted CSV (ChartPitcher, ChartBatter, ChartPitchType, PitchCall, PlayResult, Notes,
+...) kept alongside a TrackMan file (a practice export or a game). The two should line up
 row for row, but TrackMan misses pitches, so they are paired plate appearance by plate appearance:
 
   1. TrackMan rows: Live throws only in a practice export (PitchSession), every row in a game file.
@@ -405,60 +405,6 @@ def _sequence(out: pl.DataFrame) -> dict[str, list]:
         ended = korbb[i] in ("Strikeout", "Walk") or c in PA_END_CALLS or balls >= 4 or strikes >= 3
         prev = (p[i], b[i])
     return seq
-
-
-# ── Loc%: did the pitch cross inside its charted target (ChartIntendedLocation)? ─────────────────────────
-# Matt's definitions (2026-10-31), on delispice's strike zone (report.ZONE) split into 3x3 squares. Side is
-# measured from the batter, + toward him (inside). TrackMan's PlateLocSide is + on the third-base side, where a
-# RHB stands (2026 D1 hit-by-pitches: RHB median +1.8 ft, LHB -1.85 ft), so a RHB's side is PlateLocSide and a
-# LHB's its negative.
-LOC_MARGIN = 0.25                    # ft past the zone's edges that still counts (3 in, about a ball), for every target but Middle
-LOC_EXPAND = 5 / 12                  # ft past the outside edge that still counts for ExpandOutside (5 in)
-LOC_SIDED = {"Inside", "Outside", "ExpandOutside"}   # need the batter's side; the others are symmetric
-
-
-def loc_boxes() -> dict[str, tuple[float, float, float, float]]:
-    """Target -> its region (side from, side to, height from, height to) in ft, side from the batter. Every
-    target is a rectangle, so Loc% (loc_regions) and the pitch card's shading (loc_box_plate) share this."""
-    b, t, h = report.ZONE["b"], report.ZONE["t"], report.ZONE["h"]
-    third, m = (t - b) / 3, LOC_MARGIN
-    return {"Middle": (-h, h, b, t),                                  # anywhere in the zone
-            "Inside": (h / 3, h + m, b - m, t + m),                   # inner 3 squares + the margin
-            "Outside": (-(h + m), -h / 3, b - m, t + m),              # outer 3 squares + the margin
-            # the outer half of the outside column of squares, + 5 in past the edge and the margin above / below
-            "ExpandOutside": (-(h + LOC_EXPAND), -2 * h / 3, b - m, t + m),
-            "Down": (-(h + m), h + m, b - m, b + third),              # bottom 3 squares + the margin
-            "Top": (-(h + m), h + m, t - third, t + m)}               # top 3 squares + the margin
-
-
-def loc_regions() -> dict[str, pl.Expr]:
-    """Target -> whether the pitch crossed in that target's region."""
-    side = pl.when(pl.col("BatterSide") == "Left").then(-pl.col("PlateLocSide")).otherwise(pl.col("PlateLocSide"))
-    ht = pl.col("PlateLocHeight")
-    return {k: side.is_between(s0, s1) & ht.is_between(h0, h1) for k, (s0, s1, h0, h1) in loc_boxes().items()}
-
-
-def loc_box_plate(target: str | None, batter_side: str | None) -> tuple[float, float, float, float] | None:
-    """A target's region in TrackMan's plate coordinates (PlateLocSide from, to, height from, to) for this
-    batter, as the card's location chart draws them; None for an unknown target, or a sided one without
-    the batter's side."""
-    found = {k.lower(): (k, v) for k, v in loc_boxes().items()}.get(re.sub(r"[^a-z]", "", (target or "").lower()))
-    if found is None or (found[0] in LOC_SIDED and batter_side not in ("Left", "Right")):
-        return None
-    s0, s1, h0, h1 = found[1]
-    return (-s1, -s0, h0, h1) if batter_side == "Left" else (s0, s1, h0, h1)
-
-
-def located() -> pl.Expr:
-    """True / False: the pitch crossed inside its charted target. Null (left out of Loc%) without a target,
-    a TrackMan location, a defined target, or, for a sided target, the batter's side."""
-    intent = pl.col("ChartIntendedLocation").str.to_lowercase().str.replace_all("[^a-z]", "")
-    has_side = pl.col("BatterSide").is_in(["Left", "Right"])
-    out = pl.lit(None, pl.Boolean)
-    for k, hit in loc_regions().items():
-        ok = report.HAS_LOC & (has_side if k in LOC_SIDED else pl.lit(True))
-        out = pl.when((intent == k.lower()) & ok).then(hit).otherwise(out)
-    return out
 
 
 def summary_text(s: dict) -> str:

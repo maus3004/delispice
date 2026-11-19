@@ -32,7 +32,7 @@ HOME = "home"
 
 # The paired rows' columns worth eyeballing to check the alignment, in this order (those present are shown).
 PREVIEW_COLS = ["Pitcher", "Batter", "PitchNo", "TaggedPitchType", "ChartPitchType", "RelSpeed", "ExitSpeed",
-                "ChartPitchCall", "ChartIntendedLocation", "ChartKorBB", "ChartPlayResult", "ChartTaggedHitType",
+                "ChartPitchCall", "ChartKorBB", "ChartPlayResult", "ChartTaggedHitType",
                 "ChartNotes", "Pair"]
 NO_CHART = "no chart"                    # a TrackMan file or game uploaded without a chart file
 
@@ -61,29 +61,9 @@ def _combine(tms: dict[str, pl.DataFrame], charts: dict[str, pl.DataFrame], tm_n
     return pl.concat(frames, how="diagonal_relaxed"), blocks
 
 
-def _loc_pct(rows: pl.DataFrame) -> tuple[str, dict[str, str]]:
-    """Loc% (usc.located) for the outing and per arsenal row (pitch name); blank where no pitch has both
-    a charted target and a TrackMan location, or there's no chart."""
-    if "ChartIntendedLocation" not in rows.columns:
-        return "", {}
-    d = rows.with_columns(usc.located().alias("_loc"),
-                          pl.col("TaggedPitchType").replace(report.PITCH_NAMES).alias("_pt"))
-    by = {pt: report.pct(v) for pt, v in d.group_by("_pt").agg(pl.col("_loc").mean()).iter_rows()}
-    return report.pct(d["_loc"].mean()), by
-
-
-def _with_loc(df: pl.DataFrame, values: pl.Expr) -> pl.DataFrame:
-    """The table with a Loc% column right after Zone %."""
-    df = df.with_columns(values.alias("Loc%"))
-    cols = [c for c in df.columns if c != "Loc%"]
-    i = cols.index("Zone %") + 1 if "Zone %" in cols else len(cols)
-    return df.select(cols[:i] + ["Loc%"] + cols[i:])
-
-
 # ── Pitch by pitch: Game Reports' widget (pitch_by_pitch.py), with its own ids so the two tabs' clicks
 # never cross, and without the retag controls ────────────────────────────────────────────────────────
 CHART_UID = "chart:"                     # PitchUID prefix for a pitch only the chart has
-TARGET_FILL, TARGET_LINE = "#E1F5EE", "#0F6E56"   # the charted target on the card: the mock zone drawing's teal
 
 
 def _pbp_store(rows: pl.DataFrame, height_in: int | None) -> dict | None:
@@ -106,12 +86,8 @@ def _pbp_store(rows: pl.DataFrame, height_in: int | None) -> dict | None:
     games = (d.group_by("GameID", maintain_order=True).agg(pl.col("Date").drop_nulls().first().alias("game_date"))
               .with_columns(pl.lit(None, pl.Utf8).alias("opponent"), pl.lit(1).alias("games_that_day")))
     retagged = set(d["PitchUID"].to_list()) & set(data.load_retags()["pitch"])
-    store = pitch_by_pitch.pitch_store(d, games, pitch_by_pitch.GAME, retagged,
-                                       upload=d["Level"].is_null().all(), height_in=height_in)
-    intent = (dict(zip(d["PitchUID"].to_list(), d["ChartIntendedLocation"].to_list()))
-              if "ChartIntendedLocation" in d.columns else {})
-    store["p"]["intent"] = [intent.get(u) for u in store["p"]["uid"]]   # the card's target, in the store's order
-    return store
+    return pitch_by_pitch.pitch_store(d, games, pitch_by_pitch.GAME, retagged,
+                                      upload=d["Level"].is_null().all(), height_in=height_in)
 
 
 def _pbp_row(p, i, metric, selected):
@@ -171,8 +147,6 @@ def _pbp_section(m):
                 html.Div(style={"width": "190px", "flex": "0 0 190px", "display": "flex", "flexDirection": "column",
                                 "gap": "8px"}, children=[
                     html.Div([html.Div("Tag", style=m._PBP_LABEL), html.Div(id="usc-pbp-tag")], style=m._PBP_BOX),
-                    html.Div([html.Div("Intended location", style=m._PBP_LABEL), html.Div(id="usc-pbp-intent")],
-                             style=m._PBP_BOX),
                     html.Div(id="usc-pbp-grades", style=m._PBP_BOX),
                     html.Div(id="usc-pbp-outcome", style=m._PBP_BOX),
                 ]),
@@ -267,10 +241,7 @@ def _report_view(m, pitcher: str, rows: pl.DataFrame, export: bool = False) -> t
     height_in = (bio or {}).get("height_in")
     ars, _contact, stuff = game_report.arsenal_tables(rows, height_in, present)
     ars = ars.drop("RV/100", strict=False)                                       # not in the USC report (Matt)
-    loc_all, loc_by = _loc_pct(rows)
-    line = _with_loc(game_report.line_table(rows, present), pl.lit(loc_all))
-    if ars.height:
-        ars = _with_loc(ars, pl.col("Pitch").replace_strict(loc_by, default=""))
+    line = game_report.line_table(rows, present)
     stuff = [{**g, "key": g["row"]["Pitch"]} for g in stuff]
 
     def graph(fig, name, grow):
@@ -560,10 +531,6 @@ def panels(m) -> list:
                       dcc.Dropdown(id="usc-games", options=[], value=[], multi=True, placeholder="Pick one or more games…",
                                    style={"width": "640px", "fontSize": "13px"})],
                      style={"display": "flex", "alignItems": "center", "marginTop": "8px"}),
-            dcc.Upload(id="usc-db-chart", accept=".csv", multiple=True, max_size=game_report.UPLOAD_MAX_BYTES,
-                       style={**m._UPLOAD_BOX, "marginTop": "8px"},
-                       children=html.Div(["Drag the chart file(s) for these games here, or ", html.A("choose them"),
-                                          html.Div("Optional · each pairs with the game on its date", style=note)])),
         ]),
         # The report (what the PDF will hold): shown once the files are paired.
         html.Div(id="usc-report-wrap", style={"display": "none"}, children=[
@@ -627,20 +594,19 @@ def panels(m) -> list:
     @m.app.callback(
         Output("usc-key", "data"), Output("usc-result", "children"), Output("usc-dl-btn", "style"),
         Output("usc-pitcher", "options"), Output("usc-pitcher", "value"), Output("usc-report-wrap", "style"),
-        Input("usc-upload", "contents"), Input("usc-games", "value"), Input("usc-db-chart", "contents"),
-        Input("usc-source", "value"),
-        State("usc-upload", "filename"), State("usc-db-chart", "filename"), State("usc-key", "data"),
+        Input("usc-upload", "contents"), Input("usc-games", "value"), Input("usc-source", "value"),
+        State("usc-upload", "filename"), State("usc-key", "data"),
         State("usc-team", "value"), State("usc-pitcher", "value"), prevent_initial_call=True)
-    def cb_usc_build(up_contents, games, chart_contents, source, up_names, chart_names, old_key, team, old_pitcher):
-        """Read the files (or the chosen games), pair each chart with its TrackMan file, keep the result
-        in this server's memory for the session, show how the rows lined up and list the pitchers."""
+    def cb_usc_build(up_contents, games, source, up_names, old_key, team, old_pitcher):
+        """Read the files (or the chosen games), pair each uploaded chart with its TrackMan file, keep the
+        result in this server's memory for the session, show how the rows lined up and list the pitchers.
+        Database games come straight from the database, with no chart."""
         hidden = {"display": "none"}
         no_report = ([], None, hidden)
         if ctx.triggered_id == "usc-source":
             return old_key, "", hidden, *no_report           # switching source clears the view
         tms, charts, names, errors, odd = {}, {}, {}, [], []
-        files = (zip(up_names or [], up_contents or []) if source == "upload"
-                 else zip(chart_names or [], chart_contents or []))
+        files = zip(up_names or [], up_contents or []) if source == "upload" else []
         for name, contents in files:
             try:
                 raw = _decode(contents)
@@ -648,13 +614,11 @@ def panels(m) -> list:
                     charts[name], unknown = usc.read_chart(name, raw)
                     if unknown:
                         odd.append(f"{name}: not a TrackMan value, set to Undefined: {', '.join(unknown)}")
-                elif source == "upload":
+                else:
                     up = game_report.read_upload(name, raw)
                     tms[name], names[name] = up["df"], name
                     if "PitchCall" not in up["present"]:      # read_upload's stand-in (InPlay wherever there's
                         tms[name] = tms[name].with_columns(pl.lit(None, pl.Utf8).alias("PitchCall"))  # an EV): the chart has the calls
-                else:
-                    errors.append(f"{name}: not a chart file (no ChartPitcher column); TrackMan rows come from the games picked above.")
             except usc.PairError as e:
                 errors.append(str(e))
             except game_report.UploadError as e:
@@ -679,12 +643,12 @@ def panels(m) -> list:
         # The frames as they were graded (warmups included; games picked together), for "Why this grade".
         sources = list(tms.values()) if source == "upload" else [pl.concat(list(tms.values()), how="diagonal_relaxed")]
         key = game_report.put_upload({"df": combined, "sources": sources}, replaces=old_key)
-        shown = [_block(m, *b) for b in blocks]
+        shown = [_block(m, *b) for b in blocks] if source == "upload" else []     # games have nothing to pair
         pitchers = _pitcher_options(combined)
         values = [o["value"] for o in pitchers]
         pick = old_pitcher if old_pitcher in values else (values[0] if values else None)
-        return (key, msg + shown, {"marginTop": "10px", "fontSize": "13px", "fontFamily": m.FONT, "cursor": "pointer"},
-                pitchers, pick, {} if pitchers else hidden)
+        dl = {"marginTop": "10px", "fontSize": "13px", "fontFamily": m.FONT, "cursor": "pointer"} if source == "upload" else hidden
+        return key, msg + shown, dl, pitchers, pick, {} if pitchers else hidden
 
     @m.app.callback(Output("usc-report", "children"), Output("usc-pbp-store", "data"),
                     Output("usc-stuff-dist", "figure"),
@@ -844,12 +808,10 @@ def panels(m) -> list:
                     Output("usc-pbp-rel-tiles", "children"), Output("usc-pbp-move-tiles", "children"),
                     Output("usc-pbp-spin-tiles", "children"), Output("usc-pbp-tag", "children"),
                     Output("usc-pbp-grades", "children"), Output("usc-pbp-outcome", "children"),
-                    Output("usc-pbp-intent", "children"),
                     Input("usc-pbp-sel", "data"), State("usc-pbp-store", "data"))
     def cb_usc_pbp_card(sel, store):
-        """The selected pitch's card (app.cb_pbp_card without the retag controls), plus its charted target:
-        written under the tag and shaded on the location chart (Loc%'s region, usc.loc_box_plate, in the
-        mock zone drawing's teal). A pitch only the chart has says so under its tag."""
+        """The selected pitch's card (app.cb_pbp_card without the retag controls). A pitch only the chart has
+        says so under its tag."""
         if not store or sel not in store["p"]["uid"]:
             raise PreventUpdate
         i = store["p"]["uid"].index(sel)
@@ -863,22 +825,14 @@ def panels(m) -> list:
                html.Div("Charted only: TrackMan didn't track this pitch", style={"fontSize": "11px", "color": m.MAROON})
                if chart_only else None,
                html.Div("Retagged (saved for everyone)", style={"fontSize": "11px", "color": m.MAROON}) if c["retagged"] else None]
-        target = store["p"]["intent"][i]
-        loc = pitch_by_pitch.location_fig(store, i, mode)
-        box = usc.loc_box_plate(target, store["p"]["bside"][i])
-        if box:
-            loc.add_shape(type="rect", x0=box[0], x1=box[1], y0=box[2], y1=box[3], layer="below",
-                          fillcolor=TARGET_FILL, line=dict(color=TARGET_LINE, width=1))
         return (pitch_by_pitch.release_fig(store, i, mode), pitch_by_pitch.movement_fig(store, i, mode),
-                loc, pitch_by_pitch.tilt_fig(store, i, mode),
+                pitch_by_pitch.location_fig(store, i, mode), pitch_by_pitch.tilt_fig(store, i, mode),
                 m._pbp_tiles([("Release height", c["rel_height"], "ft"), ("Release side", c["rel_side"], "ft"),
                               ("Extension", c["extension"], "ft")]
                              + ([("Arm angle", c["arm"], "est.")] if c["arm"] else [])),
                 m._pbp_tiles([("Vert Break", c["ivb"], "in"), ("Horz Break", c["hb"], "in")]),
                 m._pbp_tiles([("Pitch speed", c["velo"], "mph"), ("Total spin", c["spin"], "rpm"), ("Tilt", c["tilt"], "")]),
-                tag, m._pbp_grades(c), m._pbp_outcome(c),
-                html.Div(target or "Not charted", style={"fontSize": "16px" if target else "13px", "fontWeight": 700 if target else 400,
-                                                         "color": "#222" if target else "#888", "marginTop": "2px"}))
+                tag, m._pbp_grades(c), m._pbp_outcome(c))
 
     @m.app.callback(Output("usc-dl", "data"), Input("usc-dl-btn", "n_clicks"), State("usc-key", "data"),
                     prevent_initial_call=True)

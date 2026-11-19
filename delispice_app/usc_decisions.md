@@ -15,8 +15,8 @@ Every decision here is Matt's unless it says otherwise.
 
 - **Sources** (a picker at the top):
   - **Upload files** (the default): one box. Usually one TrackMan file plus its chart file. With several, a chart goes with the TrackMan file whose Date matches the date in the chart's name ("scoutday 10:30" = Oct 30), then the one that pairs the most rows.
-  - **Database games:** a team (USC Trojans by default), one or more of its games, and an optional chart.
-- **Chart files:** a CSV with a `ChartPitcher` column, which is how a chart is told apart from a TrackMan file. Columns: `ChartPitcher, ChartBatter, ChartPitchType, PitchCall, IntendedLocation, PlayResult, Notes`. Every column gets a `Chart` prefix (`PitchCall` → `ChartPitchCall`) so nothing collides with TrackMan's.
+  - **Database games:** a team (USC Trojans by default) and one or more of its games, scored straight from the database. *(Until 2026-11-19 a chart could be added here too; removed with Loc%, Matt's call.)*
+- **Chart files:** a CSV with a `ChartPitcher` column, which is how a chart is told apart from a TrackMan file. Columns: `ChartPitcher, ChartBatter, ChartPitchType, PitchCall, PlayResult, Notes` (an `IntendedLocation` column is read but no longer used). Every column gets a `Chart` prefix (`PitchCall` → `ChartPitchCall`) so nothing collides with TrackMan's.
 - **Names:** charts use TrackMan's full names, "Last, First" (decided 2026-10-31). Older charts with last names only still pair.
 - **Practice files:** only the `Live` rows are compared (`PitchSession`), because warmups are mixed in between live pitches.
 
@@ -64,41 +64,27 @@ Top to bottom:
 
 1. **Pitcher** dropdown: pitchers in the order they first threw, with pitch counts.
 2. The pitcher's name.
-3. **Line table:** Game Reports' line, plus Loc% after Zone %. Its Strike %, Zone %, Zone-Pre2S%, Chase% and IZ-Whiff% are colored against the D1 all-pitch numbers (section 7).
+3. **Line table:** Game Reports' line. Its Strike %, Zone %, Zone-Pre2S%, Chase% and IZ-Whiff% are colored against the D1 all-pitch numbers (section 7).
 4. **One row:**
    - the **Stuff table**, titled just "Stuff" (the "Stuff+ on the D1 scale" note for a Level-less file was dropped, 2026-11-04, Matt), with every pitch's vs RHB and vs LHB rows open by default. Each grade cell is colored on a gradient (2026-10-31, USC only; first as 10-point bands, then a gradient at Matt's request): white at 100 (since 2026-11-05, the average P4 arm's pitch type vs P4 hitters), fading to green above and red below. The color is full at 130 and 70 (3 SD; 10 points = 1 SD); the full colors are a spreadsheet's red-white-green (`#63be7b`, `#f8696b`);
    - the **movement** chart;
    - the **release point** chart.
-5. **Arsenal:** Game Reports' arsenal without RV/100, plus Loc% after Zone %.
+5. **Arsenal:** Game Reports' arsenal without RV/100.
 6. **Stuff+ distribution** (added 2026-11-05, Matt; moved above pitch by pitch 2026-11-06): Game Reports' chart (`game_report.stuff_dist_fig`), drawn like the velo chart. One usage-weighted curve per pitch type plus a dashed total, using only graded pitches in the type's main Stuff+ group; a type needs 5 graded pitches to draw. It isn't in the reports PDF, same as pitch by pitch.
 7. **Why this grade** (added 2026-11-06, Matt): a Pitch dropdown, the What, Why and Who explanations of that Stuff table row, and a Stuff+ grid on any two of the Why inputs (section 9). It isn't in the reports PDF.
 8. **Pitch by pitch** (added 2026-10-31): Game Reports' widget (pitch log, the selected pitch's release / movement / location / spin panels, tag, grades, outcome).
    - Same code (`pitch_by_pitch.py`), with its own `usc-pbp-*` ids so the two tabs' clicks never cross, and **no retag controls**.
    - The log lists every pitch in paired order, grouped by batter, with how each plate appearance ended. In a practice file the plate appearances come from the chart; in a game, the sections are innings.
    - A pitch only the chart has sits where it was thrown, shows "—" for its numbers, and its card says "Charted only: TrackMan didn't track this pitch". It gets the batter's side from his tracked pitches.
-   - **Charted target on the card** (added 2026-10-31): an "Intended location" box under Tag shows the chart's value as written ("Not charted" when blank). The location chart shades that target's Loc% region in the mock zone drawing's teal (fill `#E1F5EE`, line `#0F6E56`), mirrored for the batter's side. Sided targets aren't shaded without a batter side.
 
 - **Alignment:** the line table, the chart row and the arsenal share the same left and right edges.
 - **No sideways scrolling** (2026-10-31): the block fills the window, up to 1,500 px. The Stuff table keeps its width and the two charts share the rest; the release chart gets a little more, since it has a legend. At 1,280 px the row fits with no scroll.
 - **Which pitches:** the tables count every pitch, including ones TrackMan missed. The charts show only pitches TrackMan measured.
-- **Below the report:** the pairing check (summary, the plate appearances that didn't line up, a rows preview) and a CSV download of the paired rows.
+- **Below the report** (uploads only): the pairing check (summary, the plate appearances that didn't line up, a rows preview) and a CSV download of the paired rows.
 
-## 6. Loc%
+## 6. Loc% (removed 2026-11-19)
 
-Whether a pitch crossed inside its charted target (`IntendedLocation`), on delispice's strike zone split into 3×3 squares. Zone: 1.50–3.38 ft high, ±0.83 ft wide; rows split at 2.13 and 2.75 ft, columns at ±0.28 ft. Side is measured from the batter (BatterSide), so a left-handed batter is mirrored. TrackMan's PlateLocSide is + on the third-base side, where a right-handed batter stands: 2026 D1 hit-by-pitches cross at a median +1.8 ft for right-handed batters and −1.85 ft for left-handed ones. *(Fixed 2026-10-31: the first version had this backwards, so Inside, Outside and ExpandOutside were mirrored.)* The margin is 3 in (0.25 ft). Code: `usc.loc_boxes()`, shared by Loc% and the pitch card's shading.
-
-| Target | Region |
-|---|---|
-| Middle | anywhere in the zone |
-| Inside | the inner column of squares, + the margin past the inside edge and above and below |
-| Outside | the outer column of squares, + the margin past the outside edge and above and below |
-| ExpandOutside | the outer half of the outside column (from 0.55 ft out), + 5 in past the outside edge, + the margin above and below |
-| Down | the bottom row of squares, + the margin below and on both sides |
-| Top | the top row of squares, + the margin above and on both sides |
-
-- **Counted:** pitches with a charted target and a TrackMan location; Inside, Outside and ExpandOutside also need the batter's side. Blank targets are left out. With no chart, Loc% is blank.
-- **Status:** these are the definitions "for now" (2026-10-31). They were revised several times that day.
-- **Scout day files** (after the side fix): 30% overall (71 of 235). By target: Middle 54%, Top 33%, Inside 24%, Down 22%, Outside 19%, ExpandOutside 15%.
+Loc% (did a pitch cross inside its charted `IntendedLocation` target), the pitch card's "Intended location" box and its teal target shading, and the chart upload under Database games were all removed on 2026-11-19: Matt won't be charting targets any more. The chart stays for uploads, for pitch results and the pitches TrackMan missed. The definitions (3×3 zone squares, a 3 in margin, ExpandOutside 5 in past the edge; the side measured from the batter) are in git history before that date if they're ever wanted back.
 
 ## 7. League reference and the arsenal's rate colors
 
@@ -110,7 +96,7 @@ The arsenal's six rate cells (Strike %, Zone %, Zone-Pre2S%, Chase%, Whiff%, IZ-
   - **sd:** the spread of D1 pitchers' own rates for that pitch type, counting pitchers with 20+ pitches in the rate's denominator (`LEAGUE_MIN`).
 - **How:** 2026 D1, verified games, both serving partitions, by the report's own definitions. An independent recount matched all six overall averages.
 - **Combined pitch types** (Matt): Four-Seam with Fastball, Two-Seam with Sinker, Sweeper with Slider (`LEAGUE_GROUPS`). An arsenal row is compared with its combined type.
-- **Colors:** the Stuff table's gradient. White at the D1 average for that pitch type, green above, red below, full at 3 SD (`LEAGUE_FULL_SD`). Higher is green for all six rates. Loc% has no league number and stays uncolored.
+- **Colors:** the Stuff table's gradient. White at the D1 average for that pitch type, green above, red below, full at 3 SD (`LEAGUE_FULL_SD`). Higher is green for all six rates.
 - **2026 D1 overall:** Strike 60.7% ± 6.4, Zone 42.9% ± 5.9, Zone-Pre2S 44.9% ± 6.6, Chase 25.7% ± 6.0, Whiff 24.0% ± 7.1, IZ-Whiff 15.1% ± 5.7 (avg ± SD; 1,993,314 pitches).
 - **Small samples:** with no minimum-pitch rule, a pitch thrown 2–3 times can show 0% or 100% and take full color.
 
@@ -158,4 +144,3 @@ The app's version of `why()` from `backend/research/stuff_model/stuff_explain.ip
 ## Open
 
 - Pairing a plate appearance whose pitcher differs between the files (offered, not built).
-- Revisit the Loc% definitions after more charts.

@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # ensure repo roo
 import webview                                                  # noqa: E402
 
 os.environ.setdefault("DELISPICE_AUTH", "off")                  # desktop window: one person on their own machine, no sign-in
+os.environ.setdefault("DELISPICE_DESKTOP", "1")                 # tabs that save files do it on this Mac (no browser downloads)
 
 from delispice_app.app import app                                # noqa: E402  (import builds the index once)
 

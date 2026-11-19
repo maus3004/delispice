@@ -28,9 +28,10 @@ from dash.exceptions import PreventUpdate
 
 from . import auth, data, game_report, leaderboard, pitch_by_pitch, pitch_lab, report, scouting
 
-# Machine-local tabs: delispice_app/local_tabs.py is untracked, so a machine without it (the server) runs
-# without them. It provides TABS [(label, value)] and panels(app_module) -> [panel], which also registers
-# the tabs' callbacks. Only a missing file is skipped; an error inside it still raises.
+# Local tabs (the USC tab): delispice_app/local_tabs.py provides TABS [(label, value)] and
+# panels(app_module) -> [panel], which also registers the tabs' callbacks. It was Mac-only until 2026-11-18 and is
+# tracked now; sign-in keeps these tabs owner-only on the site. A machine without the file still runs without
+# them. Only a missing file is skipped; an error inside it still raises.
 try:
     local_tabs = importlib.import_module(f"{__package__}.local_tabs")   # not `from . import`: that raises a bare ImportError
 except ModuleNotFoundError as e:
